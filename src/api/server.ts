@@ -1,0 +1,253 @@
+import Fastify, { type FastifyInstance, type FastifyRequest, type FastifyReply } from 'fastify';
+import cookie from '@fastify/cookie';
+import cors from '@fastify/cors';
+import rateLimit from '@fastify/rate-limit';
+import type Database from 'better-sqlite3';
+import { fetchDiscordUser, type DiscordUser } from './discordAuth.js';
+import { signSessionToken, verifySessionToken } from './session.js';
+import { getRecentCases, countCases } from '../store/cases.js';
+import { getRecentActivity, countActivity } from '../store/activity.js';
+import { getStatsTotals } from '../community/store.js';
+import { setSetting } from '../store/settings.js';
+import { getEffectiveFlags, FLAG_KEYS, flagSettingKey, clearFlagCache } from '../store/flags.js';
+import {
+  getChannelSettingsView,
+  CHANNEL_SETTING_KEYS,
+  clearChannelCache,
+} from '../store/channelSettings.js';
+import { fetchGuildChannels, validateChannelValue, type GuildChannel } from './channels.js';
+import { modConfig } from '../config.js';
+
+// Servidor HTTP da API do painel. Trata-se como superfície HOSTIL: CORS trancado ao
+// origin do site, sessão por cookie assinado + httpOnly, verificação de identidade
+// feita no servidor. Ouve só em 127.0.0.1 (o túnel é quem a expõe).
+
+/** Nome do cookie de sessão. */
+const COOKIE = 'vh_session';
+/** Validade da sessão (8 horas). */
+const SESSION_MAX_AGE = 60 * 60 * 8;
+
+/** Nº máximo de casos devolvidos numa listagem (teto anti-abuso). */
+const MAX_CASES = 200;
+
+/** Nº máximo de eventos de atividade por listagem. */
+const MAX_ACTIVITY = 200;
+/** Allowlist de tipos filtráveis no endpoint de atividade. */
+const ACTIVITY_TYPES = new Set(['join', 'leave', 'ban', 'unban', 'kick']);
+
+export interface ServerOptions {
+  /** Única conta autorizada. */
+  allowedUserId: string;
+  /** ÚNICO servidor cujos dados a API serve. */
+  guildId: string;
+  /** Token do bot (para listar canais). */
+  botToken: string;
+  /** Segredo de assinatura do cookie. */
+  sessionSecret: string;
+  /** Origin autorizado no CORS. */
+  allowedOrigin: string;
+  /** Handle de leitura da SQLite do bot. */
+  db: Database.Database;
+  /** Verificador de token (injetável nos testes; default = Discord real). */
+  verifyUser?: (token: string) => Promise<DiscordUser | null>;
+  /** Lista de canais (injetável nos testes; default = REST do Discord). */
+  listChannels?: () => Promise<GuildChannel[]>;
+}
+
+/** Constrói (sem arrancar) a instância Fastify com as rotas da Fase 1. */
+export function buildServer(opts: ServerOptions): FastifyInstance {
+  const verify = opts.verifyUser ?? ((token: string) => fetchDiscordUser(token));
+  const listChannels = opts.listChannels ?? (() => fetchGuildChannels(opts.botToken, opts.guildId));
+  // Cache curto da lista de canais (evita bater na REST do Discord a cada pedido).
+  let chanCache: { at: number; list: GuildChannel[] } | null = null;
+  async function channels(now: number): Promise<GuildChannel[]> {
+    if (chanCache && now - chanCache.at < 30_000) return chanCache.list;
+    const list = await listChannels();
+    chanCache = { at: now, list };
+    return list;
+  }
+
+  const app = Fastify({ logger: false });
+
+  // Cookie assinado (o segredo assina/verifica) + CORS com credenciais só p/ o site.
+  void app.register(cookie, { secret: opts.sessionSecret });
+  void app.register(cors, {
+    origin: opts.allowedOrigin,
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  });
+  // Rate-limit global: superfície exposta à internet. 120 pedidos/min por IP.
+  void app.register(rateLimit, { max: 120, timeWindow: '1 minute' });
+
+  // Healthcheck público (usado pelo túnel).
+  app.get('/health', async () => ({ ok: true }));
+
+  // Troca do token Discord por uma sessão. Verificação SEMPRE no servidor.
+  app.post('/api/session', async (req: FastifyRequest, reply: FastifyReply) => {
+    const body = (req.body ?? {}) as { token?: unknown };
+    const token = typeof body.token === 'string' ? body.token : '';
+    if (!token) return reply.code(400).send({ error: 'missing_token' });
+
+    let user: DiscordUser | null;
+    try {
+      user = await verify(token);
+    } catch {
+      return reply.code(502).send({ error: 'discord_unreachable' });
+    }
+
+    if (!user) return reply.code(401).send({ error: 'invalid_token' });
+    if (user.id !== opts.allowedUserId) return reply.code(403).send({ error: 'blocked' });
+
+    reply.setCookie(COOKIE, user.id, {
+      signed: true,
+      httpOnly: true,
+      secure: true,
+      sameSite: 'none', // site (github.io) e API (túnel) são cross-site
+      path: '/',
+      maxAge: SESSION_MAX_AGE,
+    });
+    // O token no corpo é o mecanismo principal (o painel envia-o no header Authorization);
+    // o cookie fica como fallback para navegadores que aceitam cookies de terceiros.
+    const sessionToken = signSessionToken(user.id, opts.sessionSecret, Date.now(), SESSION_MAX_AGE);
+    return {
+      ok: true,
+      user: { id: user.id, name: user.global_name || user.username },
+      token: sessionToken,
+    };
+  });
+
+  // Tokens revogados por logout. Em memória: perde-se num restart da API, mas os
+  // tokens expiram sozinhos em 8h e o painel é de UMA conta — risco residual aceite.
+  const revoked = new Set<string>();
+
+  // Termina a sessão: limpa o cookie e revoga o Bearer token (se enviado).
+  app.post('/api/logout', async (req: FastifyRequest, reply: FastifyReply) => {
+    const auth = req.headers.authorization;
+    if (auth && auth.startsWith('Bearer ')) {
+      const raw = auth.slice(7);
+      // Só revoga um token VÁLIDO desta conta. Sem esta verificação, POSTs não
+      // autenticados enchiam o Set `revoked` (em memória) com strings arbitrárias —
+      // DoS lento de memória. Um token inválido já é rejeitado pelo guard, revogá-lo
+      // não teria efeito de segurança, só custo de memória.
+      if (verifySessionToken(raw, opts.sessionSecret, Date.now()) === opts.allowedUserId) {
+        revoked.add(raw);
+      }
+    }
+    reply.clearCookie(COOKIE, { path: '/' });
+    return { ok: true };
+  });
+
+  // Guarda de sessão: aceita (1) token no header Authorization (principal, robusto
+  // cross-site) OU (2) o cookie assinado (fallback). Ambos têm de ser da conta certa.
+  const guard = async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    const auth = req.headers.authorization;
+    if (auth && auth.startsWith('Bearer ')) {
+      const raw = auth.slice(7);
+      if (!revoked.has(raw)) {
+        const uid = verifySessionToken(raw, opts.sessionSecret, Date.now());
+        if (uid === opts.allowedUserId) return;
+      }
+    }
+    const raw = req.cookies[COOKIE];
+    if (raw) {
+      const un = req.unsignCookie(raw);
+      if (un.valid && un.value === opts.allowedUserId) return;
+    }
+    await reply.code(401).send({ error: 'unauthenticated' });
+  };
+
+  // Sessão atual + smoke test de leitura da DB (prova o handle partilhado).
+  app.get('/api/me', { preHandler: guard }, async () => {
+    const row = opts.db.prepare('SELECT 1 AS ok').get() as { ok: number } | undefined;
+    return { id: opts.allowedUserId, dbOk: row?.ok === 1 };
+  });
+
+  // Casos de moderação mais recentes do servidor.
+  app.get('/api/cases', { preHandler: guard }, async (req: FastifyRequest) => {
+    const q = (req.query ?? {}) as { limit?: unknown };
+    const raw = typeof q.limit === 'string' ? Number.parseInt(q.limit, 10) : 50;
+    const limit = Math.min(Math.max(Number.isFinite(raw) ? raw : 50, 1), MAX_CASES);
+    return { cases: getRecentCases(opts.db, opts.guildId, limit) };
+  });
+
+  // Estatísticas agregadas do servidor + total de casos (para o dashboard).
+  app.get('/api/stats', { preHandler: guard }, async () => {
+    const totals = getStatsTotals(opts.db, opts.guildId);
+    return { ...totals, totalCases: countCases(opts.db, opts.guildId) };
+  });
+
+  // Registo de atividade (dashboard: joins com convite, leaves, …). Filtro por tipo opcional.
+  app.get('/api/activity', { preHandler: guard }, async (req: FastifyRequest) => {
+    const q = (req.query ?? {}) as { limit?: unknown; type?: unknown };
+    const raw = typeof q.limit === 'string' ? Number.parseInt(q.limit, 10) : 50;
+    const limit = Math.min(Math.max(Number.isFinite(raw) ? raw : 50, 1), MAX_ACTIVITY);
+    const type = typeof q.type === 'string' && ACTIVITY_TYPES.has(q.type) ? q.type : undefined;
+    return {
+      activity: getRecentActivity(opts.db, opts.guildId, limit, type),
+      total: countActivity(opts.db, opts.guildId),
+    };
+  });
+
+  // Estado efetivo dos toggles de subsistemas (override na DB ou default do modConfig).
+  app.get('/api/flags', { preHandler: guard }, async () => {
+    return { flags: getEffectiveFlags(opts.db, opts.guildId, modConfig) };
+  });
+
+  // Liga/desliga um subsistema. ESCRITA — allowlist de chaves + validação estrita.
+  app.patch('/api/flags', { preHandler: guard }, async (req: FastifyRequest, reply: FastifyReply) => {
+    const body = (req.body ?? {}) as { key?: unknown; enabled?: unknown };
+    const key = typeof body.key === 'string' ? body.key : '';
+    const enabled = body.enabled;
+    if (!FLAG_KEYS.has(key)) return reply.code(400).send({ error: 'invalid_key' });
+    if (typeof enabled !== 'boolean') return reply.code(400).send({ error: 'invalid_value' });
+
+    setSetting(opts.db, opts.guildId, flagSettingKey(key), enabled ? 'true' : 'false', Date.now());
+    clearFlagCache(); // este processo reflete já; o bot apanha via TTL
+    // Auditoria (fica no api.log).
+    console.log(`[api] flag ${key}=${enabled} por ${opts.allowedUserId} @ ${new Date().toISOString()}`);
+    return { ok: true, flags: getEffectiveFlags(opts.db, opts.guildId, modConfig) };
+  });
+
+  // Lista de canais do servidor (para os dropdowns do painel).
+  app.get('/api/channels', { preHandler: guard }, async (_req: FastifyRequest, reply: FastifyReply) => {
+    try {
+      return { channels: await channels(Date.now()) };
+    } catch {
+      return reply.code(502).send({ error: 'discord_unreachable' });
+    }
+  });
+
+  // Estado atual das definições de canal.
+  app.get('/api/channel-settings', { preHandler: guard }, async () => {
+    return { settings: getChannelSettingsView(opts.db, opts.guildId, modConfig) };
+  });
+
+  // Altera uma definição de canal. ESCRITA — allowlist + validação contra os canais reais.
+  app.patch(
+    '/api/channel-settings',
+    { preHandler: guard },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const body = (req.body ?? {}) as { key?: unknown; value?: unknown };
+      const key = typeof body.key === 'string' ? body.key : '';
+      const value = typeof body.value === 'string' ? body.value : '';
+      if (!CHANNEL_SETTING_KEYS.has(key)) return reply.code(400).send({ error: 'invalid_key' });
+
+      let validIds: Set<string>;
+      try {
+        validIds = new Set((await channels(Date.now())).map((c) => c.id));
+      } catch {
+        return reply.code(502).send({ error: 'discord_unreachable' });
+      }
+      if (!validateChannelValue(key, value, validIds)) {
+        return reply.code(400).send({ error: 'invalid_value' });
+      }
+
+      setSetting(opts.db, opts.guildId, key, value, Date.now());
+      clearChannelCache();
+      console.log(`[api] channel ${key}=${value} por ${opts.allowedUserId} @ ${new Date().toISOString()}`);
+      return { ok: true, settings: getChannelSettingsView(opts.db, opts.guildId, modConfig) };
+    },
+  );
+
+  return app;
+}
