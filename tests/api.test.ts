@@ -436,6 +436,26 @@ describe('canais API (Fase canais)', () => {
   });
 });
 
+describe('CORS — preflight das escritas', () => {
+  // O painel grava com PATCH (/api/flags e /api/channel-settings). Sem `methods`
+  // explícito o @fastify/cors anuncia só GET,HEAD,POST — o browser bloqueia o PATCH
+  // antes de o enviar e o servidor nunca o vê (surge como "CORS error", 0 bytes).
+  it('anuncia PATCH em access-control-allow-methods', async () => {
+    const app = makeApp(db, { id: ALLOWED, username: 'diogo' });
+    const res = await app.inject({
+      method: 'OPTIONS',
+      url: '/api/channel-settings',
+      headers: {
+        origin: ORIGIN,
+        'access-control-request-method': 'PATCH',
+        'access-control-request-headers': 'content-type,authorization',
+      },
+    });
+    expect(res.statusCode).toBe(204);
+    expect(String(res.headers['access-control-allow-methods'])).toContain('PATCH');
+  });
+});
+
 describe('GET /health', () => {
   it('200 { ok: true }', async () => {
     const app = makeApp(db, null);

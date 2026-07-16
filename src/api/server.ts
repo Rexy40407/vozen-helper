@@ -74,6 +74,10 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
   void app.register(cors, {
     origin: opts.allowedOrigin,
     credentials: true,
+    // PATCH é obrigatório aqui: o painel grava com PATCH (/api/flags e
+    // /api/channel-settings). O default do @fastify/cors é só GET,HEAD,POST — sem
+    // isto o browser bloqueia a escrita antes de a enviar (surge como "CORS error").
+    methods: ['GET', 'HEAD', 'POST', 'PATCH', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
   });
   // Rate-limit global: superfície exposta à internet. 120 pedidos/min por IP.
