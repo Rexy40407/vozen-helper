@@ -422,14 +422,15 @@ export const modConfig: ModConfig = {
       message: 'Bem-vindo(a) {user} a **{server}**! És o membro nº {membercount}. 🎉',
     },
     welcomeDm: {
+      // Texto voltado ao membro → em inglês (comunidade anglófona). Editável no painel.
       enabled: true,
       message:
-        'Olá {user}, bem-vindo(a) a **{server}**! 🎉 És o membro nº {membercount}.\n\n' +
-        'Aqui fica um mini-tour para começares:\n' +
-        '• <#1523496056359489636> — conversa geral, apresenta-te!\n' +
-        '• <#1526360535501639771> — deixa as tuas sugestões para o servidor\n' +
-        '• <#1526360536705404948> — as melhores mensagens vão parar aqui ⭐\n\n' +
-        'Diverte-te e lê as regras. Qualquer dúvida, fala com o staff!',
+        'Hey {user}, welcome to **{server}**! 🎉 You are member #{membercount}.\n\n' +
+        "Here's a quick tour to get you started:\n" +
+        '• <#1523496056359489636> — general chat, come say hi!\n' +
+        '• <#1526360535501639771> — drop your suggestions for the server\n' +
+        '• <#1526360536705404948> — the best messages end up here ⭐\n\n' +
+        'Have fun and make sure to read the rules. Any questions, reach out to the staff!',
     },
     memberCounter: { channelId: '1526361580487573635', template: '📊 Membros: {count}' },
     leveling: {
