@@ -25,6 +25,7 @@ export const FLAG_DEFS: readonly FlagDef[] = [
   { key: 'suggestions', label: 'Sugestões', def: (c) => c.community.suggestions.enabled },
   { key: 'tickets', label: 'Tickets', def: (c) => c.community.tickets.enabled },
   { key: 'bumpreminder', label: 'Bump reminder', def: (c) => c.community.bumpReminder.enabled },
+  { key: 'welcomedm', label: 'DM de boas-vindas', def: (c) => c.community.welcomeDm.enabled },
 ];
 
 /** Conjunto de chaves válidas (para a allowlist na escrita). */

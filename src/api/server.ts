@@ -11,6 +11,13 @@ import { getStatsTotals } from '../community/store.js';
 import { setSetting } from '../store/settings.js';
 import { getEffectiveFlags, FLAG_KEYS, flagSettingKey, clearFlagCache } from '../store/flags.js';
 import {
+  getEffectiveTexts,
+  TEXT_DEFS,
+  TEXT_SETTING_KEYS,
+  textSettingKey,
+  clearTextCache,
+} from '../store/textSettings.js';
+import {
   getChannelSettingsView,
   CHANNEL_SETTING_KEYS,
   clearChannelCache,
@@ -210,6 +217,27 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
     // Auditoria (fica no api.log).
     console.log(`[api] flag ${key}=${enabled} por ${opts.allowedUserId} @ ${new Date().toISOString()}`);
     return { ok: true, flags: getEffectiveFlags(opts.db, opts.guildId, modConfig) };
+  });
+
+  // Textos editáveis (ex.: mensagem da DM de boas-vindas). Override na DB ou default.
+  app.get('/api/text-settings', { preHandler: guard }, async () => {
+    return { texts: getEffectiveTexts(opts.db, opts.guildId, modConfig) };
+  });
+
+  // Edita um texto. ESCRITA — allowlist de chaves + limite de tamanho por chave.
+  app.patch('/api/text-settings', { preHandler: guard }, async (req: FastifyRequest, reply: FastifyReply) => {
+    const body = (req.body ?? {}) as { key?: unknown; value?: unknown };
+    const key = typeof body.key === 'string' ? body.key : '';
+    const value = typeof body.value === 'string' ? body.value : null;
+    if (!TEXT_SETTING_KEYS.has(key)) return reply.code(400).send({ error: 'invalid_key' });
+    if (value === null || value.trim().length === 0) return reply.code(400).send({ error: 'empty' });
+    const def = TEXT_DEFS.find((t) => t.key === key);
+    if (def && value.length > def.maxLen) return reply.code(400).send({ error: 'too_long' });
+
+    setSetting(opts.db, opts.guildId, textSettingKey(key), value, Date.now());
+    clearTextCache(); // este processo reflete já; o bot apanha via TTL
+    console.log(`[api] text ${key} (${value.length} chars) por ${opts.allowedUserId} @ ${new Date().toISOString()}`);
+    return { ok: true, texts: getEffectiveTexts(opts.db, opts.guildId, modConfig) };
   });
 
   // Lista de canais do servidor (para os dropdowns do painel).

@@ -1,6 +1,10 @@
-import { type Client } from 'discord.js';
+import { type Client, type GuildMember } from 'discord.js';
 import type { AppContext } from '../context.js';
+import type { RaidDetector } from '../moderation/raidDetector.js';
 import { renderCounter } from './text.js';
+import { isFeatureEnabled } from '../store/flags.js';
+import { getTextSetting } from '../store/textSettings.js';
+import { shouldSendWelcomeDm, buildWelcomeDm } from './welcomeDm.js';
 import { log } from '../log.js';
 
 // Contador de membros: canal de voz cujo nome mostra a contagem. Respeita o rate
@@ -34,6 +38,50 @@ export async function updateMemberCounter(ctx: AppContext, force = false): Promi
     lastCounterAt = now;
   } catch (err) {
     log.debug('counter rename falhou (rate limit?):', (err as Error).message);
+  }
+}
+
+/**
+ * DM de boas-vindas + mini-tour ao membro novo (estilo Welcomer). Best-effort:
+ * nunca deve partir o fluxo de entrada. Não envia a bots nem durante um raid, e
+ * ignora em silêncio quem tem as DMs fechadas (erro 50007), sem retry.
+ */
+export async function handleWelcomeDm(
+  ctx: AppContext,
+  member: GuildMember,
+  raid: RaidDetector,
+  now = Date.now(),
+): Promise<void> {
+  if (member.guild.id !== ctx.env.guildId) return;
+
+  const enabled = isFeatureEnabled(
+    ctx.db,
+    ctx.env.guildId,
+    'welcomedm',
+    ctx.modConfig.community.welcomeDm.enabled,
+    now,
+  );
+  if (!shouldSendWelcomeDm({ enabled, isBot: member.user.bot, isRaiding: raid.isRaiding(now) })) return;
+
+  const template = getTextSetting(
+    ctx.db,
+    ctx.env.guildId,
+    'welcomedm.message',
+    ctx.modConfig.community.welcomeDm.message,
+    now,
+  );
+  const content = buildWelcomeDm(template, {
+    userMention: `<@${member.id}>`,
+    serverName: member.guild.name,
+    memberCount: member.guild.memberCount,
+  });
+
+  try {
+    await member.send({ content });
+  } catch (err) {
+    // 50007 = "Cannot send messages to this user" (DMs fechadas). Silencioso.
+    const code = (err as { code?: number }).code;
+    if (code !== 50007) log.debug('DM de boas-vindas falhou:', (err as Error).message);
   }
 }
 

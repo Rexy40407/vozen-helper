@@ -358,6 +358,81 @@ describe('flags API (Fase 3/4)', () => {
   });
 });
 
+describe('text-settings API (mensagem editável)', () => {
+  it('GET /api/text-settings devolve os textos (protegida)', async () => {
+    const app = makeApp(db, { id: ALLOWED, username: 'd' });
+    const token = await loginToken(app);
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/text-settings',
+      headers: { authorization: 'Bearer ' + token },
+    });
+    expect(res.statusCode).toBe(200);
+    const texts = (res.json() as { texts: { key: string }[] }).texts;
+    expect(texts.find((t) => t.key === 'welcomedm.message')).toBeTruthy();
+  });
+
+  it('PATCH grava o texto e devolve o efetivo', async () => {
+    const app = makeApp(db, { id: ALLOWED, username: 'd' });
+    const token = await loginToken(app);
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/api/text-settings',
+      headers: { authorization: 'Bearer ' + token },
+      payload: { key: 'welcomedm.message', value: 'Olá {user}!' },
+    });
+    expect(res.statusCode).toBe(200);
+    const texts = (res.json() as { texts: { key: string; value: string }[] }).texts;
+    expect(texts.find((t) => t.key === 'welcomedm.message')?.value).toBe('Olá {user}!');
+  });
+
+  it('PATCH rejeita chave fora da allowlist (400)', async () => {
+    const app = makeApp(db, { id: ALLOWED, username: 'd' });
+    const token = await loginToken(app);
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/api/text-settings',
+      headers: { authorization: 'Bearer ' + token },
+      payload: { key: 'evil.key', value: 'x' },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('PATCH rejeita texto vazio (400)', async () => {
+    const app = makeApp(db, { id: ALLOWED, username: 'd' });
+    const token = await loginToken(app);
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/api/text-settings',
+      headers: { authorization: 'Bearer ' + token },
+      payload: { key: 'welcomedm.message', value: '   ' },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('PATCH rejeita texto gigante (400)', async () => {
+    const app = makeApp(db, { id: ALLOWED, username: 'd' });
+    const token = await loginToken(app);
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/api/text-settings',
+      headers: { authorization: 'Bearer ' + token },
+      payload: { key: 'welcomedm.message', value: 'a'.repeat(1501) },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('PATCH sem sessão → 401', async () => {
+    const app = makeApp(db, { id: ALLOWED, username: 'd' });
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/api/text-settings',
+      payload: { key: 'welcomedm.message', value: 'x' },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+});
+
 describe('canais API (Fase canais)', () => {
   it('GET /api/channels lista os canais (protegida)', async () => {
     const app = makeApp(db, { id: ALLOWED, username: 'd' });

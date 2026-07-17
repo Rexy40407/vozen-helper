@@ -26,7 +26,7 @@ import { handleAuditForNuke } from './events/antinuke.js';
 import { handleMessageScam, handleNickname } from './events/antiscam.js';
 import { runCommunityScheduled } from './community/scheduler.js';
 import { routeCommunityButton, handleCommunityMessage } from './community/router.js';
-import { updateMemberCounter, startCounterJob } from './community/welcome.js';
+import { updateMemberCounter, startCounterJob, handleWelcomeDm } from './community/welcome.js';
 import { bumpStat } from './community/stats.js';
 import { handleStarReaction } from './community/starboard.js';
 import { purgeExpired, deleteLevelsForUser, DAY_MS } from './store/gdpr.js';
@@ -140,6 +140,7 @@ client.on(Events.GuildMemberAdd, (m) => {
   bumpStat(ctx, 'joins');
   void updateMemberCounter(ctx);
   void handleActivityJoin(ctx, m); // registo de atividade (join + convite)
+  void handleWelcomeDm(ctx, m, raidDetector); // DM de boas-vindas + mini-tour
 });
 client.on(Events.GuildMemberRemove, (m) => {
   handleMemberLeaveSticky(ctx, m);

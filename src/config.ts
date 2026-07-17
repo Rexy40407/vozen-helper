@@ -142,6 +142,8 @@ export interface LevelRole {
 export interface CommunityConfig {
   suggestions: { enabled: boolean; channelId: string | null };
   welcome: { enabled: boolean; channelId: string | null; message: string };
+  /** DM privada de boas-vindas + mini-tour ao membro novo (estilo Welcomer). */
+  welcomeDm: { enabled: boolean; message: string };
   /** Canal de voz cujo nome é reescrito com a contagem de membros. */
   memberCounter: { channelId: string | null; template: string };
   leveling: {
@@ -418,6 +420,16 @@ export const modConfig: ModConfig = {
       enabled: false,
       channelId: null,
       message: 'Bem-vindo(a) {user} a **{server}**! És o membro nº {membercount}. 🎉',
+    },
+    welcomeDm: {
+      enabled: true,
+      message:
+        'Olá {user}, bem-vindo(a) a **{server}**! 🎉 És o membro nº {membercount}.\n\n' +
+        'Aqui fica um mini-tour para começares:\n' +
+        '• <#1523496056359489636> — conversa geral, apresenta-te!\n' +
+        '• <#1526360535501639771> — deixa as tuas sugestões para o servidor\n' +
+        '• <#1526360536705404948> — as melhores mensagens vão parar aqui ⭐\n\n' +
+        'Diverte-te e lê as regras. Qualquer dúvida, fala com o staff!',
     },
     memberCounter: { channelId: '1526361580487573635', template: '📊 Membros: {count}' },
     leveling: {

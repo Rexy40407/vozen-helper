@@ -44,6 +44,7 @@ reter com prazo e dar direitos**.
 
 | Local | Dado | Finalidade | Base legal | Retenção |
 |---|---|---|---|---|
+| DM de boas-vindas | menção do próprio membro + contagem no texto enviado | Acolher o membro novo (welcome + mini-tour) | Interesse legítimo | **Não persistido** (enviado no join, sem registo de envios) |
 | `api.log` (VPS) | user_id do dono nas linhas de auditoria de escrita | Auditoria de alterações no painel | Interesse legítimo | **30 dias** (rotação a criar) |
 | Log do túnel (VPS) | IPs de pedidos à API | Diagnóstico do túnel Cloudflare | Interesse legítimo | **7 dias** / sem persistência |
 | Cookie `vh_session` (browser) | id do dono, assinado HMAC | Sessão do painel | **Estritamente necessário** | 8 h (expira sozinho) |
