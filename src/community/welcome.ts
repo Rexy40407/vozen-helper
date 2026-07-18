@@ -25,8 +25,14 @@ export async function updateMemberCounter(ctx: AppContext, force = false): Promi
   const now = Date.now();
   if (!force && (count === lastCounterValue || now - lastCounterAt < COUNTER_MIN_INTERVAL)) return;
 
-  const channel = await guild.channels.fetch(cfg.channelId).catch(() => null);
-  if (!channel || !('setName' in channel)) return;
+  const channel = await guild.channels.fetch(cfg.channelId).catch((e) => {
+    log.warn(`[counter] não consegui buscar o canal ${cfg.channelId}:`, (e as Error)?.message);
+    return null;
+  });
+  if (!channel || !('setName' in channel)) {
+    log.warn(`[counter] canal ${cfg.channelId} não encontrado ou não renomeável.`);
+    return;
+  }
   const name = renderCounter(cfg.template, count);
   if (channel.name === name) {
     lastCounterValue = count;
@@ -36,8 +42,9 @@ export async function updateMemberCounter(ctx: AppContext, force = false): Promi
     await channel.setName(name);
     lastCounterValue = count;
     lastCounterAt = now;
+    log.info(`[counter] canal renomeado para "${name}".`);
   } catch (err) {
-    log.debug('counter rename falhou (rate limit?):', (err as Error).message);
+    log.warn(`[counter] rename falhou para "${name}":`, (err as Error).message);
   }
 }
 
