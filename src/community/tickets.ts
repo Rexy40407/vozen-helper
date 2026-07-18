@@ -31,22 +31,31 @@ export const TICKET_OPEN_ID = 'ticket:open';
 const ticketPanel: Command = {
   data: new SlashCommandBuilder()
     .setName('ticket-panel')
-    .setDescription('Publish the ticket panel in this channel (staff).')
+    .setDescription('Publish the ticket panel (staff).')
+    .addChannelOption((o) =>
+      o
+        .setName('channel')
+        .setDescription('Channel to post the panel in (default: here)')
+        .addChannelTypes(ChannelType.GuildText),
+    )
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     if (!isFeatureEnabled(ctx.db, ctx.env.guildId, 'tickets', ctx.modConfig.community.tickets.enabled)) {
       return void interaction.reply({ content: 'Tickets are disabled.', flags: MessageFlags.Ephemeral });
     }
-    if (!interaction.channel || interaction.channel.type !== ChannelType.GuildText) {
-      return void interaction.reply({ content: 'Run this in a text channel.', flags: MessageFlags.Ephemeral });
+    // Canal-alvo: a opção `channel` (permite postar noutro canal a partir do canal de
+    // comandos) ou, por omissão, o canal onde o comando foi corrido.
+    const target = interaction.options.getChannel('channel') ?? interaction.channel;
+    if (!target || target.type !== ChannelType.GuildText) {
+      return void interaction.reply({ content: 'Pick a text channel.', flags: MessageFlags.Ephemeral });
     }
     const embed = new EmbedBuilder().setTitle('Support').setDescription('Need help? Open a ticket.').setColor(0x5865f2);
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId(TICKET_OPEN_ID).setLabel('Open ticket').setEmoji('🎫').setStyle(ButtonStyle.Primary),
     );
-    await interaction.channel.send({ embeds: [embed], components: [row] });
-    await interaction.reply({ content: 'Panel published.', flags: MessageFlags.Ephemeral });
+    await target.send({ embeds: [embed], components: [row] });
+    await interaction.reply({ content: `Panel published in <#${target.id}>.`, flags: MessageFlags.Ephemeral });
   },
 };
 
