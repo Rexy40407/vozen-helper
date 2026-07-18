@@ -13,14 +13,14 @@ const tag: Command = {
   public: true,
   data: new SlashCommandBuilder()
     .setName('tag')
-    .setDescription('Mostra uma tag guardada.')
-    .addStringOption((o) => o.setName('nome').setDescription('Nome da tag').setRequired(true)) as SlashCommandBuilder,
+    .setDescription('Show a saved tag.')
+    .addStringOption((o) => o.setName('name').setDescription('Tag name').setRequired(true)) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
-    const name = interaction.options.getString('nome', true);
+    const name = interaction.options.getString('name', true);
     const content = getTag(ctx.db, interaction.guildId, name);
     if (!content) {
-      return void interaction.reply({ content: `Não existe a tag \`${name}\`.`, flags: MessageFlags.Ephemeral });
+      return void interaction.reply({ content: `The tag \`${name}\` doesn't exist.`, flags: MessageFlags.Ephemeral });
     }
     const rendered = content
       .replaceAll('{user}', `<@${interaction.user.id}>`)
@@ -31,12 +31,12 @@ const tag: Command = {
 
 const tags: Command = {
   public: true,
-  data: new SlashCommandBuilder().setName('tags').setDescription('Lista as tags disponíveis.') as SlashCommandBuilder,
+  data: new SlashCommandBuilder().setName('tags').setDescription('List available tags.') as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const names = listTags(ctx.db, interaction.guildId);
     await interaction.reply({
-      content: names.length ? `Tags: ${names.map((n) => `\`${n}\``).join(', ')}` : 'Ainda não há tags.',
+      content: names.length ? `Tags: ${names.map((n) => `\`${n}\``).join(', ')}` : 'No tags yet.',
       flags: MessageFlags.Ephemeral,
     });
   },
@@ -45,30 +45,30 @@ const tags: Command = {
 const tagSet: Command = {
   data: new SlashCommandBuilder()
     .setName('tag-set')
-    .setDescription('Cria ou atualiza uma tag (staff).')
+    .setDescription('Create or update a tag (staff).')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-    .addStringOption((o) => o.setName('nome').setDescription('Nome').setRequired(true))
-    .addStringOption((o) => o.setName('conteudo').setDescription('Resposta (aceita {user}/{server})').setRequired(true)) as SlashCommandBuilder,
+    .addStringOption((o) => o.setName('name').setDescription('Name').setRequired(true))
+    .addStringOption((o) => o.setName('content').setDescription('Response (accepts {user}/{server})').setRequired(true)) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
-    const name = interaction.options.getString('nome', true);
-    const content = interaction.options.getString('conteudo', true);
+    const name = interaction.options.getString('name', true);
+    const content = interaction.options.getString('content', true);
     setTag(ctx.db, interaction.guildId, name, content, interaction.user.id, Date.now());
-    await interaction.reply({ content: `Tag \`${name.toLowerCase()}\` guardada.`, flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: `Tag \`${name.toLowerCase()}\` saved.`, flags: MessageFlags.Ephemeral });
   },
 };
 
 const tagDelete: Command = {
   data: new SlashCommandBuilder()
     .setName('tag-delete')
-    .setDescription('Apaga uma tag (staff).')
+    .setDescription('Delete a tag (staff).')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-    .addStringOption((o) => o.setName('nome').setDescription('Nome').setRequired(true)) as SlashCommandBuilder,
+    .addStringOption((o) => o.setName('name').setDescription('Name').setRequired(true)) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
-    const name = interaction.options.getString('nome', true);
+    const name = interaction.options.getString('name', true);
     const ok = deleteTag(ctx.db, interaction.guildId, name);
-    await interaction.reply({ content: ok ? `Tag \`${name}\` apagada.` : `Tag \`${name}\` não existe.`, flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: ok ? `Tag \`${name}\` deleted.` : `Tag \`${name}\` doesn't exist.`, flags: MessageFlags.Ephemeral });
   },
 };
 

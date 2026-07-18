@@ -191,7 +191,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     !allowedChannels.includes(interaction.channelId)
   ) {
     await interaction.reply({
-      content: `Usa os comandos em ${allowedChannels.map((c) => `<#${c}>`).join(' ou ')}.`,
+      content: `Use the commands in ${allowedChannels.map((c) => `<#${c}>`).join(' or ')}.`,
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -203,7 +203,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     log.error(`Erro no comando /${interaction.commandName}:`, err);
     if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
       await interaction
-        .reply({ content: 'Ocorreu um erro ao executar o comando.', ephemeral: true })
+        .reply({ content: 'An error occurred while running the command.', ephemeral: true })
         .catch(() => undefined);
     }
   }

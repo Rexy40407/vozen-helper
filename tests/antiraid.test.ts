@@ -27,7 +27,7 @@ describe('evaluateJoin', () => {
   it('apanha conta demasiado recente', () => {
     const v = evaluateJoin({ accountAgeMs: DAY, hasAvatar: true, username: 'x' }, gate);
     expect(v.action).toBe('kick');
-    expect(v.reason).toContain('recente');
+    expect(v.reason).toContain('too new');
   });
   it('apanha sem avatar', () => {
     expect(evaluateJoin({ accountAgeMs: 30 * DAY, hasAvatar: false, username: 'x' }, gate).action).toBe('kick');

@@ -19,10 +19,10 @@ export interface GateVerdict {
 /** Aplica os filtros pela ordem de severidade; devolve a primeira ação que dispara. */
 export function evaluateJoin(info: JoinInfo, cfg: JoinGateConfig): GateVerdict {
   if (cfg.minAccountAgeMs > 0 && info.accountAgeMs < cfg.minAccountAgeMs) {
-    return { action: cfg.newAccountAction, reason: 'Conta demasiado recente' };
+    return { action: cfg.newAccountAction, reason: 'Account too new' };
   }
   if (cfg.requireAvatar && !info.hasAvatar) {
-    return { action: cfg.noAvatarAction, reason: 'Conta sem avatar' };
+    return { action: cfg.noAvatarAction, reason: 'Account without avatar' };
   }
   const lower = info.username.toLowerCase();
   for (const pat of cfg.blockedUsernameSubstrings) {

@@ -12,13 +12,13 @@ import { log } from '../log.js';
 const privacidade: Command = {
   public: true,
   data: new SlashCommandBuilder()
-    .setName('privacidade')
-    .setDescription('Os teus dados e privacidade (RGPD).')
+    .setName('privacy')
+    .setDescription('Your data and privacy (GDPR).')
     .addSubcommand((s) =>
-      s.setName('dados').setDescription('Recebe por DM tudo o que o bot tem sobre ti.'),
+      s.setName('data').setDescription('Get everything the bot has about you via DM.'),
     )
     .addSubcommand((s) =>
-      s.setName('apagar').setDescription('Apaga os teus dados voluntários (mantém registos de moderação).'),
+      s.setName('erase').setDescription('Erase your voluntary data (keeps moderation records).'),
     ) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
@@ -26,29 +26,29 @@ const privacidade: Command = {
     const userId = interaction.user.id;
     const sub = interaction.options.getSubcommand();
 
-    if (sub === 'dados') {
+    if (sub === 'data') {
       const data = exportUserData(ctx.db, guildId, userId);
       const json = Buffer.from(JSON.stringify(data, null, 2), 'utf8');
       const sent = await interaction.user
         .send({
           content:
-            'Aqui estão todos os dados que o Vozen Helper tem associados a ti. ' +
-            'Para mais detalhes, vê a política de privacidade do painel.',
-          files: [{ attachment: json, name: 'os-meus-dados-vozen.json' }],
+            'Here is all the data Vozen Helper has associated with you. ' +
+            'For more details, see the panel privacy policy.',
+          files: [{ attachment: json, name: 'my-vozen-data.json' }],
         })
         .then(() => true)
         .catch(() => false);
 
       await interaction.reply({
         content: sent
-          ? '📩 Enviei-te os teus dados por mensagem direta.'
-          : '⚠️ Não consegui enviar-te DM (tens as DMs fechadas?). Abre as mensagens diretas e tenta outra vez.',
+          ? '📩 I sent your data to your DMs.'
+          : "⚠️ I couldn't DM you (are your DMs closed?). Open your direct messages and try again.",
         flags: MessageFlags.Ephemeral,
       });
       return;
     }
 
-    if (sub === 'apagar') {
+    if (sub === 'erase') {
       const res = deleteUserData(ctx.db, guildId, userId, Date.now());
       // Auditoria do pedido (prova de cumprimento). Sem dados sensíveis além do id.
       log.info(

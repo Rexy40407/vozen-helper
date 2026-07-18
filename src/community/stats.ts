@@ -41,18 +41,18 @@ export function handleBumpDetection(ctx: AppContext, message: Message): boolean 
 
 const serverstats: Command = {
   public: true,
-  data: new SlashCommandBuilder().setName('serverstats').setDescription('Estatísticas básicas do servidor.') as SlashCommandBuilder,
+  data: new SlashCommandBuilder().setName('serverstats').setDescription('Basic server statistics.') as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const totals = getStatsTotals(ctx.db, interaction.guildId);
     const embed = new EmbedBuilder()
-      .setTitle(`Estatísticas de ${interaction.guild.name}`)
+      .setTitle(`Statistics for ${interaction.guild.name}`)
       .setColor(0x5865f2)
       .addFields(
-        { name: 'Membros', value: String(interaction.guild.memberCount), inline: true },
-        { name: 'Mensagens (registadas)', value: String(totals.messages), inline: true },
-        { name: 'Entradas', value: String(totals.joins), inline: true },
-        { name: 'Saídas', value: String(totals.leaves), inline: true },
+        { name: 'Members', value: String(interaction.guild.memberCount), inline: true },
+        { name: 'Messages (recorded)', value: String(totals.messages), inline: true },
+        { name: 'Joins', value: String(totals.joins), inline: true },
+        { name: 'Leaves', value: String(totals.leaves), inline: true },
       );
     await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
   },

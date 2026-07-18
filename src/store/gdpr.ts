@@ -247,10 +247,10 @@ export function summarizeDeletion(res: DeleteResult): string {
 
   const lines: string[] = [];
   if (delEntries.length === 0) {
-    lines.push('Não havia nenhum dado voluntário teu para apagar.');
+    lines.push('You had no voluntary data to erase.');
   } else {
     const parts = delEntries.map(([t, n]) => `${n}× ${t}`).join(', ');
-    lines.push(`✅ Apagados os teus dados voluntários: ${parts}.`);
+    lines.push(`✅ Erased your voluntary data: ${parts}.`);
   }
 
   if (keptTotal > 0) {
@@ -259,8 +259,8 @@ export function summarizeDeletion(res: DeleteResult): string {
       .map(([t, n]) => `${n}× ${t}`)
       .join(', ');
     lines.push(
-      `ℹ️ Mantidos ${keptParts} por serem registos de moderação — a lei permite conservá-los ` +
-        `por interesse legítimo de segurança e defesa de direitos (art. 17.º/3 do RGPD).`,
+      `ℹ️ Kept ${keptParts} as moderation records — the law allows retaining them ` +
+        `under a legitimate interest of security and defence of rights (GDPR art. 17(3)).`,
     );
   }
   return lines.join('\n');

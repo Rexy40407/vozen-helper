@@ -410,7 +410,7 @@ export const modConfig: ModConfig = {
   },
   nickname: {
     dehoistEnabled: true,
-    fallbackName: 'Membro',
+    fallbackName: 'Member',
     protectedNames: [],
   },
   honeypotChannelId: null,
@@ -419,7 +419,7 @@ export const modConfig: ModConfig = {
     welcome: {
       enabled: false,
       channelId: null,
-      message: 'Bem-vindo(a) {user} a **{server}**! És o membro nº {membercount}. 🎉',
+      message: 'Welcome {user} to **{server}**! You are member #{membercount}. 🎉',
     },
     welcomeDm: {
       // Texto voltado ao membro → em inglês (comunidade anglófona). Editável no painel.
@@ -432,7 +432,7 @@ export const modConfig: ModConfig = {
         '• <#1526360536705404948> — the best messages end up here ⭐\n\n' +
         'Have fun and make sure to read the rules. Any questions, reach out to the staff!',
     },
-    memberCounter: { channelId: '1526361580487573635', template: '📊 Membros: {count}' },
+    memberCounter: { channelId: '1526361580487573635', template: '📊 Members: {count}' },
     leveling: {
       enabled: true,
       announceChannelId: '1523496056359489636', // #general-chat

@@ -79,7 +79,7 @@ export async function handleXpMessage(ctx: AppContext, message: Message, now = D
     const member = message.member ?? (await message.guild.members.fetch(message.author.id).catch(() => null));
     if (member) await applyLevelRoles(ctx, member, newLevel);
     const announceId = resolveLevelupChannel(ctx.db, ctx.env.guildId, cfg.announceChannelId, now);
-    const text = `🎉 <@${message.author.id}> subiu ao **nível ${newLevel}**!`;
+    const text = `🎉 <@${message.author.id}> leveled up to **level ${newLevel}**!`;
     if (announceId) {
       const ch = await message.guild.channels.fetch(announceId).catch(() => null);
       if (ch && ch.isTextBased() && !ch.isDMBased()) await ch.send(text).catch(() => undefined);
@@ -93,8 +93,8 @@ const rank: Command = {
   public: true,
   data: new SlashCommandBuilder()
     .setName('rank')
-    .setDescription('Mostra o teu nível e XP.')
-    .addUserOption((o) => o.setName('user').setDescription('Outro membro')) as SlashCommandBuilder,
+    .setDescription('Shows your level and XP.')
+    .addUserOption((o) => o.setName('user').setDescription('Another member')) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const user = interaction.options.getUser('user') ?? interaction.user;
@@ -102,13 +102,13 @@ const rank: Command = {
     const { level, current, needed } = levelProgress(xp);
     const rankPos = getRank(ctx.db, interaction.guildId, user.id);
     const embed = new EmbedBuilder()
-      .setTitle(`Rank de ${user.username}`)
+      .setTitle(`${user.username}'s rank`)
       .setThumbnail(user.displayAvatarURL())
       .setColor(0x5865f2)
       .addFields(
-        { name: 'Nível', value: String(level), inline: true },
+        { name: 'Level', value: String(level), inline: true },
         { name: 'XP', value: `${current}/${needed}`, inline: true },
-        { name: 'Posição', value: rankPos ? `#${rankPos}` : '—', inline: true },
+        { name: 'Position', value: rankPos ? `#${rankPos}` : '—', inline: true },
       );
     await interaction.reply({ embeds: [embed] });
   },
@@ -116,12 +116,12 @@ const rank: Command = {
 
 const leaderboard: Command = {
   public: true,
-  data: new SlashCommandBuilder().setName('leaderboard').setDescription('Top 10 de XP do servidor.') as SlashCommandBuilder,
+  data: new SlashCommandBuilder().setName('leaderboard').setDescription('Top 10 XP in the server.') as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const top = getLeaderboard(ctx.db, interaction.guildId, 10);
-    if (!top.length) return void interaction.reply({ content: 'Ainda não há XP registado.', flags: MessageFlags.Ephemeral });
-    const lines = top.map((row, i) => `**${i + 1}.** <@${row.userId}> — nível ${levelFromXp(row.xp)} (${row.xp} XP)`);
+    if (!top.length) return void interaction.reply({ content: 'No XP recorded yet.', flags: MessageFlags.Ephemeral });
+    const lines = top.map((row, i) => `**${i + 1}.** <@${row.userId}> — level ${levelFromXp(row.xp)} (${row.xp} XP)`);
     const embed = new EmbedBuilder().setTitle('🏆 Leaderboard').setColor(0xfee75c).setDescription(lines.join('\n'));
     await interaction.reply({ embeds: [embed] });
   },

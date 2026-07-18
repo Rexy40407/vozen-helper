@@ -67,19 +67,19 @@ export class SpamTracker {
     const sameContent = state.recent.filter((r) => r.key === key);
     if (sameContent.length > 0) {
       heat += this.cfg.duplicateHeat;
-      signals.push('duplicado');
+      signals.push('duplicate');
       const channels = new Set(sameContent.map((r) => r.channelId));
       channels.add(ev.channelId);
       if (channels.size >= this.cfg.multiChannelThreshold) {
         heat += this.cfg.multiChannelHeat;
-        signals.push('multi-canal');
+        signals.push('multi-channel');
       }
     }
 
     // Sinais por-mensagem.
     if (ev.mentionCount > this.cfg.mentionLimit) {
       heat += this.cfg.mentionHeat * (ev.mentionCount - this.cfg.mentionLimit);
-      signals.push('menções');
+      signals.push('mentions');
     }
     if (ev.content.length >= this.cfg.capsMinLength && capsRatio(ev.content) >= this.cfg.capsRatio) {
       heat += this.cfg.capsHeat;

@@ -13,16 +13,16 @@ const remind: Command = {
   public: true,
   data: new SlashCommandBuilder()
     .setName('remind')
-    .setDescription('Cria um lembrete.')
-    .addStringOption((o) => o.setName('tempo').setDescription('Ex.: 10m, 2h, 1d').setRequired(true))
-    .addStringOption((o) => o.setName('texto').setDescription('O que lembrar').setRequired(true)) as SlashCommandBuilder,
+    .setDescription('Create a reminder.')
+    .addStringOption((o) => o.setName('time').setDescription('E.g.: 10m, 2h, 1d').setRequired(true))
+    .addStringOption((o) => o.setName('text').setDescription('What to remind you of').setRequired(true)) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
-    const ms = parseDuration(interaction.options.getString('tempo', true));
+    const ms = parseDuration(interaction.options.getString('time', true));
     if (ms === null) {
-      return void interaction.reply({ content: 'Tempo inválido. Ex.: `10m`, `2h`, `1d`.', flags: MessageFlags.Ephemeral });
+      return void interaction.reply({ content: 'Invalid time. E.g.: `10m`, `2h`, `1d`.', flags: MessageFlags.Ephemeral });
     }
-    const text = interaction.options.getString('texto', true);
+    const text = interaction.options.getString('text', true);
     scheduleAction(ctx.db, {
       guildId: interaction.guildId,
       type: 'reminder',
@@ -31,7 +31,7 @@ const remind: Command = {
       payload: JSON.stringify({ channelId: interaction.channelId, text }),
       caseId: null,
     });
-    await interaction.reply({ content: `Ok! Lembro-te daqui a ${formatDuration(ms)}: "${text}"`, flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: `Ok! I'll remind you in ${formatDuration(ms)}: "${text}"`, flags: MessageFlags.Ephemeral });
   },
 };
 

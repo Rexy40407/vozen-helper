@@ -48,51 +48,51 @@ async function setLock(interaction: ChatInputCommandInteraction<'cached'>, lock:
 const lockdown: Command = {
   data: new SlashCommandBuilder()
     .setName('lockdown')
-    .setDescription('Tranca todos os canais de texto (só staff fala).')
+    .setDescription('Locks all text channels (only staff can talk).')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels) as SlashCommandBuilder,
   async execute(interaction) {
     if (!interaction.inCachedGuild()) return;
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const n = await setLock(interaction, true);
-    await interaction.editReply(`🔒 Lockdown: ${n} canal(is) trancado(s).`);
+    await interaction.editReply(`🔒 Lockdown: ${n} channel(s) locked.`);
   },
 };
 
 const unlock: Command = {
   data: new SlashCommandBuilder()
     .setName('unlock')
-    .setDescription('Destranca todos os canais de texto.')
+    .setDescription('Unlocks all text channels.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels) as SlashCommandBuilder,
   async execute(interaction) {
     if (!interaction.inCachedGuild()) return;
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const n = await setLock(interaction, false);
-    await interaction.editReply(`🔓 Unlock: ${n} canal(is) destrancado(s).`);
+    await interaction.editReply(`🔓 Unlock: ${n} channel(s) unlocked.`);
   },
 };
 
 const verifyPanel: Command = {
   data: new SlashCommandBuilder()
     .setName('verify-panel')
-    .setDescription('Publica o painel de verificação (botão) neste canal.')
+    .setDescription('Posts the verification panel (button) in this channel.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     if (!ctx.modConfig.verification.verifiedRoleId) {
-      return void interaction.reply(eph('Define primeiro `verification.verifiedRoleId` na config.'));
+      return void interaction.reply(eph('Set `verification.verifiedRoleId` in the config first.'));
     }
     const embed = new EmbedBuilder()
-      .setTitle('Verificação')
-      .setDescription('Carrega no botão abaixo para teres acesso ao servidor.')
+      .setTitle('Verification')
+      .setDescription('Click the button below to get access to the server.')
       .setColor(0x57f287);
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId(VERIFY_BUTTON_ID).setLabel('Verificar').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(VERIFY_BUTTON_ID).setLabel('Verify').setStyle(ButtonStyle.Success),
     );
     if (interaction.channel && interaction.channel.type === ChannelType.GuildText) {
       await interaction.channel.send({ embeds: [embed], components: [row] });
-      await interaction.reply(eph('Painel publicado.'));
+      await interaction.reply(eph('Panel posted.'));
     } else {
-      await interaction.reply(eph('Corre isto num canal de texto.'));
+      await interaction.reply(eph('Run this in a text channel.'));
     }
   },
 };
@@ -101,36 +101,36 @@ const verifyPanel: Command = {
 export async function handleVerifyButton(interaction: ButtonInteraction, ctx: AppContext): Promise<void> {
   if (!interaction.inCachedGuild()) return;
   const roleId = ctx.modConfig.verification.verifiedRoleId;
-  if (!roleId) return void interaction.reply(eph('Verificação não configurada.'));
+  if (!roleId) return void interaction.reply(eph('Verification not configured.'));
   const member = interaction.member;
   if (member.roles.cache.has(roleId)) {
-    return void interaction.reply(eph('Já estás verificado. ✅'));
+    return void interaction.reply(eph("You're already verified. ✅"));
   }
   try {
-    await member.roles.add(roleId, 'Verificação por botão');
-    await interaction.reply(eph('Verificado! Bem-vindo(a). ✅'));
+    await member.roles.add(roleId, 'Button verification');
+    await interaction.reply(eph('Verified! Welcome. ✅'));
   } catch (err) {
     log.error('Falha a verificar:', err);
-    await interaction.reply(eph('Não consegui atribuir o cargo (permissões/hierarquia?).'));
+    await interaction.reply(eph("Couldn't assign the role (permissions/hierarchy?)."));
   }
 }
 
 const unquarantine: Command = {
   data: new SlashCommandBuilder()
     .setName('unquarantine')
-    .setDescription('Restaura os cargos de um membro em quarentena (anti-nuke).')
+    .setDescription('Restores the roles of a quarantined member (anti-nuke).')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addUserOption((o) => o.setName('user').setDescription('Membro').setRequired(true)) as SlashCommandBuilder,
+    .addUserOption((o) => o.setName('user').setDescription('Member').setRequired(true)) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const user = interaction.options.getUser('user', true);
     if (!isQuarantined(ctx.db, interaction.guildId, user.id)) {
-      return void interaction.reply(eph('Esse utilizador não está em quarentena.'));
+      return void interaction.reply(eph('That user is not in quarantine.'));
     }
     const member = await interaction.guild.members.fetch(user.id).catch(() => null);
-    if (!member) return void interaction.reply(eph('O membro já não está no servidor.'));
+    if (!member) return void interaction.reply(eph('The member is no longer in the server.'));
     const ok = await unquarantineMember(ctx, interaction.guild, member);
-    await interaction.reply(eph(ok ? `Cargos de ${user.tag} restaurados.` : 'Não consegui restaurar.'));
+    await interaction.reply(eph(ok ? `${user.tag}'s roles restored.` : "Couldn't restore."));
   },
 };
 

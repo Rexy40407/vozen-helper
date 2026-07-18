@@ -83,7 +83,7 @@ describe('SpamTracker', () => {
     const v1 = t.record({ userId: 'u', channelId: 'c1', content: 'http://x.com http://y.com', mentionCount: 0 }, 0);
     const v2 = t.record({ userId: 'u', channelId: 'c2', content: 'http://x.com http://y.com', mentionCount: 0 }, 200);
     const v3 = t.record({ userId: 'u', channelId: 'c3', content: 'http://x.com http://y.com', mentionCount: 0 }, 400);
-    expect([v1, v2, v3].some((v) => v.signals.includes('multi-canal'))).toBe(true);
+    expect([v1, v2, v3].some((v) => v.signals.includes('multi-channel'))).toBe(true);
   });
 
   it('o calor decai com o tempo (não pune se espaçado)', () => {
@@ -100,6 +100,6 @@ describe('SpamTracker', () => {
   it('mass mentions somam heat proporcional', () => {
     const t = new SpamTracker(cfg);
     const v = t.record({ userId: 'u', channelId: 'c', content: 'oi', mentionCount: 10 }, 0);
-    expect(v.signals).toContain('menções');
+    expect(v.signals).toContain('mentions');
   });
 });

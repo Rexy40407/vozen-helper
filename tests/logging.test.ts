@@ -45,7 +45,7 @@ describe('formatadores', () => {
     expect(d.removed).toEqual(['a']);
   });
   it('describeAuditAction cobre ações de mod', () => {
-    expect(describeAuditAction(AuditLogEvent.MemberBanAdd)).toBe('baniu');
+    expect(describeAuditAction(AuditLogEvent.MemberBanAdd)).toBe('banned');
     expect(LOGGED_AUDIT_ACTIONS).toContain(AuditLogEvent.ChannelDelete);
   });
 });

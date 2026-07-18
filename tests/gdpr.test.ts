@@ -154,10 +154,10 @@ describe('summarizeDeletion — resposta ao utilizador', () => {
       deleted: { birthdays: 1, levels: 1 },
       kept: { cases: 2, notes: 0, infractions: 0, quarantine: 0 },
     });
-    expect(msg).toMatch(/apagad/i);
+    expect(msg).toMatch(/erased/i);
     expect(msg).toContain('birthdays');
     // Menciona que ficaram 2 casos de moderação e porquê.
-    expect(msg).toMatch(/moderaç/i);
+    expect(msg).toMatch(/moderation/i);
     expect(msg).toContain('2');
   });
 
@@ -166,7 +166,7 @@ describe('summarizeDeletion — resposta ao utilizador', () => {
       deleted: {},
       kept: { cases: 0, notes: 0, infractions: 0, quarantine: 0 },
     });
-    expect(msg).toMatch(/nada|nenhum/i);
+    expect(msg).toMatch(/no voluntary data/i);
   });
 });
 

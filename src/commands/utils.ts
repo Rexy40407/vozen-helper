@@ -19,24 +19,24 @@ function eph(content: string) {
 const slowmode: Command = {
   data: new SlashCommandBuilder()
     .setName('slowmode')
-    .setDescription('Define o slowmode do canal (0 = desligar).')
+    .setDescription("Sets the channel's slowmode (0 = off).")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
     .addIntegerOption((o) =>
-      o.setName('seconds').setDescription('Segundos (0-21600)').setRequired(true).setMinValue(0).setMaxValue(21600),
+      o.setName('seconds').setDescription('Seconds (0-21600)').setRequired(true).setMinValue(0).setMaxValue(21600),
     ) as SlashCommandBuilder,
   async execute(interaction) {
     if (!interaction.inCachedGuild()) return;
     const seconds = interaction.options.getInteger('seconds', true);
     const channel = interaction.channel;
     if (!channel || channel.type !== ChannelType.GuildText) {
-      return void interaction.reply(eph('Só funciona em canais de texto.'));
+      return void interaction.reply(eph('Only works in text channels.'));
     }
     try {
       await channel.setRateLimitPerUser(seconds, 'Slowmode via /slowmode');
-      await interaction.reply(eph(seconds === 0 ? 'Slowmode desligado.' : `Slowmode: ${seconds}s.`));
+      await interaction.reply(eph(seconds === 0 ? 'Slowmode off.' : `Slowmode: ${seconds}s.`));
     } catch (err) {
       log.error('Falha no slowmode:', err);
-      await interaction.reply(eph('Não consegui alterar o slowmode.'));
+      await interaction.reply(eph("Couldn't change the slowmode."));
     }
   },
 };
@@ -44,9 +44,9 @@ const slowmode: Command = {
 const userinfo: Command = {
   data: new SlashCommandBuilder()
     .setName('userinfo')
-    .setDescription('Mostra informação de triagem de um utilizador.')
+    .setDescription('Shows triage information about a user.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
-    .addUserOption((o) => o.setName('user').setDescription('Utilizador').setRequired(true)) as SlashCommandBuilder,
+    .addUserOption((o) => o.setName('user').setDescription('User').setRequired(true)) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const user = interaction.options.getUser('user', true);
@@ -54,19 +54,19 @@ const userinfo: Command = {
     const created = Math.floor(snowflakeToTimestamp(user.id) / 1000);
     const caseCount = getCasesForUser(ctx.db, interaction.guildId, user.id, 100).length;
     const embed = new EmbedBuilder()
-      .setTitle(`Info de ${user.tag}`)
+      .setTitle(`Info for ${user.tag}`)
       .setThumbnail(user.displayAvatarURL())
       .addFields(
         { name: 'ID', value: user.id, inline: true },
-        { name: 'Conta criada', value: `<t:${created}:R>`, inline: true },
-        { name: 'Casos', value: String(caseCount), inline: true },
+        { name: 'Account created', value: `<t:${created}:R>`, inline: true },
+        { name: 'Cases', value: String(caseCount), inline: true },
       );
     if (member?.joinedTimestamp) {
-      embed.addFields({ name: 'Entrou', value: `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>`, inline: true });
+      embed.addFields({ name: 'Joined', value: `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>`, inline: true });
       const roles = [...member.roles.cache.keys()].filter((r) => r !== interaction.guildId);
-      if (roles.length) embed.addFields({ name: 'Cargos', value: roles.map((r) => `<@&${r}>`).join(' ').slice(0, 900) });
+      if (roles.length) embed.addFields({ name: 'Roles', value: roles.map((r) => `<@&${r}>`).join(' ').slice(0, 900) });
     } else {
-      embed.addFields({ name: 'No servidor?', value: 'Não', inline: true });
+      embed.addFields({ name: 'In server?', value: 'No', inline: true });
     }
     await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
   },

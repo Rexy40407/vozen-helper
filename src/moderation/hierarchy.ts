@@ -22,12 +22,12 @@ export type CheckResult = { ok: true } | { ok: false; reason: string };
  *  - só se o role do bot estiver ESTRITAMENTE acima do role do alvo.
  */
 export function canBotActOn(input: TargetCheckInput): CheckResult {
-  if (input.targetIsSelf) return { ok: false, reason: 'Não posso agir sobre mim próprio.' };
-  if (input.targetIsOwner) return { ok: false, reason: 'Não posso agir sobre o dono do servidor.' };
+  if (input.targetIsSelf) return { ok: false, reason: 'I cannot act on myself.' };
+  if (input.targetIsOwner) return { ok: false, reason: 'I cannot act on the server owner.' };
   if (input.botTopPosition <= input.targetTopPosition) {
     return {
       ok: false,
-      reason: 'O role do alvo é igual ou superior ao meu — dá-me um role mais alto.',
+      reason: "The target's role is equal to or higher than mine — give me a higher role.",
     };
   }
   return { ok: true };
@@ -44,7 +44,7 @@ export function canModeratorActOn(
 ): CheckResult {
   if (modIsOwner) return { ok: true };
   if (modTopPosition <= targetTopPosition) {
-    return { ok: false, reason: 'Não podes moderar alguém com um cargo igual ou superior ao teu.' };
+    return { ok: false, reason: 'You cannot moderate someone with a role equal to or higher than yours.' };
   }
   return { ok: true };
 }

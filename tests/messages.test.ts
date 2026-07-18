@@ -11,11 +11,11 @@ describe('buildPunishmentDm', () => {
 
   it('omite duração em warn', () => {
     const dm = buildPunishmentDm('warn', 'S', 'x', 3_600_000);
-    expect(dm).not.toContain('Duração');
+    expect(dm).not.toContain('Duration');
   });
 
   it('usa fallback quando não há motivo', () => {
-    expect(buildPunishmentDm('kick', 'S', '   ')).toContain('sem motivo indicado');
+    expect(buildPunishmentDm('kick', 'S', '   ')).toContain('no reason given');
   });
 });
 

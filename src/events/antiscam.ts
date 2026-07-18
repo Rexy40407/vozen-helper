@@ -66,7 +66,7 @@ export async function handleNickname(
   if (cfg.dehoistEnabled && (needsDehoist(display) || isUnreadable(display))) {
     const clean = sanitizeName(display, cfg.fallbackName);
     if (clean !== display) {
-      await member.setNickname(clean, 'Dehoist/decancer automático').catch(() => undefined);
+      await member.setNickname(clean, 'Automatic dehoist/decancer').catch(() => undefined);
     }
   }
 

@@ -48,12 +48,12 @@ export function registerLoggingHandlers(client: Client, ctx: AppContext): void {
     if (!message.guildId || message.guildId !== guildId) return;
     if (shouldIgnore(cfg, { channelId: message.channelId, userId: message.author?.id })) return;
     const embed = new EmbedBuilder()
-      .setTitle('Mensagem apagada')
+      .setTitle('Message deleted')
       .setColor(0xed4245)
-      .setDescription(truncate(message.content || '*(sem conteúdo em cache)*'))
+      .setDescription(truncate(message.content || '*(no cached content)*'))
       .addFields(
-        { name: 'Autor', value: message.author ? `<@${message.author.id}>` : 'desconhecido', inline: true },
-        { name: 'Canal', value: `<#${message.channelId}>`, inline: true },
+        { name: 'Author', value: message.author ? `<@${message.author.id}>` : 'unknown', inline: true },
+        { name: 'Channel', value: `<#${message.channelId}>`, inline: true },
       );
     void sendLog(ctx, 'messages', embed);
   });
@@ -63,13 +63,13 @@ export function registerLoggingHandlers(client: Client, ctx: AppContext): void {
     if (oldMsg.content === newMsg.content) return;
     if (shouldIgnore(cfg, { channelId: newMsg.channelId, userId: newMsg.author?.id })) return;
     const embed = new EmbedBuilder()
-      .setTitle('Mensagem editada')
+      .setTitle('Message edited')
       .setColor(0xfee75c)
       .addFields(
-        { name: 'Antes', value: truncate(oldMsg.content || '*(não em cache)*') },
-        { name: 'Depois', value: truncate(newMsg.content || '*(vazio)*') },
-        { name: 'Autor', value: newMsg.author ? `<@${newMsg.author.id}>` : '—', inline: true },
-        { name: 'Canal', value: `<#${newMsg.channelId}>`, inline: true },
+        { name: 'Before', value: truncate(oldMsg.content || '*(not cached)*') },
+        { name: 'After', value: truncate(newMsg.content || '*(empty)*') },
+        { name: 'Author', value: newMsg.author ? `<@${newMsg.author.id}>` : '—', inline: true },
+        { name: 'Channel', value: `<#${newMsg.channelId}>`, inline: true },
       );
     void sendLog(ctx, 'messages', embed);
   });
@@ -79,10 +79,10 @@ export function registerLoggingHandlers(client: Client, ctx: AppContext): void {
     if (member.guild.id !== guildId) return;
     const age = accountAgeMs(member.id, Date.now());
     const embed = new EmbedBuilder()
-      .setTitle('Membro entrou')
+      .setTitle('Member joined')
       .setColor(0x57f287)
       .setDescription(`<@${member.id}> (${member.user.tag})`)
-      .addFields({ name: 'Idade da conta', value: ageLabel(age), inline: true });
+      .addFields({ name: 'Account age', value: ageLabel(age), inline: true });
     void sendLog(ctx, 'members', embed);
   });
 
@@ -92,10 +92,10 @@ export function registerLoggingHandlers(client: Client, ctx: AppContext): void {
       ? [...member.roles.cache.keys()].filter((r) => r !== guildId).map((r) => `<@&${r}>`)
       : [];
     const embed = new EmbedBuilder()
-      .setTitle('Membro saiu')
+      .setTitle('Member left')
       .setColor(0xed4245)
       .setDescription(`<@${member.id}> (${member.user.tag})`);
-    if (roles.length) embed.addFields({ name: 'Cargos que tinha', value: truncate(roles.join(' '), 900) });
+    if (roles.length) embed.addFields({ name: 'Roles they had', value: truncate(roles.join(' '), 900) });
     void sendLog(ctx, 'members', embed);
   });
 
@@ -105,16 +105,16 @@ export function registerLoggingHandlers(client: Client, ctx: AppContext): void {
     if (oldM.nickname !== newM.nickname) {
       fields.push({
         name: 'Nickname',
-        value: `${oldM.nickname ?? '*(nenhum)*'} → ${newM.nickname ?? '*(nenhum)*'}`,
+        value: `${oldM.nickname ?? '*(none)*'} → ${newM.nickname ?? '*(none)*'}`,
         inline: false,
       });
     }
     const rd = diffRoles([...oldM.roles.cache.keys()], [...newM.roles.cache.keys()]);
-    if (rd.added.length) fields.push({ name: 'Cargos +', value: rd.added.map((r) => `<@&${r}>`).join(' '), inline: true });
-    if (rd.removed.length) fields.push({ name: 'Cargos −', value: rd.removed.map((r) => `<@&${r}>`).join(' '), inline: true });
+    if (rd.added.length) fields.push({ name: 'Roles +', value: rd.added.map((r) => `<@&${r}>`).join(' '), inline: true });
+    if (rd.removed.length) fields.push({ name: 'Roles −', value: rd.removed.map((r) => `<@&${r}>`).join(' '), inline: true });
     if (!fields.length) return;
     const embed = new EmbedBuilder()
-      .setTitle('Membro atualizado')
+      .setTitle('Member updated')
       .setColor(0x5865f2)
       .setDescription(`<@${newM.id}>`)
       .addFields(fields);
@@ -126,11 +126,11 @@ export function registerLoggingHandlers(client: Client, ctx: AppContext): void {
     if (newS.guild.id !== guildId) return;
     const uid = newS.id;
     let text: string | null = null;
-    if (!oldS.channelId && newS.channelId) text = `entrou em <#${newS.channelId}>`;
-    else if (oldS.channelId && !newS.channelId) text = `saiu de <#${oldS.channelId}>`;
-    else if (oldS.channelId !== newS.channelId) text = `mudou <#${oldS.channelId}> → <#${newS.channelId}>`;
+    if (!oldS.channelId && newS.channelId) text = `joined <#${newS.channelId}>`;
+    else if (oldS.channelId && !newS.channelId) text = `left <#${oldS.channelId}>`;
+    else if (oldS.channelId !== newS.channelId) text = `moved <#${oldS.channelId}> → <#${newS.channelId}>`;
     if (!text) return;
-    const embed = new EmbedBuilder().setTitle('Voz').setColor(0x5865f2).setDescription(`<@${uid}> ${text}`);
+    const embed = new EmbedBuilder().setTitle('Voice').setColor(0x5865f2).setDescription(`<@${uid}> ${text}`);
     void sendLog(ctx, 'voice', embed);
   });
 
@@ -144,13 +144,13 @@ export function registerLoggingHandlers(client: Client, ctx: AppContext): void {
       entry.action === AuditLogEvent.MemberKick;
     const category: LogCategory = isMod ? 'mod' : 'server';
     const embed = new EmbedBuilder()
-      .setTitle('Ação de servidor')
+      .setTitle('Server action')
       .setColor(isMod ? 0xed4245 : 0xfaa61a)
       .setDescription(
         `<@${entry.executorId ?? '0'}> ${describeAuditAction(entry.action)}` +
-          (entry.targetId ? ` — alvo \`${entry.targetId}\`` : ''),
+          (entry.targetId ? ` — target \`${entry.targetId}\`` : ''),
       );
-    if (entry.reason) embed.addFields({ name: 'Motivo', value: truncate(entry.reason, 500) });
+    if (entry.reason) embed.addFields({ name: 'Reason', value: truncate(entry.reason, 500) });
     void sendLog(ctx, category, embed);
   });
 }

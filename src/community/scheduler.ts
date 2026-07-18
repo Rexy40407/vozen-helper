@@ -32,14 +32,14 @@ export async function runCommunityScheduled(
     case 'birthday_role_remove': {
       const guild = await ctx.client.guilds.fetch(action.guildId).catch(() => null);
       const member = guild ? await guild.members.fetch(action.targetId).catch(() => null) : null;
-      if (member && action.payload) await member.roles.remove(action.payload, 'Fim do aniversário').catch(() => undefined);
+      if (member && action.payload) await member.roles.remove(action.payload, 'Birthday ended').catch(() => undefined);
       break;
     }
     case 'bump_reminder': {
       const { channelId } = safeJson(action.payload);
       const channel = channelId ? await ctx.client.channels.fetch(channelId).catch(() => null) : null;
       if (channel && channel.isTextBased() && !channel.isDMBased()) {
-        await channel.send('🔔 Já passaram 2 horas — podem fazer `/bump` outra vez para subir o servidor no DISBOARD!').catch(() => undefined);
+        await channel.send('🔔 It has been 2 hours — you can `/bump` again to boost the server on DISBOARD!').catch(() => undefined);
       }
       break;
     }
@@ -62,7 +62,7 @@ export function buildReminderSend(
   text: string,
 ): { content: string; allowedMentions: { users: string[] } } {
   return {
-    content: `⏰ <@${targetId}>, lembrete: ${text}`,
+    content: `⏰ <@${targetId}>, reminder: ${text}`,
     allowedMentions: { users: [targetId] },
   };
 }

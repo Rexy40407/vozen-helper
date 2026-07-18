@@ -5,16 +5,16 @@ import { formatDuration } from './duration.js';
 // discord.js para serem testáveis.
 
 const ACTION_PT: Record<CaseType, string> = {
-  warn: 'avisado(a)',
-  timeout: 'silenciado(a) temporariamente',
-  untimeout: 'com o silêncio removido',
-  kick: 'expulso(a)',
-  ban: 'banido(a)',
-  tempban: 'banido(a) temporariamente',
-  unban: 'com o banimento removido',
-  softban: 'expulso(a) (softban — mensagens apagadas)',
-  quarantine: 'colocado(a) em quarentena',
-  unquarantine: 'com a quarentena removida',
+  warn: 'warned',
+  timeout: 'timed out',
+  untimeout: 'no longer timed out',
+  kick: 'kicked',
+  ban: 'banned',
+  tempban: 'temporarily banned',
+  unban: 'no longer banned',
+  softban: 'kicked (softban — messages deleted)',
+  quarantine: 'quarantined',
+  unquarantine: 'released from quarantine',
 };
 
 /**
@@ -27,12 +27,12 @@ export function buildPunishmentDm(
   reason: string,
   durationMs?: number | null,
 ): string {
-  const verb = ACTION_PT[type] ?? 'moderado(a)';
-  let msg = `Foste ${verb} em **${guildName}**.`;
+  const verb = ACTION_PT[type] ?? 'moderated';
+  let msg = `You were ${verb} in **${guildName}**.`;
   if (durationMs && (type === 'timeout' || type === 'tempban')) {
-    msg += `\nDuração: ${formatDuration(durationMs)}.`;
+    msg += `\nDuration: ${formatDuration(durationMs)}.`;
   }
-  msg += `\nMotivo: ${reason.trim() || 'sem motivo indicado'}`;
+  msg += `\nReason: ${reason.trim() || 'no reason given'}`;
   return msg;
 }
 
@@ -40,6 +40,6 @@ export function buildPunishmentDm(
 export function formatCaseLine(c: ModCase): string {
   const when = `<t:${Math.floor(c.createdAt / 1000)}:R>`;
   const dur = c.durationMs ? ` (${formatDuration(c.durationMs)})` : '';
-  const reason = c.reason.trim() || 'sem motivo';
-  return `\`#${c.id}\` **${c.type}**${dur} — ${reason} · por <@${c.moderatorId}> ${when}`;
+  const reason = c.reason.trim() || 'no reason';
+  return `\`#${c.id}\` **${c.type}**${dur} — ${reason} · by <@${c.moderatorId}> ${when}`;
 }

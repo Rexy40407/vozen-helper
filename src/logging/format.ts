@@ -19,27 +19,27 @@ export function ageLabel(ageMs: number): string {
 export function describeAuditAction(action: AuditLogEvent): string {
   switch (action) {
     case AuditLogEvent.MemberBanAdd:
-      return 'baniu';
+      return 'banned';
     case AuditLogEvent.MemberBanRemove:
-      return 'desbaniu';
+      return 'unbanned';
     case AuditLogEvent.MemberKick:
-      return 'expulsou';
+      return 'kicked';
     case AuditLogEvent.ChannelCreate:
-      return 'criou um canal';
+      return 'created a channel';
     case AuditLogEvent.ChannelDelete:
-      return 'apagou um canal';
+      return 'deleted a channel';
     case AuditLogEvent.RoleCreate:
-      return 'criou um cargo';
+      return 'created a role';
     case AuditLogEvent.RoleDelete:
-      return 'apagou um cargo';
+      return 'deleted a role';
     case AuditLogEvent.WebhookCreate:
-      return 'criou um webhook';
+      return 'created a webhook';
     case AuditLogEvent.WebhookDelete:
-      return 'apagou um webhook';
+      return 'deleted a webhook';
     case AuditLogEvent.MemberUpdate:
-      return 'atualizou um membro';
+      return 'updated a member';
     default:
-      return `ação ${action}`;
+      return `action ${action}`;
   }
 }
 

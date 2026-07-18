@@ -51,9 +51,9 @@ export async function handleAuditForNuke(
   const threshold = ctx.modConfig.antiNuke.thresholds[kind];
   if (count < threshold) return;
 
-  const reason = `Anti-nuke: ${count}× ${kind} em ${Math.round(ctx.modConfig.antiNuke.windowMs / 1000)}s`;
+  const reason = `Anti-nuke: ${count}× ${kind} in ${Math.round(ctx.modConfig.antiNuke.windowMs / 1000)}s`;
   if (ctx.modConfig.antiNuke.alertOnly) {
-    await alertOwner(ctx, guild, `⚠️ (alerta) <@${executorId}> — ${reason}. Quarentena NÃO aplicada (alertOnly).`);
+    await alertOwner(ctx, guild, `⚠️ (alert) <@${executorId}> — ${reason}. Quarantine NOT applied (alertOnly).`);
     log.warn(reason + ' — alertOnly, sem ação.');
     return;
   }
@@ -61,7 +61,7 @@ export async function handleAuditForNuke(
   tracker.reset(executorId);
   const member = await guild.members.fetch(executorId).catch(() => null);
   if (member) await quarantineMember(ctx, guild, member, reason, now);
-  else await alertOwner(ctx, guild, `🚨 <@${executorId}> — ${reason}, mas não o encontrei como membro.`);
+  else await alertOwner(ctx, guild, `🚨 <@${executorId}> — ${reason}, but I couldn't find them as a member.`);
 }
 
 async function handleBotAdd(
@@ -74,12 +74,12 @@ async function handleBotAdd(
   log.warn(`Bot adicionado por não-autorizado (${adderId}).`);
   if (botId) {
     const bot = await guild.members.fetch(botId).catch(() => null);
-    await bot?.kick('Anti-nuke: bot não autorizado').catch(() => undefined);
+    await bot?.kick('Anti-nuke: unauthorized bot').catch(() => undefined);
   }
   if (!ctx.modConfig.antiNuke.alertOnly) {
     const adder = await guild.members.fetch(adderId).catch(() => null);
-    if (adder) await quarantineMember(ctx, guild, adder, 'Adicionou um bot não autorizado', now);
+    if (adder) await quarantineMember(ctx, guild, adder, 'Added an unauthorized bot', now);
   } else {
-    await alertOwner(ctx, guild, `⚠️ (alerta) <@${adderId}> adicionou um bot não autorizado.`);
+    await alertOwner(ctx, guild, `⚠️ (alert) <@${adderId}> added an unauthorized bot.`);
   }
 }

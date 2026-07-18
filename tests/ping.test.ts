@@ -7,6 +7,6 @@ describe('formatPing', () => {
   });
 
   it('trata a latência ainda-não-medida (-1)', () => {
-    expect(formatPing(-1)).toContain('a medir');
+    expect(formatPing(-1)).toContain('measuring');
   });
 });

@@ -68,7 +68,7 @@ export async function applyEscalationStep(
     return '→ ban';
   } catch (err) {
     log.error('Falha ao aplicar escalação:', err);
-    return '→ (escalação falhou — ver logs)';
+    return '→ (escalation failed — see logs)';
   }
 }
 

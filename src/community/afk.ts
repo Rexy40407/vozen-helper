@@ -14,13 +14,13 @@ const afk: Command = {
   public: true,
   data: new SlashCommandBuilder()
     .setName('afk')
-    .setDescription('Marca-te como ausente (AFK).')
-    .addStringOption((o) => o.setName('razao').setDescription('Motivo')) as SlashCommandBuilder,
+    .setDescription('Mark yourself as away (AFK).')
+    .addStringOption((o) => o.setName('reason').setDescription('Reason')) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
-    const reason = interaction.options.getString('razao') ?? 'AFK';
+    const reason = interaction.options.getString('reason') ?? 'AFK';
     setAfk(ctx.db, interaction.guildId, interaction.user.id, reason, Date.now());
-    await interaction.reply({ content: `Marquei-te como AFK: ${reason}`, flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: `Marked you as AFK: ${reason}`, flags: MessageFlags.Ephemeral });
   },
 };
 
@@ -32,7 +32,7 @@ export async function handleAfkMessage(ctx: AppContext, message: Message): Promi
   const own = getAfk(ctx.db, message.guildId, message.author.id);
   if (own && Date.now() - own.since > 3000) {
     clearAfk(ctx.db, message.guildId, message.author.id);
-    await message.reply({ content: `Bem-vindo de volta! Removi o teu AFK.`, allowedMentions: { repliedUser: false } }).catch(() => undefined);
+    await message.reply({ content: `Welcome back! I've removed your AFK.`, allowedMentions: { repliedUser: false } }).catch(() => undefined);
   }
 
   // 2) Avisar se mencionou alguém que está AFK.
@@ -40,7 +40,7 @@ export async function handleAfkMessage(ctx: AppContext, message: Message): Promi
   const notes: string[] = [];
   for (const u of mentioned) {
     const afkState = getAfk(ctx.db, message.guildId, u.id);
-    if (afkState) notes.push(`${u.username} está AFK: ${afkState.reason}`);
+    if (afkState) notes.push(`${u.username} is AFK: ${afkState.reason}`);
   }
   if (notes.length) {
     await message.reply({ content: notes.join('\n'), allowedMentions: { repliedUser: false } }).catch(() => undefined);

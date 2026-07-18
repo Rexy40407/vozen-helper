@@ -16,7 +16,7 @@ export function needsDehoist(name: string): boolean {
  * Nome sanitizado: remove caracteres de hoisting iniciais. Se o resultado ficar
  * ilegível (sem letras/números após normalizar), devolve um nome default.
  */
-export function sanitizeName(name: string, fallback = 'Membro'): string {
+export function sanitizeName(name: string, fallback = 'Member'): string {
   let out = name;
   while (out.length > 0 && HOIST_CHARS.includes(out[0])) out = out.slice(1);
   out = out.trim();

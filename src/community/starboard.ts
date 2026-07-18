@@ -69,9 +69,9 @@ export async function handleStarReaction(
 
     const embed = new EmbedBuilder()
       .setColor(0xffac33)
-      .setAuthor({ name: message.author?.tag ?? 'desconhecido', iconURL: message.author?.displayAvatarURL() })
-      .setDescription(message.content || '*(sem texto)*')
-      .addFields({ name: 'Original', value: `[ir para a mensagem](${message.url})` })
+      .setAuthor({ name: message.author?.tag ?? 'unknown', iconURL: message.author?.displayAvatarURL() })
+      .setDescription(message.content || '*(no text)*')
+      .addFields({ name: 'Original', value: `[jump to message](${message.url})` })
       .setFooter({ text: `⭐ ${count}` });
     const image = message.attachments.find((a) => a.contentType?.startsWith('image/'));
     if (image) embed.setImage(image.url);

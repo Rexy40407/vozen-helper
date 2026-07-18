@@ -26,7 +26,7 @@ export async function quarantineMember(
   const roles = removableRoles(member);
   saveQuarantine(ctx.db, guild.id, member.id, roles, reason, now);
   try {
-    if (roles.length) await member.roles.remove(roles, `Quarentena: ${reason}`);
+    if (roles.length) await member.roles.remove(roles, `Quarantine: ${reason}`);
   } catch (err) {
     log.error('Falha a remover cargos na quarentena:', err);
     return false;
@@ -39,7 +39,7 @@ export async function quarantineMember(
     reason,
     createdAt: now,
   });
-  await alertOwner(ctx, guild, `🚨 **Quarentena**: <@${member.id}> — ${reason}`);
+  await alertOwner(ctx, guild, `🚨 **Quarantine**: <@${member.id}> — ${reason}`);
   log.warn(`Quarentena aplicada a ${member.user.tag}: ${reason}`);
   return true;
 }
@@ -57,10 +57,10 @@ export async function unquarantineMember(
   // perder-se-iam para sempre (o design é reversível de propósito).
   if (valid.length) {
     try {
-      await member.roles.add(valid, 'Fim da quarentena');
+      await member.roles.add(valid, 'Quarantine ended');
     } catch (err) {
       log.error('Falha a repor cargos na unquarantine:', err);
-      await alertOwner(ctx, guild, `⚠️ Não consegui repor os cargos de <@${member.id}> — quarentena mantida.`);
+      await alertOwner(ctx, guild, `⚠️ Couldn't restore <@${member.id}>'s roles — quarantine kept.`);
       return false;
     }
   }
@@ -70,7 +70,7 @@ export async function unquarantineMember(
     type: 'unquarantine',
     targetId: member.id,
     moderatorId: ctx.client.user?.id ?? 'bot',
-    reason: 'Restauro manual',
+    reason: 'Manual restore',
     createdAt: Date.now(),
   });
   return true;

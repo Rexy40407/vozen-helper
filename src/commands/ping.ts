@@ -9,13 +9,13 @@ import {
 
 export const data = new SlashCommandBuilder()
   .setName('ping')
-  .setDescription('Verifica se o bot está vivo e mostra a latência.');
+  .setDescription('Checks if the bot is alive and shows the latency.');
 
 /** Formata a resposta do /ping. Pura — testável sem uma interação real. */
 export function formatPing(wsPingMs: number): string {
   // wsPing pode ser -1 antes do primeiro heartbeat; mostrar "a medir" nesse caso.
-  if (wsPingMs < 0) return 'Pong! 🏓 (latência ainda a medir)';
-  return `Pong! 🏓 Latência do gateway: ${wsPingMs} ms`;
+  if (wsPingMs < 0) return 'Pong! 🏓 (latency still measuring)';
+  return `Pong! 🏓 Gateway latency: ${wsPingMs} ms`;
 }
 
 export async function execute(interaction: ChatInputCommandInteraction): Promise<void> {

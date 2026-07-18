@@ -45,7 +45,7 @@ export async function handleMemberJoin(
   //    screening (pending), espera-se pelo fim (handleMemberVerify trata disso).
   const autoRoleId = ctx.modConfig.verification.autoRoleId;
   if (autoRoleId && !member.pending && member.guild.roles.cache.has(autoRoleId)) {
-    await member.roles.add(autoRoleId, 'Auto-role de entrada').catch((err) =>
+    await member.roles.add(autoRoleId, 'Entry auto-role').catch((err) =>
       log.error('Falha a dar o auto-role:', (err as Error).message),
     );
   }
@@ -89,7 +89,7 @@ async function enterRaidMode(ctx: AppContext, member: GuildMember, count: number
 
   if (cfg.raiseVerificationLevel !== null) {
     await guild
-      .setVerificationLevel(cfg.raiseVerificationLevel as GuildVerificationLevel, 'Modo raid')
+      .setVerificationLevel(cfg.raiseVerificationLevel as GuildVerificationLevel, 'Raid mode')
       .catch((err) => log.error('Falha a subir verification level:', (err as Error).message));
   }
   if (cfg.pauseInvites) {
@@ -101,9 +101,9 @@ async function enterRaidMode(ctx: AppContext, member: GuildMember, count: number
   }
 
   const embed = new EmbedBuilder()
-    .setTitle('⚠️ Modo raid ativado')
+    .setTitle('⚠️ Raid mode enabled')
     .setColor(0xed4245)
-    .setDescription(`${count} entradas numa janela curta. Convites pausados e verificação subida.`);
+    .setDescription(`${count} joins in a short window. Invites paused and verification raised.`);
   const channelId = cfg.alertChannelId ?? ctx.modConfig.logging.channels.mod;
   if (channelId) {
     const ch = await ctx.client.channels.fetch(channelId).catch(() => null);
@@ -140,7 +140,7 @@ export async function handleMemberVerify(
     ctx.modConfig.verification.verifiedRoleId,
   ]) {
     if (roleId && newM.guild.roles.cache.has(roleId) && !newM.roles.cache.has(roleId)) {
-      await newM.roles.add(roleId, 'Fim do screening').catch(() => undefined);
+      await newM.roles.add(roleId, 'Screening complete').catch(() => undefined);
     }
   }
 }
