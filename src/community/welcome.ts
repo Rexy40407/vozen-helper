@@ -1,4 +1,4 @@
-import { PermissionFlagsBits, type Client, type GuildMember } from 'discord.js';
+import { type Client, type GuildMember } from 'discord.js';
 import type { AppContext } from '../context.js';
 import type { RaidDetector } from '../moderation/raidDetector.js';
 import { renderCounter } from './text.js';
@@ -33,13 +33,6 @@ export async function updateMemberCounter(ctx: AppContext, force = false): Promi
     log.warn(`[counter] canal ${cfg.channelId} não encontrado ou não renomeável.`);
     return;
   }
-  // Diagnóstico: que permissões tem realmente o bot NESTE canal (conta overrides).
-  const me = guild.members.me;
-  const p = me ? channel.permissionsFor(me) : null;
-  log.info(
-    `[counter] canal="${channel.name}" perms bot: view=${p?.has(PermissionFlagsBits.ViewChannel)} ` +
-      `manage=${p?.has(PermissionFlagsBits.ManageChannels)} connect=${p?.has(PermissionFlagsBits.Connect)}`,
-  );
   const name = renderCounter(cfg.template, count);
   if (channel.name === name) {
     lastCounterValue = count;
@@ -49,8 +42,9 @@ export async function updateMemberCounter(ctx: AppContext, force = false): Promi
     await channel.setName(name);
     lastCounterValue = count;
     lastCounterAt = now;
-    log.info(`[counter] canal renomeado para "${name}".`);
   } catch (err) {
+    // Nota: renomear um canal de VOZ exige a permissão Connect além de ManageChannels
+    // (senão dá "Missing Access"). Este warn torna a falha visível.
     log.warn(`[counter] rename falhou para "${name}":`, (err as Error).message);
   }
 }
