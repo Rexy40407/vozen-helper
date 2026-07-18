@@ -1,4 +1,4 @@
-import { type Client, type GuildMember } from 'discord.js';
+import { PermissionFlagsBits, type Client, type GuildMember } from 'discord.js';
 import type { AppContext } from '../context.js';
 import type { RaidDetector } from '../moderation/raidDetector.js';
 import { renderCounter } from './text.js';
@@ -33,6 +33,13 @@ export async function updateMemberCounter(ctx: AppContext, force = false): Promi
     log.warn(`[counter] canal ${cfg.channelId} não encontrado ou não renomeável.`);
     return;
   }
+  // Diagnóstico: que permissões tem realmente o bot NESTE canal (conta overrides).
+  const me = guild.members.me;
+  const p = me ? channel.permissionsFor(me) : null;
+  log.info(
+    `[counter] canal="${channel.name}" perms bot: view=${p?.has(PermissionFlagsBits.ViewChannel)} ` +
+      `manage=${p?.has(PermissionFlagsBits.ManageChannels)} connect=${p?.has(PermissionFlagsBits.Connect)}`,
+  );
   const name = renderCounter(cfg.template, count);
   if (channel.name === name) {
     lastCounterValue = count;
