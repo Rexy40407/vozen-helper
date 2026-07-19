@@ -10,6 +10,7 @@ import {
   getNotes,
   addInfraction,
   countInfractions,
+  countInfractionsBySource,
   scheduleAction,
   getDueActions,
   deleteScheduled,
@@ -26,8 +27,20 @@ beforeEach(() => {
 
 describe('casos', () => {
   it('insere e numera casos sequencialmente', () => {
-    const a = insertCase(db, { guildId: G, type: 'warn', targetId: U, moderatorId: 'm', createdAt: 1 });
-    const b = insertCase(db, { guildId: G, type: 'ban', targetId: U, moderatorId: 'm', createdAt: 2 });
+    const a = insertCase(db, {
+      guildId: G,
+      type: 'warn',
+      targetId: U,
+      moderatorId: 'm',
+      createdAt: 1,
+    });
+    const b = insertCase(db, {
+      guildId: G,
+      type: 'ban',
+      targetId: U,
+      moderatorId: 'm',
+      createdAt: 2,
+    });
     expect(b).toBe(a + 1);
     expect(getCase(db, G, a)?.type).toBe('warn');
   });
@@ -41,7 +54,14 @@ describe('casos', () => {
   });
 
   it('edita a razão e reporta se o caso não existe', () => {
-    const id = insertCase(db, { guildId: G, type: 'warn', targetId: U, moderatorId: 'm', reason: 'x', createdAt: 1 });
+    const id = insertCase(db, {
+      guildId: G,
+      type: 'warn',
+      targetId: U,
+      moderatorId: 'm',
+      reason: 'x',
+      createdAt: 1,
+    });
     expect(editCaseReason(db, G, id, 'novo')).toBe(true);
     expect(getCase(db, G, id)?.reason).toBe('novo');
     expect(editCaseReason(db, G, 9999, 'nada')).toBe(false);
@@ -64,12 +84,35 @@ describe('strikes', () => {
     expect(countInfractions(db, G, U, 100)).toBe(2);
     expect(countInfractions(db, G, U, 150)).toBe(1);
   });
+
+  it('conta reincidências apenas da origem pedida', () => {
+    addInfraction(db, G, U, 100, 1, 'spam');
+    addInfraction(db, G, U, 200, 1, 'advertising');
+    addInfraction(db, G, U, 300, 1, 'spam');
+    expect(countInfractionsBySource(db, G, U, 'spam', 0)).toBe(2);
+    expect(countInfractionsBySource(db, G, U, 'advertising', 0)).toBe(1);
+    expect(countInfractionsBySource(db, G, U, 'spam', 250)).toBe(1);
+  });
 });
 
 describe('ações agendadas', () => {
   it('devolve só as vencidas e apaga', () => {
-    scheduleAction(db, { guildId: G, type: 'unban', targetId: U, executeAt: 100, payload: '', caseId: null });
-    scheduleAction(db, { guildId: G, type: 'unban', targetId: 'x', executeAt: 500, payload: '', caseId: null });
+    scheduleAction(db, {
+      guildId: G,
+      type: 'unban',
+      targetId: U,
+      executeAt: 100,
+      payload: '',
+      caseId: null,
+    });
+    scheduleAction(db, {
+      guildId: G,
+      type: 'unban',
+      targetId: 'x',
+      executeAt: 500,
+      payload: '',
+      caseId: null,
+    });
     const due = getDueActions(db, 200);
     expect(due).toHaveLength(1);
     expect(due[0].targetId).toBe(U);
@@ -78,7 +121,14 @@ describe('ações agendadas', () => {
   });
 
   it('cancela agendamentos pendentes de um alvo', () => {
-    scheduleAction(db, { guildId: G, type: 'unban', targetId: U, executeAt: 100, payload: '', caseId: null });
+    scheduleAction(db, {
+      guildId: G,
+      type: 'unban',
+      targetId: U,
+      executeAt: 100,
+      payload: '',
+      caseId: null,
+    });
     cancelScheduled(db, G, 'unban', U);
     expect(getDueActions(db, 1000)).toHaveLength(0);
   });

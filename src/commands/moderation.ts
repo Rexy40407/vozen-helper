@@ -23,6 +23,8 @@ import {
   type CaseType,
 } from '../store/cases.js';
 import { log } from '../log.js';
+import { applyServerRuleViolation } from '../moderation/policyEnforcement.js';
+import { SERVER_RULE_LABELS, type ServerRule } from '../moderation/policy.js';
 
 // Comandos de moderação (Fase 2). Cada um: valida hierarquia → executa a ação no
 // Discord (com `reason` para o audit log) → regista o caso → DM ao punido.
@@ -94,6 +96,54 @@ const warn: Command = {
   },
 };
 
+// ─── /violation ──────────────────────────────────────────────────────────────
+// Aplica a consequência publicada sem obrigar a staff a memorizar a escada.
+const violation: Command = {
+  data: new SlashCommandBuilder()
+    .setName('violation')
+    .setDescription('Applies the correct punishment for a server-rule violation.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers)
+    .addUserOption((o) => o.setName('user').setDescription('Member or user').setRequired(true))
+    .addStringOption((o) =>
+      o
+        .setName('rule')
+        .setDescription('Broken server rule')
+        .setRequired(true)
+        .addChoices(
+          ...Object.entries(SERVER_RULE_LABELS).map(([value, name]) => ({ name, value })),
+        ),
+    )
+    .addStringOption((o) =>
+      o.setName('details').setDescription('Evidence or extra context').setMaxLength(400),
+    ) as SlashCommandBuilder,
+  async execute(interaction, ctx) {
+    if (!interaction.inCachedGuild()) return;
+    const user = interaction.options.getUser('user', true);
+    const rule = interaction.options.getString('rule', true) as ServerRule;
+    const details = interaction.options.getString('details') ?? undefined;
+    if (!(rule in SERVER_RULE_LABELS)) return void interaction.reply(eph('Unknown server rule.'));
+
+    const target = await interaction.guild.members.fetch(user.id).catch(() => null);
+    if (target) {
+      const guard = hierarchyGuard(interaction, target);
+      if (!guard.ok) return void interaction.reply(eph(guard.reason));
+    }
+
+    const result = await applyServerRuleViolation(
+      ctx,
+      interaction.guild,
+      user.id,
+      interaction.user.id,
+      rule,
+      details,
+    );
+    const message = result.ok
+      ? `Applied **${SERVER_RULE_LABELS[rule]}** to ${user.tag}: ${result.summary}.`
+      : `Couldn't apply **${SERVER_RULE_LABELS[rule]}** to ${user.tag}: ${result.summary}.`;
+    await interaction.reply(eph(message));
+  },
+};
+
 // ─── /timeout ─────────────────────────────────────────────────────────────────
 const timeout: Command = {
   data: new SlashCommandBuilder()
@@ -111,7 +161,8 @@ const timeout: Command = {
     const reason = interaction.options.getString('reason') ?? '';
     const durStr = interaction.options.getString('duration', true);
     const durMs = parseDuration(durStr);
-    if (durMs === null) return void interaction.reply(eph('Invalid duration. E.g.: `10m`, `1h`, `7d`.'));
+    if (durMs === null)
+      return void interaction.reply(eph('Invalid duration. E.g.: `10m`, `1h`, `7d`.'));
     if (durMs > MAX_TIMEOUT_MS)
       return void interaction.reply(eph("Discord's maximum timeout is 28 days."));
 
@@ -136,7 +187,9 @@ const timeout: Command = {
       createdAt: Date.now(),
     });
     await dmPunished(ctx, user, interaction.guild, 'timeout', reason, durMs);
-    await interaction.reply(eph(`Timed out ${user.tag} for ${formatDuration(durMs)} (case #${caseId}).`));
+    await interaction.reply(
+      eph(`Timed out ${user.tag} for ${formatDuration(durMs)} (case #${caseId}).`),
+    );
   },
 };
 
@@ -274,7 +327,8 @@ const tempban: Command = {
     const user = interaction.options.getUser('user', true);
     const reason = interaction.options.getString('reason') ?? '';
     const durMs = parseDuration(interaction.options.getString('duration', true));
-    if (durMs === null) return void interaction.reply(eph('Invalid duration. E.g.: `1d`, `12h`, `1w`.'));
+    if (durMs === null)
+      return void interaction.reply(eph('Invalid duration. E.g.: `1d`, `12h`, `1w`.'));
 
     const target = await interaction.guild.members.fetch(user.id).catch(() => null);
     if (target) {
@@ -306,7 +360,9 @@ const tempban: Command = {
       payload: '',
       caseId,
     });
-    await interaction.reply(eph(`Banned ${user.tag} for ${formatDuration(durMs)} (case #${caseId}).`));
+    await interaction.reply(
+      eph(`Banned ${user.tag} for ${formatDuration(durMs)} (case #${caseId}).`),
+    );
   },
 };
 
@@ -389,9 +445,16 @@ const purge: Command = {
     .setDescription('Deletes the last N messages in the channel (only <14 days).')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .addIntegerOption((o) =>
-      o.setName('count').setDescription('How many (1-100)').setRequired(true).setMinValue(1).setMaxValue(100),
+      o
+        .setName('count')
+        .setDescription('How many (1-100)')
+        .setRequired(true)
+        .setMinValue(1)
+        .setMaxValue(100),
     )
-    .addUserOption((o) => o.setName('user').setDescription('Only messages from this user')) as SlashCommandBuilder,
+    .addUserOption((o) =>
+      o.setName('user').setDescription('Only messages from this user'),
+    ) as SlashCommandBuilder,
   async execute(interaction) {
     if (!interaction.inCachedGuild()) return;
     const count = interaction.options.getInteger('count', true);
@@ -427,7 +490,9 @@ const modlogs: Command = {
     .setName('modlogs')
     .setDescription("Shows a user's case history.")
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
-    .addUserOption((o) => o.setName('user').setDescription('User').setRequired(true)) as SlashCommandBuilder,
+    .addUserOption((o) =>
+      o.setName('user').setDescription('User').setRequired(true),
+    ) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const user = interaction.options.getUser('user', true);
@@ -441,7 +506,10 @@ const modlogs: Command = {
     if (notes.length) {
       embed.addFields({
         name: `Notes (${notes.length})`,
-        value: notes.map((n) => `• ${n.content} — <@${n.authorId}>`).join('\n').slice(0, 1000),
+        value: notes
+          .map((n) => `• ${n.content} — <@${n.authorId}>`)
+          .join('\n')
+          .slice(0, 1000),
       });
     }
     await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
@@ -455,7 +523,9 @@ const note: Command = {
     .setDescription('Adds a staff note about a member (invisible to the member).')
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
     .addUserOption((o) => o.setName('user').setDescription('Member').setRequired(true))
-    .addStringOption((o) => o.setName('content').setDescription('Note').setRequired(true)) as SlashCommandBuilder,
+    .addStringOption((o) =>
+      o.setName('content').setDescription('Note').setRequired(true),
+    ) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const user = interaction.options.getUser('user', true);
@@ -471,18 +541,25 @@ const reasonCmd: Command = {
     .setName('reason')
     .setDescription('Edits the reason of an existing case.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
-    .addIntegerOption((o) => o.setName('case').setDescription('Case number').setRequired(true).setMinValue(1))
-    .addStringOption((o) => o.setName('reason').setDescription('New reason').setRequired(true)) as SlashCommandBuilder,
+    .addIntegerOption((o) =>
+      o.setName('case').setDescription('Case number').setRequired(true).setMinValue(1),
+    )
+    .addStringOption((o) =>
+      o.setName('reason').setDescription('New reason').setRequired(true),
+    ) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const caseId = interaction.options.getInteger('case', true);
     const newReason = interaction.options.getString('reason', true);
     const ok = editCaseReason(ctx.db, interaction.guildId, caseId, newReason);
-    await interaction.reply(eph(ok ? `Case #${caseId} reason updated.` : `Case #${caseId} not found.`));
+    await interaction.reply(
+      eph(ok ? `Case #${caseId} reason updated.` : `Case #${caseId} not found.`),
+    );
   },
 };
 
 export const modCommands: readonly Command[] = [
+  violation,
   warn,
   timeout,
   untimeout,

@@ -4,6 +4,8 @@ import { findBannedWord, findDangerousAttachment } from '../moderation/contentFi
 import { isExemptMember, isExemptChannel } from '../moderation/exempt.js';
 import { escalateMember } from '../moderation/enforce.js';
 import { log } from '../log.js';
+import { applyImmediateBan, applyServerRuleViolation } from '../moderation/policyEnforcement.js';
+import { RULE_PREFIX } from '../moderation/automodSync.js';
 
 // Filtro de conteúdo PRÓPRIO (pós-publicação) + consumo dos triggers do AutoMod
 // nativo. Complementa o AutoMod: o nativo bloqueia keywords/slurs antes de publicar;
@@ -15,7 +17,8 @@ export async function handleMessageContent(ctx: AppContext, message: Message): P
   if (!message.inGuild() || message.guildId !== ctx.env.guildId) return;
   if (isExemptChannel(message.channelId, ctx.modConfig.automodExemptChannelIds)) return;
 
-  const member = message.member ?? (await message.guild.members.fetch(message.author.id).catch(() => null));
+  const member =
+    message.member ?? (await message.guild.members.fetch(message.author.id).catch(() => null));
   const roleIds = member ? [...member.roles.cache.keys()] : [];
   if (isExemptMember(message.author.id, roleIds, ctx.modConfig)) return;
 
@@ -26,7 +29,9 @@ export async function handleMessageContent(ctx: AppContext, message: Message): P
   if (!banned && !badFile) return;
 
   const reason = banned ? `Palavra proibida: ${banned}` : `Anexo perigoso: ${badFile}`;
-  await message.delete().catch((err) => log.debug('Não apaguei a mensagem:', (err as Error).message));
+  await message
+    .delete()
+    .catch((err) => log.debug('Não apaguei a mensagem:', (err as Error).message));
 
   if (member) {
     const summary = await escalateMember(ctx, message.guild, member, 'filter');
@@ -43,6 +48,36 @@ export async function handleAutomodExecution(
   exec: AutoModerationActionExecution,
 ): Promise<void> {
   if (exec.guild.id !== ctx.env.guildId) return;
+  const rule =
+    exec.autoModerationRule ??
+    (await exec.guild.autoModerationRules.fetch(exec.ruleId).catch(() => null));
+  const moderatorId = ctx.client.user?.id ?? 'bot';
+
+  if (rule?.name === `${RULE_PREFIX} advertising`) {
+    const result = await applyServerRuleViolation(
+      ctx,
+      exec.guild,
+      exec.userId,
+      moderatorId,
+      'advertising',
+      'link blocked by AutoMod',
+    );
+    log.info(`AutoMod publicidade → ${exec.userId}: ${result.summary}`);
+    return;
+  }
+
+  if (rule?.name === `${RULE_PREFIX} presets`) {
+    const result = await applyImmediateBan(
+      ctx,
+      exec.guild,
+      exec.userId,
+      moderatorId,
+      'Server rule: NSFW/NSFL content or hate speech — blocked by Discord AutoMod',
+    );
+    log.info(`AutoMod conteúdo severo → ${exec.userId}: ${result.summary}`);
+    return;
+  }
+
   const member = await exec.guild.members.fetch(exec.userId).catch(() => null);
   if (member) {
     // escalateMember já regista o strike (source 'automod') e escala se atingir degrau.

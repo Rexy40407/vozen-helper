@@ -18,6 +18,9 @@ O plano de desenvolvimento completo está em [`docs/PLAN.md`](docs/PLAN.md); a
 research que o fundamenta em [`docs/RESEARCH-FEATURES-MODERACAO.md`](docs/RESEARCH-FEATURES-MODERACAO.md)
 e [`docs/RESEARCH-DISCORD-API.md`](docs/RESEARCH-DISCORD-API.md).
 
+A correspondência entre as regras públicas, deteção e punições está em
+[`docs/MODERATION-POLICY.md`](docs/MODERATION-POLICY.md).
+
 ## Stack
 
 TypeScript (NodeNext, strict) · discord.js v14 · better-sqlite3 (WAL) · vitest.

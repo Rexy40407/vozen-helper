@@ -26,19 +26,20 @@ export interface DesiredRuleDescriptor {
 /** Constrói os descritores das regras desejadas a partir da config. */
 export function buildDesiredRules(cfg: AutomodConfig): DesiredRuleDescriptor[] {
   const rules: DesiredRuleDescriptor[] = [];
-  const blockAction = {
+  const blockAction = (customMessage: string) => ({
     type: AutoModerationActionType.BlockMessage as const,
-  };
+    metadata: { customMessage },
+  });
 
-  if (cfg.keywords.length > 0) {
+  if (cfg.advertisingKeywords.length > 0) {
     rules.push({
-      name: `${RULE_PREFIX} keywords`,
+      name: `${RULE_PREFIX} advertising`,
       build: () => ({
-        name: `${RULE_PREFIX} keywords`,
+        name: `${RULE_PREFIX} advertising`,
         eventType: AutoModerationRuleEventType.MessageSend,
         triggerType: AutoModerationRuleTriggerType.Keyword,
-        triggerMetadata: { keywordFilter: cfg.keywords },
-        actions: [blockAction],
+        triggerMetadata: { keywordFilter: cfg.advertisingKeywords },
+        actions: [blockAction("Advertising isn't allowed here. Please check the server rules.")],
         enabled: true,
       }),
     });
@@ -57,7 +58,7 @@ export function buildDesiredRules(cfg: AutomodConfig): DesiredRuleDescriptor[] {
         eventType: AutoModerationRuleEventType.MessageSend,
         triggerType: AutoModerationRuleTriggerType.KeywordPreset,
         triggerMetadata: { presets },
-        actions: [blockAction],
+        actions: [blockAction("This content isn't allowed here. Please check the server rules.")],
         enabled: true,
       }),
     });
@@ -70,8 +71,11 @@ export function buildDesiredRules(cfg: AutomodConfig): DesiredRuleDescriptor[] {
         name: `${RULE_PREFIX} mention-spam`,
         eventType: AutoModerationRuleEventType.MessageSend,
         triggerType: AutoModerationRuleTriggerType.MentionSpam,
-        triggerMetadata: { mentionTotalLimit: cfg.mentionLimit! },
-        actions: [blockAction],
+        triggerMetadata: {
+          mentionTotalLimit: cfg.mentionLimit!,
+          mentionRaidProtectionEnabled: cfg.mentionRaidProtectionEnabled,
+        },
+        actions: [blockAction('Please avoid mass mentions and keep the chat readable.')],
         enabled: true,
       }),
     });

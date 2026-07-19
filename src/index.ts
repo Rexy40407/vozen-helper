@@ -32,6 +32,8 @@ import { handleStarReaction } from './community/starboard.js';
 import { purgeExpired, deleteLevelsForUser, DAY_MS } from './store/gdpr.js';
 import { primeInviteCache, registerInviteCacheHandlers } from './community/inviteTracker.js';
 import { handleActivityJoin, handleActivityLeave } from './events/activity.js';
+import { LanguageTracker } from './moderation/languagePolicy.js';
+import { handleMessageLanguage } from './events/languageModeration.js';
 
 // Ponto de entrada do Vozen Helper. Carrega e valida a config, abre a DB, cria o
 // cliente, liga os handlers e faz login. Falha rápido se a config estiver errada.
@@ -71,6 +73,9 @@ function runPurge(): void {
 
 // Tracker de anti-spam (estado em memória).
 const spamTracker = new SpamTracker(modConfig.spam);
+
+// Palavrões casuais isolados não são punidos; abuso dirigido/repetido é moderado.
+const languageTracker = new LanguageTracker(modConfig.language);
 
 // Detetor de raid (janela de joins, em memória).
 const raidDetector = new RaidDetector(modConfig.raid);
@@ -118,6 +123,7 @@ client.on(Events.MessageCreate, (m) => {
   void handleMessageContent(ctx, m);
   void handleMessageSpam(ctx, spamTracker, m);
   void handleMessageScam(ctx, m);
+  void handleMessageLanguage(ctx, languageTracker, m);
   void handleCommunityMessage(ctx, m);
 });
 client.on(Events.MessageUpdate, (_old, m) => {
@@ -147,6 +153,7 @@ client.on(Events.GuildMemberRemove, (m) => {
   bumpStat(ctx, 'leaves');
   void updateMemberCounter(ctx);
   spamTracker.forget(m.id); // liberta o estado de anti-spam de quem saiu (evita leak)
+  languageTracker.forget(m.id);
   deleteLevelsForUser(db, cfg.guildId, m.id); // minimização RGPD: XP não persiste após a saída
   handleActivityLeave(ctx, m); // registo de atividade (leave)
 });
@@ -156,11 +163,20 @@ client.on(Events.GuildMemberUpdate, (oldM, newM) => {
 });
 
 // Anti-nuke: mesmo evento de audit log que o logging, mas com contadores por executor.
-client.on(Events.GuildAuditLogEntryCreate, (entry, guild) => void handleAuditForNuke(ctx, entry, guild, nukeTracker));
+client.on(
+  Events.GuildAuditLogEntryCreate,
+  (entry, guild) => void handleAuditForNuke(ctx, entry, guild, nukeTracker),
+);
 
 // Starboard (reações ⭐).
-client.on(Events.MessageReactionAdd, (reaction, user) => void handleStarReaction(ctx, reaction, user));
-client.on(Events.MessageReactionRemove, (reaction, user) => void handleStarReaction(ctx, reaction, user));
+client.on(
+  Events.MessageReactionAdd,
+  (reaction, user) => void handleStarReaction(ctx, reaction, user),
+);
+client.on(
+  Events.MessageReactionRemove,
+  (reaction, user) => void handleStarReaction(ctx, reaction, user),
+);
 
 client.on(Events.InteractionCreate, async (interaction: Interaction) => {
   // Botões (verificação + comunidade: sugestões, giveaways, self-roles, tickets).

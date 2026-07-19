@@ -38,6 +38,8 @@ const cfg: SpamConfig = {
   decayPerSec: 1,
   punishAt: 10,
   timeoutMs: 300_000,
+  repeatWindowMs: 30 * 24 * 60 * 60 * 1000,
+  maxTimeoutMs: 86_400_000,
   floodCount: 5,
   floodHeat: 4,
   duplicateHeat: 4,
@@ -62,7 +64,10 @@ describe('SpamTracker', () => {
     const t = new SpamTracker(cfg);
     let punished = false;
     for (let i = 0; i < 4; i++) {
-      const v = t.record({ userId: 'u', channelId: 'c', content: `msg ${i}`, mentionCount: 0 }, i * 3000);
+      const v = t.record(
+        { userId: 'u', channelId: 'c', content: `msg ${i}`, mentionCount: 0 },
+        i * 3000,
+      );
       punished ||= v.punish;
     }
     expect(punished).toBe(false);
@@ -72,7 +77,10 @@ describe('SpamTracker', () => {
     const t = new SpamTracker(cfg);
     let punished = false;
     for (let i = 0; i < 6; i++) {
-      const v = t.record({ userId: 'u', channelId: 'c', content: 'compra nitro gratis', mentionCount: 0 }, i * 500);
+      const v = t.record(
+        { userId: 'u', channelId: 'c', content: 'compra nitro gratis', mentionCount: 0 },
+        i * 500,
+      );
       punished ||= v.punish;
     }
     expect(punished).toBe(true);
@@ -80,9 +88,18 @@ describe('SpamTracker', () => {
 
   it('mesmo link em vários canais dispara multi-canal', () => {
     const t = new SpamTracker(cfg);
-    const v1 = t.record({ userId: 'u', channelId: 'c1', content: 'http://x.com http://y.com', mentionCount: 0 }, 0);
-    const v2 = t.record({ userId: 'u', channelId: 'c2', content: 'http://x.com http://y.com', mentionCount: 0 }, 200);
-    const v3 = t.record({ userId: 'u', channelId: 'c3', content: 'http://x.com http://y.com', mentionCount: 0 }, 400);
+    const v1 = t.record(
+      { userId: 'u', channelId: 'c1', content: 'http://x.com http://y.com', mentionCount: 0 },
+      0,
+    );
+    const v2 = t.record(
+      { userId: 'u', channelId: 'c2', content: 'http://x.com http://y.com', mentionCount: 0 },
+      200,
+    );
+    const v3 = t.record(
+      { userId: 'u', channelId: 'c3', content: 'http://x.com http://y.com', mentionCount: 0 },
+      400,
+    );
     expect([v1, v2, v3].some((v) => v.signals.includes('multi-channel'))).toBe(true);
   });
 
@@ -91,7 +108,10 @@ describe('SpamTracker', () => {
     let punished = false;
     for (let i = 0; i < 8; i++) {
       // 20s entre mensagens: decaimento (1/s) apaga o heat entre elas.
-      const v = t.record({ userId: 'u', channelId: 'c', content: 'igual', mentionCount: 0 }, i * 20_000);
+      const v = t.record(
+        { userId: 'u', channelId: 'c', content: 'igual', mentionCount: 0 },
+        i * 20_000,
+      );
       punished ||= v.punish;
     }
     expect(punished).toBe(false);

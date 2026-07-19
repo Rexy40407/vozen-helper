@@ -43,7 +43,15 @@ export function insertCase(db: Database.Database, c: NewCase): number {
       `INSERT INTO cases (guild_id, type, target_id, moderator_id, reason, duration_ms, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(c.guildId, c.type, c.targetId, c.moderatorId, c.reason ?? '', c.durationMs ?? null, c.createdAt);
+    .run(
+      c.guildId,
+      c.type,
+      c.targetId,
+      c.moderatorId,
+      c.reason ?? '',
+      c.durationMs ?? null,
+      c.createdAt,
+    );
   return Number(info.lastInsertRowid);
 }
 
@@ -68,9 +76,7 @@ export function getCasesForUser(
   limit = 25,
 ): ModCase[] {
   return db
-    .prepare(
-      `SELECT * FROM cases WHERE guild_id = ? AND target_id = ? ORDER BY id DESC LIMIT ?`,
-    )
+    .prepare(`SELECT * FROM cases WHERE guild_id = ? AND target_id = ? ORDER BY id DESC LIMIT ?`)
     .all(guildId, targetId, limit)
     .map((r) => rowToCase(r as Record<string, unknown>));
 }
@@ -85,9 +91,9 @@ export function getRecentCases(db: Database.Database, guildId: string, limit = 5
 
 /** Nº total de casos do servidor. */
 export function countCases(db: Database.Database, guildId: string): number {
-  const r = db
-    .prepare(`SELECT COUNT(*) AS n FROM cases WHERE guild_id = ?`)
-    .get(guildId) as { n: number };
+  const r = db.prepare(`SELECT COUNT(*) AS n FROM cases WHERE guild_id = ?`).get(guildId) as {
+    n: number;
+  };
   return r.n;
 }
 
@@ -182,6 +188,23 @@ export function countInfractions(
   return r.total;
 }
 
+/** Soma as infrações de uma origem específica dentro da janela [since, ∞). */
+export function countInfractionsBySource(
+  db: Database.Database,
+  guildId: string,
+  targetId: string,
+  source: string,
+  since: number,
+): number {
+  const r = db
+    .prepare(
+      `SELECT COALESCE(SUM(weight), 0) AS total FROM infractions
+       WHERE guild_id = ? AND target_id = ? AND source = ? AND created_at >= ?`,
+    )
+    .get(guildId, targetId, source, since) as { total: number };
+  return r.total;
+}
+
 // ─── Ações agendadas (expirações) ───────────────────────────────────────────────
 
 export type ScheduledType =
@@ -203,10 +226,7 @@ export interface ScheduledAction {
   caseId: number | null;
 }
 
-export function scheduleAction(
-  db: Database.Database,
-  a: Omit<ScheduledAction, 'id'>,
-): number {
+export function scheduleAction(db: Database.Database, a: Omit<ScheduledAction, 'id'>): number {
   const info = db
     .prepare(
       `INSERT INTO scheduled_actions (guild_id, type, target_id, execute_at, payload, case_id)

@@ -94,7 +94,7 @@ export interface EscalationStep {
 /** Regras a delegar ao AutoMod NATIVO do Discord (bloqueio antes de publicar). */
 export interface AutomodConfig {
   /** Keywords/wildcards a bloquear (ex.: 'scam*'). Máx. 1000. */
-  keywords: string[];
+  advertisingKeywords: string[];
   /** Ativar o preset de slurs (racismo/discurso de ódio) mantido pelo Discord. */
   enableSlurPreset: boolean;
   /** Ativar o preset de profanity. */
@@ -103,6 +103,8 @@ export interface AutomodConfig {
   enableSexualPreset: boolean;
   /** Limite de menções únicas por mensagem (null = não criar regra). Máx. 50. */
   mentionLimit: number | null;
+  /** Proteção nativa contra rajadas coordenadas de menções. */
+  mentionRaidProtectionEnabled: boolean;
 }
 
 /** Parâmetros do sistema de "heat" do anti-spam. */
@@ -113,6 +115,10 @@ export interface SpamConfig {
   punishAt: number;
   /** Ação ao punir: duração do timeout (ms). */
   timeoutMs: number;
+  /** Janela usada para considerar uma punição de spam como reincidência. */
+  repeatWindowMs: number;
+  /** Teto do timeout progressivo por spam. */
+  maxTimeoutMs: number;
   floodCount: number;
   floodHeat: number;
   duplicateHeat: number;
@@ -130,6 +136,15 @@ export interface SpamConfig {
   linkLimit: number;
   linkHeat: number;
   inviteHeat: number;
+}
+
+export interface LanguageConfig {
+  enabled: boolean;
+  /** Palavrões comuns; slurs continuam exclusivamente no preset nativo. */
+  terms: string[];
+  windowMs: number;
+  repeatedTermCount: number;
+  excessiveTermCount: number;
 }
 
 /** Um par nível→cargo para as recompensas de leveling. */
@@ -196,6 +211,8 @@ export interface ModConfig {
   automodExemptChannelIds: string[];
   /** Anti-spam (sistema de heat). */
   spam: SpamConfig;
+  /** Linguagem: tolera uso casual isolado e modera abuso/repetição. */
+  language: LanguageConfig;
   /** Features de comunidade/engagement (não-moderação). */
   community: CommunityConfig;
   /** Logging/auditoria. */
@@ -318,12 +335,26 @@ export const modConfig: ModConfig = {
   ],
   dmOnPunish: true,
   automod: {
-    keywords: [],
+    advertisingKeywords: [
+      '*discord.gg/*',
+      '*discord.com/invite/*',
+      '*discord.com/oauth2/authorize*',
+      '*youtube.com/*',
+      '*youtu.be/*',
+      '*tiktok.com/*',
+      '*instagram.com/*',
+      '*twitch.tv/*',
+      '*twitter.com/*',
+      '*x.com/*',
+      '*facebook.com/*',
+      '*kick.com/*',
+    ],
     // Racismo/discurso de ódio: delegado ao preset nativo (bloqueia ANTES de publicar).
     enableSlurPreset: true,
     enableProfanityPreset: false,
-    enableSexualPreset: false,
+    enableSexualPreset: true,
     mentionLimit: 8,
+    mentionRaidProtectionEnabled: true,
   },
   bannedWords: [],
   dangerousExtensions: ['exe', 'bat', 'scr', 'cmd', 'com', 'pif', 'vbs', 'js', 'jar', 'msi'],
@@ -334,6 +365,8 @@ export const modConfig: ModConfig = {
     decayPerSec: 1,
     punishAt: 10,
     timeoutMs: 5 * 60 * 1000, // 5 min
+    repeatWindowMs: 30 * DAY,
+    maxTimeoutMs: DAY,
     floodCount: 5, // >5 mensagens em 10s soma calor
     floodHeat: 4,
     duplicateHeat: 4,
@@ -351,6 +384,25 @@ export const modConfig: ModConfig = {
     linkLimit: 3,
     linkHeat: 3,
     inviteHeat: 5,
+  },
+  language: {
+    enabled: true,
+    terms: [
+      'fuck',
+      'fucking',
+      'fucked',
+      'motherfucker',
+      'shit',
+      'bullshit',
+      'bitch',
+      'asshole',
+      'bastard',
+      'cunt',
+      'dickhead',
+    ],
+    windowMs: 60_000,
+    repeatedTermCount: 5,
+    excessiveTermCount: 3,
   },
   logging: {
     // Tudo para o #mod-logs por agora (podes separar por canal quando quiseres).
@@ -447,7 +499,11 @@ export const modConfig: ModConfig = {
       ],
       stackRoles: false,
     },
-    tickets: { enabled: true, staffRoleId: '1523499171246772355', transcriptChannelId: '1526362020041981992' },
+    tickets: {
+      enabled: true,
+      staffRoleId: '1523499171246772355',
+      transcriptChannelId: '1526362020041981992',
+    },
     starboard: { enabled: true, channelId: '1526360536705404948', threshold: 3, emoji: '⭐' },
     birthdays: { enabled: false, channelId: null, roleId: null },
     bumpReminder: { enabled: true, channelId: '1523496056359489636' },
