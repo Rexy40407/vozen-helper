@@ -31,14 +31,17 @@ export function buildDesiredRules(cfg: AutomodConfig): DesiredRuleDescriptor[] {
     metadata: { customMessage },
   });
 
-  if (cfg.advertisingKeywords.length > 0) {
+  if (cfg.advertisingKeywords.length > 0 || cfg.advertisingRegexPatterns.length > 0) {
     rules.push({
       name: `${RULE_PREFIX} advertising`,
       build: () => ({
         name: `${RULE_PREFIX} advertising`,
         eventType: AutoModerationRuleEventType.MessageSend,
         triggerType: AutoModerationRuleTriggerType.Keyword,
-        triggerMetadata: { keywordFilter: cfg.advertisingKeywords },
+        triggerMetadata: {
+          keywordFilter: cfg.advertisingKeywords,
+          regexPatterns: cfg.advertisingRegexPatterns,
+        },
         actions: [blockAction("Advertising isn't allowed here. Please check the server rules.")],
         enabled: true,
       }),

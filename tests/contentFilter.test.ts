@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { normalizeForMatch, squashRepeats } from '../src/moderation/normalize.js';
 import { findBannedWord, findDangerousAttachment } from '../src/moderation/contentFilter.js';
 import { buildDesiredRules, planSync, RULE_PREFIX } from '../src/moderation/automodSync.js';
-import type { AutomodConfig } from '../src/config.js';
+import { modConfig, type AutomodConfig } from '../src/config.js';
 
 describe('normalizeForMatch', () => {
   it('remove acentos e maiúsculas', () => {
@@ -74,6 +74,7 @@ describe('planSync', () => {
 describe('buildDesiredRules', () => {
   const cfg: AutomodConfig = {
     advertisingKeywords: ['*discord.gg/*', '*youtube.com/*'],
+    advertisingRegexPatterns: ['domain-regex'],
     enableSlurPreset: true,
     enableProfanityPreset: false,
     enableSexualPreset: true,
@@ -91,11 +92,23 @@ describe('buildDesiredRules', () => {
 
     const advertising = rules[0].build('guild');
     expect(advertising.triggerMetadata?.keywordFilter).toEqual(cfg.advertisingKeywords);
+    expect(advertising.triggerMetadata?.regexPatterns).toEqual(cfg.advertisingRegexPatterns);
 
     const presets = rules[1].build('guild');
     expect(presets.triggerMetadata?.presets).toEqual([2, 3]);
 
     const mentions = rules[2].build('guild');
     expect(mentions.triggerMetadata?.mentionRaidProtectionEnabled).toBe(true);
+  });
+
+  it('regexes de publicidade não confundem domínios parecidos', () => {
+    const matches = (text: string) =>
+      modConfig.automod.advertisingRegexPatterns.some((pattern) =>
+        new RegExp(pattern, 'i').test(text),
+      );
+    expect(matches('join us at discord.gg/example')).toBe(true);
+    expect(matches('https://x.com/vozen/status/1')).toBe(true);
+    expect(matches('https://examplex.com/path')).toBe(false);
+    expect(matches('https://sidekick.com/path')).toBe(false);
   });
 });

@@ -95,6 +95,8 @@ export interface EscalationStep {
 export interface AutomodConfig {
   /** Keywords/wildcards a bloquear (ex.: 'scam*'). Máx. 1000. */
   advertisingKeywords: string[];
+  /** Regexes Rust para links publicitários com domínio exato. Máx. 10. */
+  advertisingRegexPatterns: string[];
   /** Ativar o preset de slurs (racismo/discurso de ódio) mantido pelo Discord. */
   enableSlurPreset: boolean;
   /** Ativar o preset de profanity. */
@@ -335,19 +337,10 @@ export const modConfig: ModConfig = {
   ],
   dmOnPunish: true,
   automod: {
-    advertisingKeywords: [
-      '*discord.gg/*',
-      '*discord.com/invite/*',
-      '*discord.com/oauth2/authorize*',
-      '*youtube.com/*',
-      '*youtu.be/*',
-      '*tiktok.com/*',
-      '*instagram.com/*',
-      '*twitch.tv/*',
-      '*twitter.com/*',
-      '*x.com/*',
-      '*facebook.com/*',
-      '*kick.com/*',
+    advertisingKeywords: [],
+    advertisingRegexPatterns: [
+      '\\b(?:https?://)?(?:www\\.)?(?:discord\\.gg/\\S+|discord(?:app)?\\.com/(?:invite/\\S+|(?:api/)?oauth2/authorize\\S*))',
+      '\\b(?:https?://)?(?:www\\.)?(?:youtube\\.com|youtu\\.be|tiktok\\.com|instagram\\.com|twitch\\.tv|twitter\\.com|x\\.com|facebook\\.com|kick\\.com)/\\S+',
     ],
     // Racismo/discurso de ódio: delegado ao preset nativo (bloqueia ANTES de publicar).
     enableSlurPreset: true,
