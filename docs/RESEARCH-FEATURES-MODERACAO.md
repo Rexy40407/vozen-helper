@@ -1,6 +1,6 @@
 # Research: Features de Bots de Moderação Discord (2025/2026)
 
-> Research feita por agente Fable 5 (2026-07-13) sobre MEE6, Dyno, Carl-bot, Wick, Bleed, Sapphire, Fire, Zeppelin, Vortex, Beemo e o AutoMod nativo do Discord. Base do planeamento do **Vozen Helper**.
+> Research técnica realizada em 2026-07-13 sobre MEE6, Dyno, Carl-bot, Wick, Bleed, Sapphire, Fire, Zeppelin, Vortex, Beemo e o AutoMod nativo do Discord. Base do planeamento do **Vozen Helper**.
 
 **Legenda:** ✅ = table stakes (praticamente todos os bots têm) · ⭐ = diferenciador (poucos bots têm / feature avançada)
 
@@ -13,11 +13,11 @@ Antes de desenhar um bot, é preciso saber o que o Discord já faz nativamente (
 - **Keyword filters**: até 6 regras custom por servidor, 1.000 keywords/wildcards por regra (60 chars cada), wildcards com `*` (`scam*` apanha "scammer")
 - **Regex**: flavor Rust, até 10 patterns por regra, 260 chars por pattern
 - **Presets**: spam content, mention spam (com limite configurável), harmful links, profanity/slurs/sexual content
-- **Ações nativas**: block message (a mensagem nunca é publicada — nenhum bot consegue isto, pois bots só apagam *depois* de publicada), alert para canal de mod-log, timeout do utilizador
+- **Ações nativas**: block message (a mensagem nunca é publicada — nenhum bot consegue isto, pois bots só apagam _depois_ de publicada), alert para canal de mod-log, timeout do utilizador
 - **Pause invites** para gerir surges de joins
 - Cobre canais de texto, threads, voice text chat e fóruns
 
-**Implicação de design**: um bot próprio deve *complementar* o AutoMod nativo (o Sapphire, por exemplo, posiciona-se como "ações adicionais para o AutoMod do Discord"). O bloqueio pré-publicação de keywords deve ser delegado ao AutoMod nativo via API (`AUTO_MODERATION` rules podem ser criadas por bots); o bot trata do que o AutoMod não faz: heurísticas comportamentais, escalação, casos, anti-nuke, etc.
+**Implicação de design**: um bot próprio deve _complementar_ o AutoMod nativo (o Sapphire, por exemplo, posiciona-se como "ações adicionais para o AutoMod do Discord"). O bloqueio pré-publicação de keywords deve ser delegado ao AutoMod nativo via API (`AUTO_MODERATION` rules podem ser criadas por bots); o bot trata do que o AutoMod não faz: heurísticas comportamentais, escalação, casos, anti-nuke, etc.
 
 Fontes: [Discord AutoMod FAQ](https://support.discord.com/hc/en-us/articles/4421269296535-AutoMod-FAQ), [Discord blog: anti-spam/raid AutoMod update](https://discord.com/blog/new-anti-spam-raid-automod-safety-update), [Auto Moderation in Discord](https://discord.com/safety/auto-moderation-in-discord)
 
@@ -26,6 +26,7 @@ Fontes: [Discord AutoMod FAQ](https://support.discord.com/hc/en-us/articles/4421
 ## 1. Anti-Spam
 
 ### Features concretas
+
 - ✅ **Flood de mensagens** (X mensagens em Y segundos por utilizador) — todos
 - ✅ **Mensagens duplicadas/repetidas** (mesmo conteúdo repetido; Dyno tem filtro "Duplicate Text" dentro da própria mensagem e entre mensagens; Vortex tem anti-duplicate com threshold de delete e threshold de strike separados)
 - ✅ **Mass mentions** (X menções por mensagem ou em janela de tempo; Vortex atribui um strike por cada menção acima do máximo)
@@ -43,6 +44,7 @@ Fontes: [Discord AutoMod FAQ](https://support.discord.com/hc/en-us/articles/4421
 - ⭐ **Slowmode automático como resposta a spam** (Carl-bot trata message spam via rate limits tipo slowmode)
 
 ### Detalhe de implementação interessante: o Heat System do Wick ⭐
+
 Em vez de regras independentes com thresholds fixos, o Wick usa um **algoritmo de "heat" adaptativo**: cada utilizador acumula pontuação de calor com base em múltiplos fatores combinados — frequência de mensagens, repetição, anúncios, conteúdo NSFW, links maliciosos, emojis, character count, line breaks, padrões de inatividade, menções, attachments e palavras blacklisted. Punição dispara quando o heat total excede o limite. Vantagens: apanha spam "distribuído" (um pouco de cada coisa) e reduz falsos positivos em membros regulares. Inclui **multiplicador de timeout** para reincidentes (a duração aumenta a cada violação, impedindo que raiders "esperem" a punição passar) e **Heat Panic Mode** (se vários utilizadores violarem regras na mesma janela, qualquer "raider" que envie mensagem é imediatamente silenciado).
 
 Fontes: [Wick Docs — Features](https://docs.wickbot.com/intro/features/), [Dyno Automod](https://docs.dyno.gg/en/modules/automod), [Carl-bot automod docs](https://github.com/botlabs-gg/carlbot-docs/blob/master/docs/automod.md), [Vortex Auto Moderation wiki](https://github.com/jagrosh/Vortex/wiki/Auto-Moderation)
@@ -52,6 +54,7 @@ Fontes: [Wick Docs — Features](https://docs.wickbot.com/intro/features/), [Dyn
 ## 2. Filtros de Conteúdo
 
 ### Features concretas
+
 - ✅ **Banned words — exact match** (palavra inteira, case-insensitive)
 - ✅ **Banned words — wildcard/substring** (Dyno: "hi" banido em wildcard apanha "high"; Carl-bot faz substring matching case-insensitive)
 - ✅ **Listas separadas por severidade** (ex.: lista "delete apenas" vs lista "delete + mute" — comum em Dyno/MEE6)
@@ -61,10 +64,11 @@ Fontes: [Wick Docs — Features](https://docs.wickbot.com/intro/features/), [Dyn
 - ⭐ **Deteção de toxicidade por ML/AI** (bots novos em 2025/26 usam classificadores; o AutoMod nativo tem preset de profanity/slurs mantido pelo Discord — para um bot privado, delegar slurs ao preset nativo e complementar com listas custom é o padrão)
 - ⭐ **Filtro de attachments por tipo** (Zeppelin `match_attachment_type`; Carl-bot apaga "unsafe files" — .exe, .bat, .scr)
 - ⭐ **Media-only channels** (canal onde só é permitido media, texto é apagado — Carl-bot)
-- ⭐ **Filtro NSFW em imagens** (deteção de conteúdo NSFW via image classification — Wick inclui NSFW no heat system; bots de 2026 destacam deteção de scams *dentro de imagens* porque scammers migraram de texto para screenshots)
+- ⭐ **Filtro NSFW em imagens** (deteção de conteúdo NSFW via image classification — Wick inclui NSFW no heat system; bots de 2026 destacam deteção de scams _dentro de imagens_ porque scammers migraram de texto para screenshots)
 - ⭐ **Deteção multilíngue** — nenhum dos bots clássicos faz deteção multilíngue nativa real; a prática é manter listas por língua + normalização Unicode. Diferenciador real para um bot custom com LLM.
 
 ### Nota de implementação
+
 O Dyno permite **custom response** por regra (mensagem de aviso customizada quando a regra dispara) e **log channel por regra** — granularidade útil. A tendência 2026 é scams baseados em imagem a contornar filtros de texto ([PeakBot: image-based scams](https://peakbot.pro/blog/how-to-stop-image-scams-discord-2026)).
 
 Fontes: [Dyno Automod](https://docs.dyno.gg/en/modules/automod), [MEE6 Moderator wiki](https://wiki.mee6.xyz/en/plugins/moderator), [Carl-bot automod](https://github.com/botlabs-gg/carlbot-docs/blob/master/docs/automod.md), [Zeppelin config examples](https://github.com/shoaibsajid1/Zeppelin)
@@ -74,25 +78,28 @@ Fontes: [Dyno Automod](https://docs.dyno.gg/en/modules/automod), [MEE6 Moderator
 ## 3. Anti-Raid / Segurança
 
 ### 3a. Anti-raid (join floods)
+
 - ✅ **Deteção de join surge** (X joins em Y segundos → modo raid; Zeppelin `member_join_spam` ex.: 10 joins/18s)
 - ✅ **Ações de raid mode**: kick/ban automático dos joiners durante lockdown, aumento do verification level do servidor (Vortex faz ambos), pausar invites (nativo Discord)
-- ⭐ **Níveis de antiraid escalonados** (Zeppelin: `set_antiraid_level` como *ação* de automod — regras diferentes ativam níveis diferentes com respostas progressivamente mais duras)
+- ⭐ **Níveis de antiraid escalonados** (Zeppelin: `set_antiraid_level` como _ação_ de automod — regras diferentes ativam níveis diferentes com respostas progressivamente mais duras)
 - ⭐ **Join Raid multi-algoritmo do Wick**: monitoriza padrões de join em janelas customizáveis, avisa roles designados, pune os flagged e entrega **logs com lista de contas ligadas** ao raid
 - ✅ **Filtros on-join (Join Gate — Wick)**: conta sem avatar, conta nova (idade mínima customizável), username com invite/anúncio, username matching critérios, bots não autorizados/não verificados — cada filtro com ação independente (timeout/kick/ban)
 - ✅ **Verificação/captcha**: Wick oferece CAPTCHA, verificação web, ou verificação instantânea, com modo "só contas suspeitas" vs "todos"
 - ✅ **Lockdown**: comando para trancar todos os canais (ou lista configurada) de uma vez; Wick tem **Auto Lockdown** que tranca canais quando não-whitelisted excedem threshold de menções numa janela
 
 #### Detalhe de implementação: como o Beemo deteta userbots ⭐
-O Beemo é o standard de anti-raid passivo. Heurística documentada: monitoriza tráfego global de joins; se **~50 contas entram em ~3 segundos**, analisa o lote e compara com padrões de userbots (contas automatizadas que parecem humanas) via **deteção comportamental**; se match, **mass-ban instantâneo**. O algoritmo **não é configurável de propósito** — é dinâmico e adapta-se, e o Beemo beneficia de ver raids em *milhares de servidores* (a mesma botnet ataca vários servidores; deteção cross-server). Lição para bot privado: um bot single-server não tem este sinal cross-server — deve compensar com join-gate mais agressivo + verificação.
+
+O Beemo é o standard de anti-raid passivo. Heurística documentada: monitoriza tráfego global de joins; se **~50 contas entram em ~3 segundos**, analisa o lote e compara com padrões de userbots (contas automatizadas que parecem humanas) via **deteção comportamental**; se match, **mass-ban instantâneo**. O algoritmo **não é configurável de propósito** — é dinâmico e adapta-se, e o Beemo beneficia de ver raids em _milhares de servidores_ (a mesma botnet ataca vários servidores; deteção cross-server). Lição para bot privado: um bot single-server não tem este sinal cross-server — deve compensar com join-gate mais agressivo + verificação.
 Fontes: [Beemo Docs](https://docs.beemo.gg/), [beemo.gg](https://beemo.gg/), [guia Beemo](https://discord-media.com/en/news/beemo-bot-guide-the-silent-guardian-against-raids.html)
 
 ### 3b. Anti-nuke (admins/bots comprometidos) ⭐ — o grande diferenciador do Wick e do Bleed
+
 - ⭐ **Rate limits em ações administrativas**: monitorizar audit log e detetar mass-actions — mass channel create/delete, mass role create/delete, mass kick/ban, mass webhook create/delete, mass emoji delete (Wick monitoriza todas; webhooks/emojis são premium)
 - ⭐ **Quarentena**: o autor da ação anómala é imediatamente despojado de roles/permissões ("zero power") em vez de banido — reversível se for falso positivo (Wick); o Bleed "trava as ações e faz strip das permissões" quando deteta ex.: 10 bans ou 5 channel deletes em segundos, com **thresholds customizáveis**
 - ⭐ **Whitelist de admins confiáveis** (ações do owner/whitelisted não disparam)
 - ⭐ **Backups + restore automático**: o Wick usa o backup mais recente para **reverter automaticamente** o que o nuke apagou (canais, roles); sem imaging, tenta reconstruir de memória/dados do Discord
 - ⭐ **Panic Mode** (Wick): lockdown automático do servidor durante nuke rápido, com um "miniWick" separado a analisar o ataque
-- ⭐ **Fake Permissions (Bleed)**: conceito interessante — moderadores recebem permissões *apenas dentro do bot* (podem usar `/ban` do bot) mas **não têm a permissão nativa do Discord**, logo um script/token comprometido não consegue mass-ban via API. O bot torna-se o único caminho para ações destrutivas, com os seus rate limits
+- ⭐ **Fake Permissions (Bleed)**: conceito interessante — moderadores recebem permissões _apenas dentro do bot_ (podem usar `/ban` do bot) mas **não têm a permissão nativa do Discord**, logo um script/token comprometido não consegue mass-ban via API. O bot torna-se o único caminho para ações destrutivas, com os seus rate limits
 - ⭐ **Proteção contra webhooks maliciosos** (deteção de criação de webhooks + spam via webhook; deleção automática)
 - ⭐ **Anti bot-add** (bot adicionado sem autorização → kick/ban imediato do bot e quarentena de quem o adicionou)
 - ⭐ **Deteção de bypass** (alertar o owner quando alguém tenta contornar o anti-nuke — Wick)
@@ -198,22 +205,26 @@ Fontes: [Fire](https://getfire.bot/), [Alternative.me Fire commands](https://alt
 ## 9. Outras categorias descobertas (foco em moderação)
 
 ### 9a. Arquitetura de configuração (meta-feature, mas decisiva)
+
 - ⭐ **Overrides granulares** (Zeppelin: qualquer config sobreponível por utilizador, canal, categoria, nível de permissão — ex.: automod mais brando em #off-topic)
 - ✅ **Permission levels** (níveis 0-100 em vez de roles hardcoded — Zeppelin)
 - ✅ **Dashboard web vs config-as-code** (Zeppelin usa YAML — para um bot privado, config em ficheiro versionado é mais simples que dashboard)
 - ⭐ **Import de listas de outros bots** (Sapphire importa banned words de outros bots)
 
 ### 9b. Verificação de membros (gate de entrada)
+
 - ✅ Captcha/DM verification, botão "verificar", idade mínima de conta
 - ⭐ Verificação escalonada por risco (Wick: verificar só contas suspeitas)
 - ⭐ Modo "verification raid": durante raid, subir automaticamente o nível de verificação exigido
 
 ### 9c. Deteção de contas suspeitas (contínua, não só no join)
+
 - ⭐ Conta nova + primeiro post contém link = alto risco (heurística comum)
 - ⭐ Padrões de lurk-then-spam (conta entra, fica inativa, depois spamma — Wick inclui "inactivity patterns" no heat)
 - ⭐ Alt-account detection (correlação de padrões; limitada sem dados cross-server)
 
 ### 9d. Resiliência do próprio bot
+
 - ⭐ Proteção do próprio bot contra remoção de permissões; alertas quando o bot perde permissões necessárias
 - ⭐ Backups periódicos automáticos do servidor (roles, canais, permissões) independentes do anti-nuke — Wick
 
@@ -226,6 +237,7 @@ Fontes: [Fire](https://getfire.bot/), [Alternative.me Fire commands](https://alt
 **Table stakes (qualquer bot de moderação em 2025/26 tem de ter):** warn/timeout/kick/ban/softban/tempban com casos numerados e histórico por utilizador; escalação automática warn→mute→ban; anti-spam de flood/duplicados/menções/caps/emoji/invites/links; banned words exact+wildcard com whitelist de roles/canais; logging completo (delete/edit/join/leave/voice/roles/mod-actions) com canais separados; purge com filtros; slowmode/lock; role-on-join + verification gate + sticky roles (mute persistence); DM ao punido.
 
 **Diferenciadores de topo (por ordem de valor para um servidor privado):**
+
 1. **Anti-nuke com quarentena + whitelist + restore** (Wick/Bleed) — raro e de alto valor
 2. **Heat system** em vez de regras isoladas (Wick) — menos falsos positivos
 3. **Strikes configuráveis por regra** (Vortex) — escalação fina
@@ -238,6 +250,7 @@ Fontes: [Fire](https://getfire.bot/), [Alternative.me Fire commands](https://alt
 10. **Integração com AutoMod nativo** para bloqueio pré-publicação (Sapphire)
 
 ### Fontes principais
+
 - Wick: https://docs.wickbot.com/intro/features/ · https://wickbot.com/
 - Beemo: https://docs.beemo.gg/ · https://beemo.gg/
 - Zeppelin: https://github.com/ZeppelinBot/Zeppelin · https://zeppelin.gg/

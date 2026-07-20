@@ -4,12 +4,13 @@
 > README. **Drift check** (sem git): confirma `package.json` e ausência de configs vivos.
 
 ## Status
+
 - **Prioridade**: P3 · **Esforço**: S · **Risco**: LOW · **Depende de**: nenhum
 - **Categoria**: dx · **Planned at**: N/A (não é repo git), 2026-07-14
 
 ## Porque é que isto importa
 
-O `CLAUDE.md` impõe disciplina forte (TDD, comentários em PT, convenções tipadas) mas
+O `CONTRIBUTING.md` impõe disciplina forte (TDD, comentários em PT, convenções tipadas) mas
 não há tooling a fazê-la cumprir: não há `lint`/`format` scripts, nem ESLint/Prettier,
 nem CI. O `strict: true` do tsc é a única rede — não apanha unused vars/imports nem
 **floating promises**, e o `index.ts` está cheio do padrão `void handler(...)` que uma
@@ -32,12 +33,12 @@ manual "build+typecheck+test verdes antes de commitar" em garantia.
 
 ## Comandos
 
-| Objetivo | Comando | Esperado |
-|-----------|---------|----------|
-| Instalar | `npm install` | exit 0 |
-| Lint (novo) | `npm run lint` | exit 0 (após resolver achados) |
-| Typecheck/Build | `npm run typecheck` / `npm run build` | exit 0 |
-| Testes | `npx vitest run` | todos passam |
+| Objetivo        | Comando                               | Esperado                       |
+| --------------- | ------------------------------------- | ------------------------------ |
+| Instalar        | `npm install`                         | exit 0                         |
+| Lint (novo)     | `npm run lint`                        | exit 0 (após resolver achados) |
+| Typecheck/Build | `npm run typecheck` / `npm run build` | exit 0                         |
+| Testes          | `npx vitest run`                      | todos passam                   |
 
 ## Scope
 
@@ -61,6 +62,7 @@ recommended + **ativar** `@typescript-eslint/no-floating-promises` e
 `.editorconfig` coerentes com o estilo atual (2 espaços, aspas simples, ponto e vírgula).
 
 Adiciona scripts:
+
 ```json
 "lint": "eslint .",
 "format": "prettier --write .",
@@ -74,6 +76,7 @@ Adiciona scripts:
 ```
 npm run lint
 ```
+
 Corrige só o trivial: imports/vars não usados, e confirma que os `void handler(...)` do
 `index.ts` passam a regra `no-floating-promises` (o `void` explícito é o padrão aceite;
 se a regra sinalizar algum sítio SEM `void`, isso é um bug real de promise esquecida —
@@ -86,6 +89,7 @@ resolver, se for estrutural).
 ### Passo 3: CI
 
 Cria `.github/workflows/ci.yml`:
+
 ```yaml
 name: CI
 on: [push, pull_request]

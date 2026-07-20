@@ -1,11 +1,11 @@
 # Plano — Redesenho visual das Definições do painel
 
-> ✅ EXECUTADO (2026-07-14, Opus). Todas as fases feitas e no ar. Só `site/index.html`
+> ✅ EXECUTADO em 2026-07-14. Todas as fases feitas e no ar. Só `site/index.html`
 > (front-end); zero backend. Verificado no browser (chips multi sem Ctrl, dropdown com
 > pesquisa+teclado, barra Guardar/Descartar, save mockado com 2 PATCHes, mobile sem
 > overflow, consola limpa). `cleanChannelName` com fallback a nomes só-emoji.
 
-> Planeado com Fable 5 (2026-07-14). Execução: Opus. Só o front-end do painel
+> Planeado em 2026-07-14. Só o front-end do painel
 > (`vozen-helper-bot/site/index.html`) — a API já dá tudo o que é preciso
 > (`/api/flags`, `/api/channels`, `/api/channel-settings`); **zero alterações de backend**.
 
@@ -21,6 +21,7 @@ feedback de gravação e responsivo.
 ## Scope
 
 ### In
+
 - Chips clicáveis no `xp.exclude` (multi) e dropdown custom com **pesquisa** nos restantes.
 - Limpeza dos nomes de canal decorados (`₊˚ʚ💎୧﹕joins` → `#joins`).
 - Agrupamento: **Moderação** e **Comunidade**, com o canal de cada feature junto ao toggle.
@@ -32,6 +33,7 @@ feedback de gravação e responsivo.
 - Responsivo < 720px e acessibilidade (foco, teclado, ≥44px).
 
 ### Out
+
 - Alterações à API/bot; novas settings; frameworks/bundlers; refazer login/stats/casos;
   tema claro; endpoint de gravação em lote no backend (o Guardar envia os PATCHes
   existentes um a um).
@@ -39,46 +41,54 @@ feedback de gravação e responsivo.
 ## Fases
 
 ### Fase 1 — Chips multi-select + nomes limpos (a dor real)
+
 Deliverable: `xp.exclude` com chips de canais clicáveis; nomes legíveis em todo o painel.
 Dep.: nenhuma.
+
 - [ ] `cleanChannelName(name)`: remove decorativos unicode/emoji, devolve `nome` legível;
-  fallback ao nome original se ficar vazio. Aplicar em TODAS as UIs de canal.
+      fallback ao nome original se ficar vazio. Aplicar em TODAS as UIs de canal.
 - [ ] Substituir o `<select multiple>` por uma grelha de chips (checkbox visual): um clique
-  alterna o estado LOCAL (pendente) — não grava logo.
+      alterna o estado LOCAL (pendente) — não grava logo.
 - [ ] **Estado pendente + barra de guardar** (mínimo viável já nesta fase): `pending`
-  (mapa key→valor novo), barra fixa em baixo com "Guardar alterações (N)" e "Descartar";
-  Guardar envia os PATCHes em série e limpa os que passaram.
+      (mapa key→valor novo), barra fixa em baixo com "Guardar alterações (N)" e "Descartar";
+      Guardar envia os PATCHes em série e limpa os que passaram.
 - **Done:** clicar em 3 chips seguidos marca os 3 (sem Ctrl) e a barra mostra "(1)";
   Guardar → a BD recebe o CSV certo; Descartar → volta ao estado do servidor; os nomes
   aparecem como `#joins`, não `₊˚ʚ💎୧﹕joins`.
 
 ### Fase 2 — Agrupamento por área
+
 Deliverable: secção única "Definições" com dois grupos-card. Dep.: Fase 1.
+
 - [ ] **Moderação**: anti-spam, anti-scam, anti-nuke, join gate, anti-raid + Canal de logs.
 - [ ] **Comunidade**: níveis (toggle + canal de anúncio + excluir XP), starboard (toggle +
-  canal), sugestões (toggle + canal), tickets, bump reminder.
+      canal), sugestões (toggle + canal), tickets, bump reminder.
 - [ ] Cabeçalho de grupo (eyebrow + título); cada feature é uma linha com toggle à direita
-  e a(s) opção(ões) de canal indentada(s) por baixo quando existirem.
+      e a(s) opção(ões) de canal indentada(s) por baixo quando existirem.
 - **Done:** as 10 flags e as 5 definições de canal aparecem TODAS, nos grupos certos, sem
   duplicados; desligar um toggle esbate (opacity) as opções de canal dessa feature.
 
 ### Fase 3 — Dropdown custom com pesquisa + feedback
+
 Deliverable: seletor de canal próprio (botão → painel com input de pesquisa + lista).
 Dep.: Fase 2 (vive no novo layout).
+
 - [ ] Dropdown: fecha com Esc/clique fora; setas + Enter no teclado; opções "— default —"
-  e "Onde a pessoa falou" (só levelup) no topo.
+      e "Onde a pessoa falou" (só levelup) no topo.
 - [ ] Pesquisa filtra por nome limpo (case/emoji-insensitive).
 - [ ] Toggles e dropdowns passam TODOS pelo modelo pendente (nenhum controlo grava direto);
-  linha pendente ganha marca visual (ponto âmbar + valor antigo → novo).
+      linha pendente ganha marca visual (ponto âmbar + valor antigo → novo).
 - [ ] Barra de guardar: "A guardar… (i/N)" durante o envio → "✓ Guardado" 2s → esconde.
-  Erro parcial: mantém os falhados pendentes + banner com quais falharam.
+      Erro parcial: mantém os falhados pendentes + banner com quais falharam.
 - **Done:** escrever "jo" filtra para `#joins`; mudar 2 toggles + 1 canal mostra "(3)" na
   barra; Guardar com API em baixo mantém os 3 pendentes e mostra o erro.
 
 ### Fase 4 — Responsivo + a11y + polish
+
 Deliverable: painel utilizável em mobile e por teclado. Dep.: Fase 3.
+
 - [ ] < 720px: linhas empilham (label em cima, controlo em baixo, largura total); chips
-  quebram linha; dropdown ocupa a largura do cartão.
+      quebram linha; dropdown ocupa a largura do cartão.
 - [ ] Foco visível em chips/toggles/dropdown; alvos ≥44px; contraste AA nos novos estados.
 - **Done:** a 375px não há scroll horizontal e tudo se opera por teclado (Tab/Enter/Esc).
 
@@ -91,14 +101,14 @@ Deliverable: painel utilizável em mobile e por teclado. Dep.: Fase 3.
   radius 16/22px). Novo apenas: espaçamento de chips (gap 8px) e altura de linha de
   definição (min 52px). **Nenhuma cor nova.**
 - **Componentes (primitivos → compostos):**
-  - *Chip de canal*: default / selecionado (fundo grad suave + borda aqua) / hover /
+  - _Chip de canal_: default / selecionado (fundo grad suave + borda aqua) / hover /
     focus-visible / disabled(saving).
-  - *Dropdown de canal*: fechado / aberto / a pesquisar / vazio ("sem resultados") /
+  - _Dropdown de canal_: fechado / aberto / a pesquisar / vazio ("sem resultados") /
     disabled(saving).
-  - *Linha de definição*: default / **pendente** (ponto âmbar) / erro / esbatida (feature off).
-  - *Barra de guardar*: escondida / visível "Guardar alterações (N)" + "Descartar" /
+  - _Linha de definição_: default / **pendente** (ponto âmbar) / erro / esbatida (feature off).
+  - _Barra de guardar_: escondida / visível "Guardar alterações (N)" + "Descartar" /
     a guardar (progresso i/N) / guardado (✓ 2s) / erro parcial.
-  - *Grupo-card*: título + linhas; sem estado próprio.
+  - _Grupo-card_: título + linhas; sem estado próprio.
 - **Layout:** desktop-first (o painel usa-se sobretudo no PC), 1 coluna máx. 1080px;
   breakpoint único a 720px (empilhar).
 - **Fluxos críticos:** (1) excluir 3 canais do XP em 3 cliques **+ Guardar**; (2) mudar o
