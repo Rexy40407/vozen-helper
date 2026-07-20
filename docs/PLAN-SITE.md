@@ -1,6 +1,6 @@
 # Plano — Site do Vozen Helper (GitHub Pages, público)
 
-> Refeito com Fable 5 (2026-07-14). Execução: Opus, à parte. Site estático simples,
+> Refeito em 2026-07-14. Site estático simples,
 > publicado no GitHub Pages num URL `github.io` até haver domínio — o mesmo método do
 > site do Vozen, mas mais enxuto (sem player de voz, pricing, i18n nem backend).
 
@@ -20,12 +20,14 @@ vejo", e isso está assumido. Repo público = Pages grátis e simples.
 ## Scope
 
 ### In
+
 - `site/` estático: `index.html` + `privacy.html` + `terms.html` + `css/` + `favicon.svg`.
 - Design alinhado com a marca Vozen (mesmos tokens de cor/tipografia).
 - Repo GitHub novo `vozen-helper-bot` (público) + workflow de deploy para o Pages.
 - `CNAME` pronto (vazio) para o domínio futuro.
 
 ### Out
+
 - Backend/API, painel, contas, login (o Helper não tem API — é um bot de 1 servidor).
 - i18n, blog, player de áudio, tabela de preços (o Helper é grátis/privado, sem venda).
 - Comprar/configurar domínio agora.
@@ -67,7 +69,9 @@ vozen-helper-bot/
 ## Fases
 
 ### Fase 1 — Landing + páginas legais (o site em si)
+
 Deliverable: `site/` completo, abrível no browser local. Dependências: nenhuma.
+
 - [ ] `index.html` com as secções, por ordem:
   - **Hero**: nome "Vozen Helper", tagline (ex.: "Moderação e comunidade, num só bot —
     para o teu servidor."), 2 CTAs (Adicionar ao servidor · Suporte).
@@ -78,9 +82,9 @@ Deliverable: `site/` completo, abrível no browser local. Dependências: nenhuma
   - **Como funciona / setup**: 3 passos (convidar → dar cargo acima dos mods → pronto).
   - **Rodapé**: links Privacidade · Termos · (placeholder) Suporte.
 - [ ] `privacy.html`: que dados o bot guarda — **IDs de utilizador/servidor, casos de
-    moderação, XP, configs**; **NÃO** guarda conteúdo de mensagens; caminho de eliminação;
-    contacto. Honesto e curto. (Adaptar de `Vozen-bot/site/privacy.html`, corrigindo o que
-    é do TTS.)
+      moderação, XP, configs**; **NÃO** guarda conteúdo de mensagens; caminho de eliminação;
+      contacto. Honesto e curto. (Adaptar de `Vozen-bot/site/privacy.html`, corrigindo o que
+      é do TTS.)
 - [ ] `terms.html`: uso aceitável, sem garantias, etc. (adaptar de `Vozen-bot/site/terms.html`).
 - [ ] `css/styles.css` com os tokens do UI Blueprint; responsivo; dark.
 - [ ] `favicon.svg` (tema do ícone do bot).
@@ -89,29 +93,35 @@ Deliverable: `site/` completo, abrível no browser local. Dependências: nenhuma
   (URL de convite OAuth e servidor de suporte — a preencher pelo Diogo).
 
 ### Fase 2 — Build (minify) + repositório
+
 Deliverable: repo `vozen-helper-bot` (público) com o site e o build. Dependências: Fase 1.
+
 - [ ] Portar `Vozen-bot/tools/minify-site.mjs` → minifica `site/` para `site-dist/`
-    (HTML+CSS+JS; legais ficam legíveis). `package.json` com `"build:site"` e a dep de minify.
+      (HTML+CSS+JS; legais ficam legíveis). `package.json` com `"build:site"` e a dep de minify.
 - [ ] `.gitignore` (node_modules, site-dist).
 - [ ] Criar o repo **público** no GitHub (`gh repo create vozen-helper-bot --public` se o
-    `gh` estiver autenticado; senão, mãos do Diogo no site) e `git push`.
+      `gh` estiver autenticado; senão, mãos do Diogo no site) e `git push`.
 - **Done:** `npm run build:site` gera `site-dist/` sem erros; o repo tem o site em `main`.
 
 ### Fase 3 — Publicar no GitHub Pages
+
 Deliverable: site online no URL `github.io`. Dependências: Fase 2.
+
 - [ ] Portar `Vozen-bot/.github/workflows/pages.yml` (build:site → publica `site-dist/`;
-    `configure-pages enablement: true` liga o Pages sozinho na 1.ª corrida).
+      `configure-pages enablement: true` liga o Pages sozinho na 1.ª corrida).
 - [ ] Push → a Action publica; confirmar o URL `https://<user>.github.io/vozen-helper-bot/`.
 - [ ] `site/CNAME` fica vazio/comentado até comprares o domínio.
 - **Done:** o URL github.io serve a landing completa; um push a `site/**` redeploya em
-    ~1 min (visível na aba Actions).
+  ~1 min (visível na aba Actions).
 
 ### Fase 4 (posterior, quando comprares domínio)
+
 - [ ] Colar o domínio no `site/CNAME` + criar os registos DNS (A/CNAME) no registrar.
 - [ ] Confirmar HTTPS automático do Pages no domínio próprio.
 - **Done:** o domínio serve o site com certificado válido. (Fica para depois — não bloqueia.)
 
 ## Riscos
+
 - **Público, não privado**: aceite pelo Diogo; o URL é obscuro mas visível a quem o tiver.
 - **Placeholders de links**: o URL de convite (OAuth do bot) e o do servidor de suporte
   têm de ser colados pelo Diogo — o site deixa-os como `#` com nota até serem dados.
@@ -123,6 +133,7 @@ Deliverable: site online no URL `github.io`. Dependências: Fase 2.
   para uma landing (o Vozen usa-as na mesma). Alternativa (fora de âmbito): auto-hospedar.
 
 ## MVP
+
 Fim da Fase 3: landing pública online no `github.io`, com moderação + comunidade
 apresentadas, páginas legais e CTAs. O domínio próprio é um extra sem pressa (Fase 4).
 

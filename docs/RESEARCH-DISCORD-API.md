@@ -1,8 +1,9 @@
 # Research técnica: capacidades da plataforma Discord para um bot de moderação privado
 
-> Research feita por agente Fable 5 (2026-07-13), focada em TypeScript + discord.js v14. Base do planeamento do **Vozen Helper**.
+> Research técnica realizada em 2026-07-13, focada em TypeScript + discord.js v14. Base do planeamento do **Vozen Helper**.
 
 **Legenda:**
+
 - **[NATIVO]** — o Discord já faz; o bot no máximo configura via API.
 - **[BOT]** — a plataforma não cobre; o bot tem de implementar a lógica.
 - **[HÍBRIDO]** — a plataforma dá a primitiva, o bot orquestra.
@@ -15,17 +16,17 @@ Nota geral: a documentação oficial migrou de `discord.com/developers/docs/...`
 
 Fonte: https://docs.discord.com/developers/resources/auto-moderation
 
-O AutoMod corre **server-side, antes de a mensagem ser publicada** — nenhum bot consegue replicar isto (um bot só age *depois* de a mensagem existir). É a primeira linha de defesa; o bot deve gerir as regras via API em vez de reimplementá-las.
+O AutoMod corre **server-side, antes de a mensagem ser publicada** — nenhum bot consegue replicar isto (um bot só age _depois_ de a mensagem existir). É a primeira linha de defesa; o bot deve gerir as regras via API em vez de reimplementá-las.
 
 ### 1.1 Trigger types e limites por guild
 
-| Trigger | Valor | O que faz | Máx. regras/guild |
-|---|---|---|---|
-| `KEYWORD` | 1 | Conteúdo contém palavras de lista definida (com wildcards e regex) | **6** |
-| `SPAM` | 3 | Deteção genérica de spam do Discord (modelo interno) | 1 |
-| `KEYWORD_PRESET` | 4 | Wordsets internos do Discord (profanity, sexual content, slurs) | 1 |
-| `MENTION_SPAM` | 5 | Mais menções únicas do que o permitido | 1 |
-| `MEMBER_PROFILE` | 6 | Filtra nome/perfil do membro contra keyword list | 1 |
+| Trigger          | Valor | O que faz                                                          | Máx. regras/guild |
+| ---------------- | ----- | ------------------------------------------------------------------ | ----------------- |
+| `KEYWORD`        | 1     | Conteúdo contém palavras de lista definida (com wildcards e regex) | **6**             |
+| `SPAM`           | 3     | Deteção genérica de spam do Discord (modelo interno)               | 1                 |
+| `KEYWORD_PRESET` | 4     | Wordsets internos do Discord (profanity, sexual content, slurs)    | 1                 |
+| `MENTION_SPAM`   | 5     | Mais menções únicas do que o permitido                             | 1                 |
+| `MEMBER_PROFILE` | 6     | Filtra nome/perfil do membro contra keyword list                   | 1                 |
 
 ### 1.2 Limites de trigger metadata
 
@@ -39,12 +40,12 @@ O AutoMod corre **server-side, antes de a mensagem ser publicada** — nenhum bo
 
 Event types: `MESSAGE_SEND` (1) e `MEMBER_UPDATE` (2, para MEMBER_PROFILE).
 
-| Ação | Valor | Metadata | Notas |
-|---|---|---|---|
-| `BLOCK_MESSAGE` | 1 | `custom_message` (máx. 150 chars) | Bloqueia **antes** de publicar |
-| `SEND_ALERT_MESSAGE` | 2 | `channel_id` | Log para canal de alertas |
-| `TIMEOUT` | 3 | `duration_seconds` (máx. **2.419.200 s = 4 semanas**) | Só em KEYWORD e MENTION_SPAM; quem cria a regra precisa de `MODERATE_MEMBERS` |
-| `BLOCK_MEMBER_INTERACTION` | 4 | — | "Quarentena": impede texto, voz e interações (corresponde ao audit log `AUTO_MODERATION_QUARANTINE_USER`) |
+| Ação                       | Valor | Metadata                                              | Notas                                                                                                     |
+| -------------------------- | ----- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `BLOCK_MESSAGE`            | 1     | `custom_message` (máx. 150 chars)                     | Bloqueia **antes** de publicar                                                                            |
+| `SEND_ALERT_MESSAGE`       | 2     | `channel_id`                                          | Log para canal de alertas                                                                                 |
+| `TIMEOUT`                  | 3     | `duration_seconds` (máx. **2.419.200 s = 4 semanas**) | Só em KEYWORD e MENTION_SPAM; quem cria a regra precisa de `MODERATE_MEMBERS`                             |
+| `BLOCK_MEMBER_INTERACTION` | 4     | —                                                     | "Quarentena": impede texto, voz e interações (corresponde ao audit log `AUTO_MODERATION_QUARANTINE_USER`) |
 
 ### 1.4 Isenções (importante para o desenho do bot)
 
@@ -54,6 +55,7 @@ Event types: `MESSAGE_SEND` (1) e `MEMBER_UPDATE` (2, para MEMBER_PROFILE).
 ### 1.5 Gestão via API (o que o bot pode fazer)
 
 Endpoints (permissão `MANAGE_GUILD` para todos):
+
 - `GET /guilds/{guild.id}/auto-moderation/rules` — listar
 - `GET .../rules/{rule.id}` — obter
 - `POST .../rules` — criar (aceita header `X-Audit-Log-Reason`)
@@ -115,17 +117,17 @@ Fonte: https://docs.discord.com/developers/resources/audit-log
 
 ### 2.5 Permissões necessárias — resumo por ação
 
-| Ação | Permissão do bot |
-|---|---|
-| Timeout | `MODERATE_MEMBERS` |
-| Kick | `KICK_MEMBERS` |
-| Ban/unban/lista de bans | `BAN_MEMBERS` |
-| Bulk ban | `BAN_MEMBERS` + `MANAGE_GUILD` |
-| Apagar mensagens / bulk delete | `MANAGE_MESSAGES` |
-| Gerir regras AutoMod | `MANAGE_GUILD` (+ `MODERATE_MEMBERS` p/ ação TIMEOUT) |
-| Ler audit logs / evento gateway | `VIEW_AUDIT_LOG` |
-| Incident actions, onboarding | `MANAGE_GUILD` (onboarding também `MANAGE_ROLES`) |
-| Gerir roles (mute-role legacy, quarentena) | `MANAGE_ROLES` + hierarquia |
+| Ação                                       | Permissão do bot                                      |
+| ------------------------------------------ | ----------------------------------------------------- |
+| Timeout                                    | `MODERATE_MEMBERS`                                    |
+| Kick                                       | `KICK_MEMBERS`                                        |
+| Ban/unban/lista de bans                    | `BAN_MEMBERS`                                         |
+| Bulk ban                                   | `BAN_MEMBERS` + `MANAGE_GUILD`                        |
+| Apagar mensagens / bulk delete             | `MANAGE_MESSAGES`                                     |
+| Gerir regras AutoMod                       | `MANAGE_GUILD` (+ `MODERATE_MEMBERS` p/ ação TIMEOUT) |
+| Ler audit logs / evento gateway            | `VIEW_AUDIT_LOG`                                      |
+| Incident actions, onboarding               | `MANAGE_GUILD` (onboarding também `MANAGE_ROLES`)     |
+| Gerir roles (mute-role legacy, quarentena) | `MANAGE_ROLES` + hierarquia                           |
 
 Regra transversal: **hierarquia de roles** — o bot só age sobre membros cujo role mais alto seja inferior ao role mais alto do bot; nunca sobre o dono.
 
@@ -137,18 +139,18 @@ Fonte: https://docs.discord.com/developers/events/gateway
 
 ### 3.1 Necessários para um bot de moderação
 
-| Intent | Bit | Privileged? | Para quê |
-|---|---|---|---|
-| `GUILDS` | 1<<0 | Não | Canais/roles/threads (anti-nuke), cache base — praticamente obrigatório |
-| `GUILD_MEMBERS` | 1<<1 | **Sim** | `GUILD_MEMBER_ADD/UPDATE/REMOVE` — deteção de raid, screening, perfil |
-| `GUILD_MODERATION` | 1<<2 | Não | `GUILD_AUDIT_LOG_ENTRY_CREATE`, `GUILD_BAN_ADD/REMOVE` |
-| `GUILD_MESSAGES` | 1<<9 | Não | `MESSAGE_CREATE/UPDATE/DELETE/DELETE_BULK` (sem conteúdo) |
-| `MESSAGE_CONTENT` | 1<<15 | **Sim** | Popular `content`, `embeds`, `attachments`, `components` |
-| `AUTO_MODERATION_CONFIGURATION` | 1<<20 | Não | Rule create/update/delete |
-| `AUTO_MODERATION_EXECUTION` | 1<<21 | Não | `AUTO_MODERATION_ACTION_EXECUTION` |
-| `GUILD_WEBHOOKS` | 1<<5 | Não | `WEBHOOKS_UPDATE` (anti-nuke) |
-| `GUILD_INVITES` | 1<<6 | Não | Tracking de invites (atribuir joins a convites em raids) |
-| `GUILD_PRESENCES` | 1<<8 | **Sim** | Geralmente desnecessário para moderação — evitar |
+| Intent                          | Bit   | Privileged? | Para quê                                                                |
+| ------------------------------- | ----- | ----------- | ----------------------------------------------------------------------- |
+| `GUILDS`                        | 1<<0  | Não         | Canais/roles/threads (anti-nuke), cache base — praticamente obrigatório |
+| `GUILD_MEMBERS`                 | 1<<1  | **Sim**     | `GUILD_MEMBER_ADD/UPDATE/REMOVE` — deteção de raid, screening, perfil   |
+| `GUILD_MODERATION`              | 1<<2  | Não         | `GUILD_AUDIT_LOG_ENTRY_CREATE`, `GUILD_BAN_ADD/REMOVE`                  |
+| `GUILD_MESSAGES`                | 1<<9  | Não         | `MESSAGE_CREATE/UPDATE/DELETE/DELETE_BULK` (sem conteúdo)               |
+| `MESSAGE_CONTENT`               | 1<<15 | **Sim**     | Popular `content`, `embeds`, `attachments`, `components`                |
+| `AUTO_MODERATION_CONFIGURATION` | 1<<20 | Não         | Rule create/update/delete                                               |
+| `AUTO_MODERATION_EXECUTION`     | 1<<21 | Não         | `AUTO_MODERATION_ACTION_EXECUTION`                                      |
+| `GUILD_WEBHOOKS`                | 1<<5  | Não         | `WEBHOOKS_UPDATE` (anti-nuke)                                           |
+| `GUILD_INVITES`                 | 1<<6  | Não         | Tracking de invites (atribuir joins a convites em raids)                |
+| `GUILD_PRESENCES`               | 1<<8  | **Sim**     | Geralmente desnecessário para moderação — evitar                        |
 
 ### 3.2 Bot não-verificado num só servidor — resposta direta
 
@@ -168,18 +170,18 @@ Sem o intent, `content`/`embeds`/`attachments`/`components`/`poll` chegam **vazi
 
 Fonte: https://docs.discord.com/developers/events/gateway-events
 
-| Evento | Intent | Uso no bot |
-|---|---|---|
-| `GUILD_MEMBER_ADD` | GUILD_MEMBERS (priv.) | **Anti-raid**: janela deslizante de joins; heurísticas de conta (idade da conta via snowflake, avatar default, padrões de username); campo `pending` para screening |
-| `GUILD_MEMBER_UPDATE` | GUILD_MEMBERS | Deteção de `pending` false→ (fim do screening), timeouts (`communication_disabled_until`), mudanças de roles |
-| `GUILD_MEMBER_REMOVE` | GUILD_MEMBERS | Correlacionar com audit log para distinguir leave/kick/ban |
-| `MESSAGE_CREATE/UPDATE` | GUILD_MESSAGES + MESSAGE_CONTENT | Anti-spam próprio, filtros custom; UPDATE apanha edits para conteúdo proibido pós-facto (o AutoMod também verifica edits nativamente) |
-| `MESSAGE_DELETE / DELETE_BULK` | GUILD_MESSAGES | Logging (conteúdo antigo só se estava em cache) |
-| `GUILD_AUDIT_LOG_ENTRY_CREATE` | GUILD_MODERATION + perm. VIEW_AUDIT_LOG | **Anti-nuke**: contar `CHANNEL_DELETE`/`ROLE_DELETE`/`MEMBER_BAN_ADD`/`MEMBER_KICK`/`WEBHOOK_CREATE` por executor numa janela; atribuição de "quem fez o quê" |
-| `GUILD_BAN_ADD/REMOVE` | GUILD_MODERATION | Log de bans; só enviado a bots com `BAN_MEMBERS` ou `VIEW_AUDIT_LOG` |
-| `CHANNEL_CREATE/UPDATE/DELETE`, `GUILD_ROLE_CREATE/UPDATE/DELETE` | GUILDS | Anti-nuke (o payload não diz quem — cruzar com audit log) |
-| `WEBHOOKS_UPDATE` | GUILD_WEBHOOKS | Só dá `guild_id`+`channel_id`; o executor vem do audit log `WEBHOOK_CREATE` (50) |
-| `AUTO_MODERATION_ACTION_EXECUTION` | AUTO_MODERATION_EXECUTION | Alimentar sistema de infrações a partir dos triggers nativos |
+| Evento                                                            | Intent                                  | Uso no bot                                                                                                                                                          |
+| ----------------------------------------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GUILD_MEMBER_ADD`                                                | GUILD_MEMBERS (priv.)                   | **Anti-raid**: janela deslizante de joins; heurísticas de conta (idade da conta via snowflake, avatar default, padrões de username); campo `pending` para screening |
+| `GUILD_MEMBER_UPDATE`                                             | GUILD_MEMBERS                           | Deteção de `pending` false→ (fim do screening), timeouts (`communication_disabled_until`), mudanças de roles                                                        |
+| `GUILD_MEMBER_REMOVE`                                             | GUILD_MEMBERS                           | Correlacionar com audit log para distinguir leave/kick/ban                                                                                                          |
+| `MESSAGE_CREATE/UPDATE`                                           | GUILD_MESSAGES + MESSAGE_CONTENT        | Anti-spam próprio, filtros custom; UPDATE apanha edits para conteúdo proibido pós-facto (o AutoMod também verifica edits nativamente)                               |
+| `MESSAGE_DELETE / DELETE_BULK`                                    | GUILD_MESSAGES                          | Logging (conteúdo antigo só se estava em cache)                                                                                                                     |
+| `GUILD_AUDIT_LOG_ENTRY_CREATE`                                    | GUILD_MODERATION + perm. VIEW_AUDIT_LOG | **Anti-nuke**: contar `CHANNEL_DELETE`/`ROLE_DELETE`/`MEMBER_BAN_ADD`/`MEMBER_KICK`/`WEBHOOK_CREATE` por executor numa janela; atribuição de "quem fez o quê"       |
+| `GUILD_BAN_ADD/REMOVE`                                            | GUILD_MODERATION                        | Log de bans; só enviado a bots com `BAN_MEMBERS` ou `VIEW_AUDIT_LOG`                                                                                                |
+| `CHANNEL_CREATE/UPDATE/DELETE`, `GUILD_ROLE_CREATE/UPDATE/DELETE` | GUILDS                                  | Anti-nuke (o payload não diz quem — cruzar com audit log)                                                                                                           |
+| `WEBHOOKS_UPDATE`                                                 | GUILD_WEBHOOKS                          | Só dá `guild_id`+`channel_id`; o executor vem do audit log `WEBHOOK_CREATE` (50)                                                                                    |
+| `AUTO_MODERATION_ACTION_EXECUTION`                                | AUTO_MODERATION_EXECUTION               | Alimentar sistema de infrações a partir dos triggers nativos                                                                                                        |
 
 Pegadinha estrutural: os eventos de entidade (channel/role delete, message delete) **nunca incluem o executor** — a atribuição vem sempre do audit log (evento ou fetch).
 
@@ -232,18 +234,18 @@ Fontes: https://discord.js.org/docs/packages/discord.js/main/AutoModerationRuleM
 
 ### 7.1 API surface
 
-| Funcionalidade | discord.js v14 |
-|---|---|
-| Regras AutoMod | `guild.autoModerationRules` (`AutoModerationRuleManager`): `.create()`, `.edit()`, `.delete()`, `.fetch()`; enums `AutoModerationRuleTriggerType`, `AutoModerationRuleEventType`, `AutoModerationActionType` |
-| Eventos AutoMod | `Events.AutoModerationActionExecution`, `Events.AutoModerationRuleCreate/Update/Delete` |
-| Timeout | `member.timeout(ms, reason)` / `member.disableCommunicationUntil(date)`; checks: `member.moderatable`, `member.isCommunicationDisabled()` |
-| Ban/unban | `guild.bans` (`GuildBanManager`): `.create(user, { deleteMessageSeconds, reason })`, `.remove()`, `.fetch()`; **`guild.bans.bulkCreate(users, options)`** → `{ bannedUsers, failedUsers }` |
-| Kick | `member.kick(reason)` / `guild.members.kick()`; check `member.kickable` / `member.bannable` |
-| Bulk delete | `channel.bulkDelete(messagesOuNúmero, filterOld)` |
-| Audit logs | `Events.GuildAuditLogEntryCreate` (entry, guild) + `guild.fetchAuditLogs({ type: AuditLogEvent.X, limit })` |
-| Incident actions | `guild.setIncidentActions({ invitesDisabledUntil, dmsDisabledUntil })` |
-| Onboarding | `guild.fetchOnboarding()` / `guild.editOnboarding()` |
-| Intents | `GatewayIntentBits.Guilds, GuildMembers, GuildModeration, GuildMessages, MessageContent, AutoModerationConfiguration, AutoModerationExecution, GuildWebhooks, GuildInvites` |
+| Funcionalidade   | discord.js v14                                                                                                                                                                                               |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Regras AutoMod   | `guild.autoModerationRules` (`AutoModerationRuleManager`): `.create()`, `.edit()`, `.delete()`, `.fetch()`; enums `AutoModerationRuleTriggerType`, `AutoModerationRuleEventType`, `AutoModerationActionType` |
+| Eventos AutoMod  | `Events.AutoModerationActionExecution`, `Events.AutoModerationRuleCreate/Update/Delete`                                                                                                                      |
+| Timeout          | `member.timeout(ms, reason)` / `member.disableCommunicationUntil(date)`; checks: `member.moderatable`, `member.isCommunicationDisabled()`                                                                    |
+| Ban/unban        | `guild.bans` (`GuildBanManager`): `.create(user, { deleteMessageSeconds, reason })`, `.remove()`, `.fetch()`; **`guild.bans.bulkCreate(users, options)`** → `{ bannedUsers, failedUsers }`                   |
+| Kick             | `member.kick(reason)` / `guild.members.kick()`; check `member.kickable` / `member.bannable`                                                                                                                  |
+| Bulk delete      | `channel.bulkDelete(messagesOuNúmero, filterOld)`                                                                                                                                                            |
+| Audit logs       | `Events.GuildAuditLogEntryCreate` (entry, guild) + `guild.fetchAuditLogs({ type: AuditLogEvent.X, limit })`                                                                                                  |
+| Incident actions | `guild.setIncidentActions({ invitesDisabledUntil, dmsDisabledUntil })`                                                                                                                                       |
+| Onboarding       | `guild.fetchOnboarding()` / `guild.editOnboarding()`                                                                                                                                                         |
+| Intents          | `GatewayIntentBits.Guilds, GuildMembers, GuildModeration, GuildMessages, MessageContent, AutoModerationConfiguration, AutoModerationExecution, GuildWebhooks, GuildInvites`                                  |
 
 ### 7.2 Pegadinhas conhecidas
 
@@ -269,6 +271,7 @@ Fontes: https://discord.js.org/docs/packages/discord.js/main/AutoModerationRuleM
 **O bot tem de implementar:** sistema de warns/infrações/escalada com persistência; anti-spam paramétrico (rate, duplicados, embeds/anexos); anti-raid por taxa de joins e heurísticas de conta + resposta automática (subir verification level, `setIncidentActions`, lockdown de canais, kick/ban em massa); anti-nuke por contagem de ações destrutivas por executor via `GuildAuditLogEntryCreate` (channels/roles/webhooks/bans) com resposta de remoção de roles; captcha/gate interativo; logging enriquecido (quem apagou o quê, com conteúdo cacheado); moderação de conteúdo de bots/webhooks (invisível ao AutoMod); qualquer ação sobre mensagens >14 dias (uma a uma).
 
 ### Fontes principais
+
 - AutoMod: https://docs.discord.com/developers/resources/auto-moderation ; https://support.discord.com/hc/en-us/articles/4421269296535-AutoMod-FAQ ; https://discord.com/safety/auto-moderation-in-discord
 - Guild (timeout, bans, bulk ban, incident actions, screening, onboarding): https://docs.discord.com/developers/resources/guild
 - Audit logs: https://docs.discord.com/developers/resources/audit-log

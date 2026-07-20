@@ -1,6 +1,6 @@
-# CLAUDE.md
+# Contribuir para o Vozen Helper
 
-Guia para agentes de IA a trabalhar no **Vozen Helper** (bot de moderação privado).
+Regras e guia de desenvolvimento do **Vozen Helper** (bot de moderação privado).
 
 ## Comandos
 
