@@ -25,6 +25,8 @@ const FAKE_CHANNELS = [
   { id: '900000000000000003', name: 'sugestoes', type: 0 },
 ];
 
+let sessionNow: number;
+
 function makeApp(
   db: Database.Database,
   user: DiscordUser | null | 'throw',
@@ -44,6 +46,7 @@ function makeApp(
       return user;
     },
     listChannels: async () => FAKE_CHANNELS,
+    now: () => sessionNow,
   });
 }
 
@@ -66,6 +69,7 @@ async function loginToken(app: FastifyInstance): Promise<string> {
 let db: Database.Database;
 beforeEach(() => {
   db = initDb(':memory:');
+  sessionNow = 1_000_000_000_000;
 });
 
 describe('POST /api/session', () => {
@@ -78,6 +82,19 @@ describe('POST /api/session', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.cookies.find((c) => c.name === 'vh_session')).toBeTruthy();
+  });
+
+  it('guarda no cookie exatamente o token de sessão devolvido ao painel', async () => {
+    const app = makeApp(db, { id: ALLOWED, username: 'diogo' });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/session',
+      payload: { token: 'abc' },
+    });
+    const token = (res.json() as { token: string }).token;
+    const cookie = res.cookies.find((c) => c.name === 'vh_session');
+    if (!cookie) throw new Error('sessão sem cookie');
+    expect(app.unsignCookie(cookie.value).value).toBe(token);
   });
 
   it('bloqueia outra conta (403)', async () => {
@@ -151,6 +168,44 @@ describe('GET /api/me (protegida)', () => {
       cookies: { vh_session: ALLOWED }, // valor sem assinatura válida
     });
     expect(res.statusCode).toBe(401);
+  });
+
+  it('cookie antigo assinado que só contém o ID → 401', async () => {
+    const app = makeApp(db, { id: ALLOWED, username: 'd' });
+    await app.ready();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/me',
+      cookies: { vh_session: app.signCookie(ALLOWED) },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('cookie expira antes, no momento e depois do TTL', async () => {
+    const app = makeApp(db, { id: ALLOWED, username: 'd' });
+    const cookie = await login(app);
+    const before = await app.inject({
+      method: 'GET',
+      url: '/api/me',
+      cookies: { vh_session: cookie },
+    });
+    expect(before.statusCode).toBe(200);
+
+    sessionNow += 8 * 60 * 60 * 1000;
+    const atExpiry = await app.inject({
+      method: 'GET',
+      url: '/api/me',
+      cookies: { vh_session: cookie },
+    });
+    expect(atExpiry.statusCode).toBe(401);
+
+    sessionNow += 1;
+    const afterExpiry = await app.inject({
+      method: 'GET',
+      url: '/api/me',
+      cookies: { vh_session: cookie },
+    });
+    expect(afterExpiry.statusCode).toBe(401);
   });
 });
 
@@ -345,6 +400,57 @@ describe('auth por token (header Authorization)', () => {
     expect(after.statusCode).toBe(401);
   });
 
+  it('logout revoga tanto o Bearer como o token transportado no cookie', async () => {
+    const app = makeApp(db, { id: ALLOWED, username: 'd' });
+    const bearer = await loginToken(app);
+    sessionNow += 1_000;
+    const loginResponse = await app.inject({
+      method: 'POST',
+      url: '/api/session',
+      payload: { token: 'abc' },
+    });
+    const cookie = loginResponse.cookies.find((c) => c.name === 'vh_session');
+    const cookieToken = (loginResponse.json() as { token: string }).token;
+    if (!cookie) throw new Error('sessão sem cookie');
+
+    await app.inject({
+      method: 'POST',
+      url: '/api/logout',
+      headers: { authorization: 'Bearer ' + bearer },
+      cookies: { vh_session: cookie.value },
+    });
+
+    const bearerAfter = await app.inject({
+      method: 'GET',
+      url: '/api/me',
+      headers: { authorization: 'Bearer ' + bearer },
+    });
+    const cookieAfter = await app.inject({
+      method: 'GET',
+      url: '/api/me',
+      headers: { authorization: 'Bearer ' + cookieToken },
+    });
+    expect(bearerAfter.statusCode).toBe(401);
+    expect(cookieAfter.statusCode).toBe(401);
+  });
+
+  it('logout com token inválido não interfere com uma sessão válida', async () => {
+    const app = makeApp(db, { id: ALLOWED, username: 'd' });
+    const token = await loginToken(app);
+    const logout = await app.inject({
+      method: 'POST',
+      url: '/api/logout',
+      headers: { authorization: 'Bearer valor-inválido-sem-registo' },
+    });
+    expect(logout.statusCode).toBe(200);
+    const stillValid = await app.inject({
+      method: 'GET',
+      url: '/api/me',
+      headers: { authorization: 'Bearer ' + token },
+    });
+    expect(stillValid.statusCode).toBe(200);
+  });
+
   it('Bearer forjado → 401', async () => {
     const app = makeApp(db, { id: ALLOWED, username: 'd' });
     const res = await app.inject({
@@ -367,6 +473,11 @@ describe('signSessionToken / verifySessionToken', () => {
     const now = 1_000_000_000_000;
     const t = signSessionToken(ALLOWED, S, now, 10);
     expect(verifySessionToken(t, S, now + 20_000)).toBeNull();
+  });
+  it('rejeita no instante exato da expiração', () => {
+    const now = 1_000_000_000_000;
+    const t = signSessionToken(ALLOWED, S, now, 10);
+    expect(verifySessionToken(t, S, now + 10_000)).toBeNull();
   });
   it('rejeita segredo errado', () => {
     const now = 1_000_000_000_000;
