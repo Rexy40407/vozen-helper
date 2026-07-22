@@ -7,6 +7,8 @@
 
 /** Configuração da API já validada. */
 export interface ApiConfig {
+  /** Application ID Discord esperada no token OAuth do painel. */
+  clientId: string;
   /** Única conta Discord autorizada a usar o painel. */
   allowedUserId: string;
   /** ÚNICO servidor cujos dados a API serve (single-guild). */
@@ -39,11 +41,13 @@ export function loadApiEnv(env: Record<string, string | undefined>): ApiConfig {
   const missing: string[] = [];
 
   const allowedUserId = (env.PANEL_ALLOWED_USER_ID ?? '').trim();
+  const clientId = (env.CLIENT_ID ?? '').trim();
   const sessionSecret = (env.PANEL_SESSION_SECRET ?? '').trim();
   const guildId = (env.GUILD_ID ?? '').trim();
   const botToken = (env.DISCORD_TOKEN ?? '').trim();
 
   if (!allowedUserId) missing.push('PANEL_ALLOWED_USER_ID');
+  if (!clientId) missing.push('CLIENT_ID');
   if (!sessionSecret) missing.push('PANEL_SESSION_SECRET');
   if (!guildId) missing.push('GUILD_ID');
   if (!botToken) missing.push('DISCORD_TOKEN');
@@ -60,6 +64,9 @@ export function loadApiEnv(env: Record<string, string | undefined>): ApiConfig {
       `PANEL_ALLOWED_USER_ID não parece um ID do Discord válido: "${allowedUserId}".`,
     );
   }
+  if (!/^\d{17,20}$/.test(clientId)) {
+    throw new ApiConfigError(`CLIENT_ID não parece um ID do Discord válido: "${clientId}".`);
+  }
   if (!/^\d{17,20}$/.test(guildId)) {
     throw new ApiConfigError(`GUILD_ID não parece um ID do Discord válido: "${guildId}".`);
   }
@@ -71,5 +78,5 @@ export function loadApiEnv(env: Record<string, string | undefined>): ApiConfig {
   const allowedOrigin = (env.PANEL_ALLOWED_ORIGIN ?? 'https://rexy40407.github.io').trim();
   const dbPath = (env.DB_PATH ?? '').trim() || './vozen-helper.db';
 
-  return { allowedUserId, guildId, botToken, sessionSecret, port, allowedOrigin, dbPath };
+  return { clientId, allowedUserId, guildId, botToken, sessionSecret, port, allowedOrigin, dbPath };
 }

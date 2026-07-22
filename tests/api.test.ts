@@ -14,6 +14,7 @@ import { signSessionToken, verifySessionToken } from '../src/api/session.js';
 // só a conta autorizada obtém sessão e lê dados do servidor.
 
 const ALLOWED = '1523489275155583056';
+const CLIENT_ID = '1526211106081734666';
 const GUILD = '1523482270814572584';
 const SECRET = 'x'.repeat(40);
 const ORIGIN = 'https://rexy40407.github.io';
@@ -24,15 +25,21 @@ const FAKE_CHANNELS = [
   { id: '900000000000000003', name: 'sugestoes', type: 0 },
 ];
 
-function makeApp(db: Database.Database, user: DiscordUser | null | 'throw') {
+function makeApp(
+  db: Database.Database,
+  user: DiscordUser | null | 'throw',
+  onVerify?: (clientId: string) => void,
+) {
   return buildServer({
+    clientId: CLIENT_ID,
     allowedUserId: ALLOWED,
     guildId: GUILD,
     botToken: 'bot-token',
     sessionSecret: SECRET,
     allowedOrigin: ORIGIN,
     db,
-    verifyUser: async () => {
+    verifyUser: async (_token, clientId) => {
+      onVerify?.(clientId);
       if (user === 'throw') throw new Error('rede');
       return user;
     },
@@ -64,21 +71,33 @@ beforeEach(() => {
 describe('POST /api/session', () => {
   it('cria sessão para a conta permitida (200 + cookie)', async () => {
     const app = makeApp(db, { id: ALLOWED, username: 'diogo' });
-    const res = await app.inject({ method: 'POST', url: '/api/session', payload: { token: 'abc' } });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/session',
+      payload: { token: 'abc' },
+    });
     expect(res.statusCode).toBe(200);
     expect(res.cookies.find((c) => c.name === 'vh_session')).toBeTruthy();
   });
 
   it('bloqueia outra conta (403)', async () => {
     const app = makeApp(db, { id: '999999999999999999', username: 'outro' });
-    const res = await app.inject({ method: 'POST', url: '/api/session', payload: { token: 'abc' } });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/session',
+      payload: { token: 'abc' },
+    });
     expect(res.statusCode).toBe(403);
     expect(res.cookies.find((c) => c.name === 'vh_session')).toBeUndefined();
   });
 
   it('token inválido → 401', async () => {
     const app = makeApp(db, null);
-    const res = await app.inject({ method: 'POST', url: '/api/session', payload: { token: 'abc' } });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/session',
+      payload: { token: 'abc' },
+    });
     expect(res.statusCode).toBe(401);
   });
 
@@ -90,7 +109,11 @@ describe('POST /api/session', () => {
 
   it('Discord inacessível → 502', async () => {
     const app = makeApp(db, 'throw');
-    const res = await app.inject({ method: 'POST', url: '/api/session', payload: { token: 'abc' } });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/session',
+      payload: { token: 'abc' },
+    });
     expect(res.statusCode).toBe(502);
   });
 });
@@ -104,7 +127,11 @@ describe('GET /api/me (protegida)', () => {
 
   it('com cookie válido → 200 e lê a DB', async () => {
     const app = makeApp(db, { id: ALLOWED, username: 'd' });
-    const login = await app.inject({ method: 'POST', url: '/api/session', payload: { token: 'abc' } });
+    const login = await app.inject({
+      method: 'POST',
+      url: '/api/session',
+      payload: { token: 'abc' },
+    });
     const c = login.cookies.find((x) => x.name === 'vh_session');
     if (!c) throw new Error('sessão sem cookie');
     const res = await app.inject({
@@ -135,12 +162,36 @@ describe('GET /api/cases (protegida)', () => {
   });
 
   it('devolve os casos do servidor, do mais recente ao mais antigo', async () => {
-    insertCase(db, { guildId: GUILD, type: 'warn', targetId: 'u1', moderatorId: 'm', reason: 'a', createdAt: 1 });
-    insertCase(db, { guildId: GUILD, type: 'ban', targetId: 'u2', moderatorId: 'm', reason: 'b', createdAt: 2 });
-    insertCase(db, { guildId: 'outro-guild', type: 'kick', targetId: 'u3', moderatorId: 'm', createdAt: 3 });
+    insertCase(db, {
+      guildId: GUILD,
+      type: 'warn',
+      targetId: 'u1',
+      moderatorId: 'm',
+      reason: 'a',
+      createdAt: 1,
+    });
+    insertCase(db, {
+      guildId: GUILD,
+      type: 'ban',
+      targetId: 'u2',
+      moderatorId: 'm',
+      reason: 'b',
+      createdAt: 2,
+    });
+    insertCase(db, {
+      guildId: 'outro-guild',
+      type: 'kick',
+      targetId: 'u3',
+      moderatorId: 'm',
+      createdAt: 3,
+    });
     const app = makeApp(db, { id: ALLOWED, username: 'd' });
     const cookie = await login(app);
-    const res = await app.inject({ method: 'GET', url: '/api/cases', cookies: { vh_session: cookie } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/cases',
+      cookies: { vh_session: cookie },
+    });
     expect(res.statusCode).toBe(200);
     const body = res.json() as { cases: { id: number; type: string }[] };
     expect(body.cases).toHaveLength(2); // exclui o outro guild
@@ -167,14 +218,28 @@ describe('GET /api/activity (protegida)', () => {
   });
 
   it('devolve a atividade do servidor (recente primeiro, exclui outro guild) + total', async () => {
-    logActivity(db, { guildId: GUILD, type: 'join', userId: 'u1', userTag: 'A#1', detail: { inviteCode: 'abc' }, createdAt: 1 });
+    logActivity(db, {
+      guildId: GUILD,
+      type: 'join',
+      userId: 'u1',
+      userTag: 'A#1',
+      detail: { inviteCode: 'abc' },
+      createdAt: 1,
+    });
     logActivity(db, { guildId: GUILD, type: 'leave', userId: 'u2', userTag: 'B#2', createdAt: 2 });
     logActivity(db, { guildId: 'outro-guild', type: 'join', userId: 'u3', createdAt: 3 });
     const app = makeApp(db, { id: ALLOWED, username: 'd' });
     const cookie = await login(app);
-    const res = await app.inject({ method: 'GET', url: '/api/activity', cookies: { vh_session: cookie } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/activity',
+      cookies: { vh_session: cookie },
+    });
     expect(res.statusCode).toBe(200);
-    const body = res.json() as { activity: { type: string; detail: Record<string, unknown> }[]; total: number };
+    const body = res.json() as {
+      activity: { type: string; detail: Record<string, unknown> }[];
+      total: number;
+    };
     expect(body.activity).toHaveLength(2); // exclui o outro guild
     expect(body.activity[0].type).toBe('leave'); // mais recente primeiro
     expect(body.activity[1].detail.inviteCode).toBe('abc'); // detail parseado
@@ -186,7 +251,11 @@ describe('GET /api/activity (protegida)', () => {
     logActivity(db, { guildId: GUILD, type: 'leave', userId: 'u2', createdAt: 2 });
     const app = makeApp(db, { id: ALLOWED, username: 'd' });
     const cookie = await login(app);
-    const res = await app.inject({ method: 'GET', url: '/api/activity?type=join', cookies: { vh_session: cookie } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/activity?type=join',
+      cookies: { vh_session: cookie },
+    });
     const body = res.json() as { activity: { type: string }[] };
     expect(body.activity).toHaveLength(1);
     expect(body.activity[0].type).toBe('join');
@@ -198,10 +267,20 @@ describe('GET /api/stats (protegida)', () => {
     incrStat(db, GUILD, '2026-07-14', 'messages');
     incrStat(db, GUILD, '2026-07-14', 'messages');
     incrStat(db, GUILD, '2026-07-14', 'joins');
-    insertCase(db, { guildId: GUILD, type: 'warn', targetId: 'u1', moderatorId: 'm', createdAt: 1 });
+    insertCase(db, {
+      guildId: GUILD,
+      type: 'warn',
+      targetId: 'u1',
+      moderatorId: 'm',
+      createdAt: 1,
+    });
     const app = makeApp(db, { id: ALLOWED, username: 'd' });
     const cookie = await login(app);
-    const res = await app.inject({ method: 'GET', url: '/api/stats', cookies: { vh_session: cookie } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/stats',
+      cookies: { vh_session: cookie },
+    });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ messages: 2, joins: 1, leaves: 0, totalCases: 1 });
   });
@@ -248,14 +327,20 @@ describe('auth por token (header Authorization)', () => {
     const app = makeApp(db, { id: ALLOWED, username: 'd' });
     const token = await loginToken(app);
     const before = await app.inject({
-      method: 'GET', url: '/api/me', headers: { authorization: 'Bearer ' + token },
+      method: 'GET',
+      url: '/api/me',
+      headers: { authorization: 'Bearer ' + token },
     });
     expect(before.statusCode).toBe(200);
     await app.inject({
-      method: 'POST', url: '/api/logout', headers: { authorization: 'Bearer ' + token },
+      method: 'POST',
+      url: '/api/logout',
+      headers: { authorization: 'Bearer ' + token },
     });
     const after = await app.inject({
-      method: 'GET', url: '/api/me', headers: { authorization: 'Bearer ' + token },
+      method: 'GET',
+      url: '/api/me',
+      headers: { authorization: 'Bearer ' + token },
     });
     expect(after.statusCode).toBe(401);
   });
@@ -540,25 +625,81 @@ describe('GET /health', () => {
 });
 
 describe('fetchDiscordUser', () => {
-  it('200 → devolve o utilizador', async () => {
-    const fake: FetchLike = async () =>
-      new Response(JSON.stringify({ id: '1', username: 'a' }), { status: 200 });
-    const u = await fetchDiscordUser('tok', fake);
+  function discordFetch(responses: Response[], calls?: string[]): FetchLike {
+    return async (input) => {
+      calls?.push(input);
+      const response = responses.shift();
+      if (!response) throw new Error('pedido Discord inesperado');
+      return response;
+    };
+  }
+
+  const validOAuth = { application: { id: CLIENT_ID }, scopes: ['identify'], user: { id: '1' } };
+
+  it('OAuth válido para a app esperada e /users/@me igual → devolve o utilizador', async () => {
+    const fake = discordFetch([
+      new Response(JSON.stringify(validOAuth), { status: 200 }),
+      new Response(JSON.stringify({ id: '1', username: 'a' }), { status: 200 }),
+    ]);
+    const u = await fetchDiscordUser('tok', CLIENT_ID, fake);
     expect(u?.id).toBe('1');
   });
 
-  it('401 → null', async () => {
-    const fake: FetchLike = async () => new Response('no', { status: 401 });
-    expect(await fetchDiscordUser('tok', fake)).toBeNull();
+  it('passa o CLIENT_ID configurado ao verificador antes de emitir sessão', async () => {
+    let verifiedClientId = '';
+    const app = makeApp(db, { id: ALLOWED, username: 'diogo' }, (clientId) => {
+      verifiedClientId = clientId;
+    });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/session',
+      payload: { token: 'abc' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(verifiedClientId).toBe(CLIENT_ID);
   });
 
-  it('token vazio → null (nem chama o fetch)', async () => {
+  it.each([
+    ['app OAuth errada', { ...validOAuth, application: { id: '999999999999999999' } }],
+    ['scope identify ausente', { ...validOAuth, scopes: [] }],
+    ['resposta OAuth malformada', { application: { id: CLIENT_ID }, scopes: ['identify'] }],
+  ])('%s → null sem chamar /users/@me', async (_name, oauth) => {
+    const calls: string[] = [];
+    const fake = discordFetch([new Response(JSON.stringify(oauth), { status: 200 })], calls);
+    expect(await fetchDiscordUser('tok', CLIENT_ID, fake)).toBeNull();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain('/oauth2/@me');
+  });
+
+  it('utilizador OAuth diferente de /users/@me → null', async () => {
+    const fake = discordFetch([
+      new Response(JSON.stringify(validOAuth), { status: 200 }),
+      new Response(JSON.stringify({ id: '2', username: 'a' }), { status: 200 }),
+    ]);
+    expect(await fetchDiscordUser('tok', CLIENT_ID, fake)).toBeNull();
+  });
+
+  it('resposta /users/@me malformada → null', async () => {
+    const fake = discordFetch([
+      new Response(JSON.stringify(validOAuth), { status: 200 }),
+      new Response(JSON.stringify({ username: 'a' }), { status: 200 }),
+    ]);
+    expect(await fetchDiscordUser('tok', CLIENT_ID, fake)).toBeNull();
+  });
+
+  it('rejeição Discord → null', async () => {
+    const fake = discordFetch([new Response('no', { status: 401 })]);
+    expect(await fetchDiscordUser('tok', CLIENT_ID, fake)).toBeNull();
+  });
+
+  it('token ou client ID vazio → null (nem chama o fetch)', async () => {
     let called = false;
     const fake: FetchLike = async () => {
       called = true;
       return new Response('', { status: 200 });
     };
-    expect(await fetchDiscordUser('', fake)).toBeNull();
+    expect(await fetchDiscordUser('', CLIENT_ID, fake)).toBeNull();
+    expect(await fetchDiscordUser('tok', '', fake)).toBeNull();
     expect(called).toBe(false);
   });
 });
@@ -566,6 +707,7 @@ describe('fetchDiscordUser', () => {
 describe('loadApiEnv', () => {
   const OK = {
     PANEL_ALLOWED_USER_ID: ALLOWED,
+    CLIENT_ID,
     PANEL_SESSION_SECRET: SECRET,
     GUILD_ID: GUILD,
     DISCORD_TOKEN: 'bot-token',
@@ -574,6 +716,7 @@ describe('loadApiEnv', () => {
   it('aceita config válida', () => {
     const cfg = loadApiEnv(OK);
     expect(cfg.allowedUserId).toBe(ALLOWED);
+    expect(cfg.clientId).toBe(CLIENT_ID);
     expect(cfg.guildId).toBe(GUILD);
     expect(cfg.port).toBe(8788);
     expect(cfg.allowedOrigin).toBe(ORIGIN);
@@ -597,5 +740,11 @@ describe('loadApiEnv', () => {
 
   it('falha com id inválido', () => {
     expect(() => loadApiEnv({ ...OK, PANEL_ALLOWED_USER_ID: 'nope' })).toThrow(ApiConfigError);
+  });
+
+  it('falha se faltar ou se CLIENT_ID for inválido', () => {
+    const { CLIENT_ID: _clientId, ...withoutClientId } = OK;
+    expect(() => loadApiEnv(withoutClientId)).toThrow(ApiConfigError);
+    expect(() => loadApiEnv({ ...OK, CLIENT_ID: 'nope' })).toThrow(ApiConfigError);
   });
 });

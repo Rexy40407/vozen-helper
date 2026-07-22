@@ -11,6 +11,7 @@ async function main(): Promise<void> {
   const cfg = loadApiEnv(process.env);
   const db = openApiDb(cfg.dbPath);
   const app = buildServer({
+    clientId: cfg.clientId,
     allowedUserId: cfg.allowedUserId,
     guildId: cfg.guildId,
     botToken: cfg.botToken,

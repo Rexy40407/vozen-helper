@@ -43,6 +43,8 @@ const MAX_ACTIVITY = 200;
 const ACTIVITY_TYPES = new Set(['join', 'leave', 'ban', 'unban', 'kick']);
 
 export interface ServerOptions {
+  /** Application ID Discord esperada no token OAuth do painel. */
+  clientId: string;
   /** Única conta autorizada. */
   allowedUserId: string;
   /** ÚNICO servidor cujos dados a API serve. */
@@ -56,14 +58,15 @@ export interface ServerOptions {
   /** Handle de leitura da SQLite do bot. */
   db: Database.Database;
   /** Verificador de token (injetável nos testes; default = Discord real). */
-  verifyUser?: (token: string) => Promise<DiscordUser | null>;
+  verifyUser?: (token: string, clientId: string) => Promise<DiscordUser | null>;
   /** Lista de canais (injetável nos testes; default = REST do Discord). */
   listChannels?: () => Promise<GuildChannel[]>;
 }
 
 /** Constrói (sem arrancar) a instância Fastify com as rotas da Fase 1. */
 export function buildServer(opts: ServerOptions): FastifyInstance {
-  const verify = opts.verifyUser ?? ((token: string) => fetchDiscordUser(token));
+  const verify =
+    opts.verifyUser ?? ((token: string, clientId: string) => fetchDiscordUser(token, clientId));
   const listChannels = opts.listChannels ?? (() => fetchGuildChannels(opts.botToken, opts.guildId));
   // Cache curto da lista de canais (evita bater na REST do Discord a cada pedido).
   let chanCache: { at: number; list: GuildChannel[] } | null = null;
@@ -101,7 +104,7 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
 
     let user: DiscordUser | null;
     try {
-      user = await verify(token);
+      user = await verify(token, opts.clientId);
     } catch {
       return reply.code(502).send({ error: 'discord_unreachable' });
     }
@@ -205,19 +208,31 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
   });
 
   // Liga/desliga um subsistema. ESCRITA — allowlist de chaves + validação estrita.
-  app.patch('/api/flags', { preHandler: guard }, async (req: FastifyRequest, reply: FastifyReply) => {
-    const body = (req.body ?? {}) as { key?: unknown; enabled?: unknown };
-    const key = typeof body.key === 'string' ? body.key : '';
-    const enabled = body.enabled;
-    if (!FLAG_KEYS.has(key)) return reply.code(400).send({ error: 'invalid_key' });
-    if (typeof enabled !== 'boolean') return reply.code(400).send({ error: 'invalid_value' });
+  app.patch(
+    '/api/flags',
+    { preHandler: guard },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const body = (req.body ?? {}) as { key?: unknown; enabled?: unknown };
+      const key = typeof body.key === 'string' ? body.key : '';
+      const enabled = body.enabled;
+      if (!FLAG_KEYS.has(key)) return reply.code(400).send({ error: 'invalid_key' });
+      if (typeof enabled !== 'boolean') return reply.code(400).send({ error: 'invalid_value' });
 
-    setSetting(opts.db, opts.guildId, flagSettingKey(key), enabled ? 'true' : 'false', Date.now());
-    clearFlagCache(); // este processo reflete já; o bot apanha via TTL
-    // Auditoria (fica no api.log).
-    console.log(`[api] flag ${key}=${enabled} por ${opts.allowedUserId} @ ${new Date().toISOString()}`);
-    return { ok: true, flags: getEffectiveFlags(opts.db, opts.guildId, modConfig) };
-  });
+      setSetting(
+        opts.db,
+        opts.guildId,
+        flagSettingKey(key),
+        enabled ? 'true' : 'false',
+        Date.now(),
+      );
+      clearFlagCache(); // este processo reflete já; o bot apanha via TTL
+      // Auditoria (fica no api.log).
+      console.log(
+        `[api] flag ${key}=${enabled} por ${opts.allowedUserId} @ ${new Date().toISOString()}`,
+      );
+      return { ok: true, flags: getEffectiveFlags(opts.db, opts.guildId, modConfig) };
+    },
+  );
 
   // Textos editáveis (ex.: mensagem da DM de boas-vindas). Override na DB ou default.
   app.get('/api/text-settings', { preHandler: guard }, async () => {
@@ -225,29 +240,40 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
   });
 
   // Edita um texto. ESCRITA — allowlist de chaves + limite de tamanho por chave.
-  app.patch('/api/text-settings', { preHandler: guard }, async (req: FastifyRequest, reply: FastifyReply) => {
-    const body = (req.body ?? {}) as { key?: unknown; value?: unknown };
-    const key = typeof body.key === 'string' ? body.key : '';
-    const value = typeof body.value === 'string' ? body.value : null;
-    if (!TEXT_SETTING_KEYS.has(key)) return reply.code(400).send({ error: 'invalid_key' });
-    if (value === null || value.trim().length === 0) return reply.code(400).send({ error: 'empty' });
-    const def = TEXT_DEFS.find((t) => t.key === key);
-    if (def && value.length > def.maxLen) return reply.code(400).send({ error: 'too_long' });
+  app.patch(
+    '/api/text-settings',
+    { preHandler: guard },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const body = (req.body ?? {}) as { key?: unknown; value?: unknown };
+      const key = typeof body.key === 'string' ? body.key : '';
+      const value = typeof body.value === 'string' ? body.value : null;
+      if (!TEXT_SETTING_KEYS.has(key)) return reply.code(400).send({ error: 'invalid_key' });
+      if (value === null || value.trim().length === 0)
+        return reply.code(400).send({ error: 'empty' });
+      const def = TEXT_DEFS.find((t) => t.key === key);
+      if (def && value.length > def.maxLen) return reply.code(400).send({ error: 'too_long' });
 
-    setSetting(opts.db, opts.guildId, textSettingKey(key), value, Date.now());
-    clearTextCache(); // este processo reflete já; o bot apanha via TTL
-    console.log(`[api] text ${key} (${value.length} chars) por ${opts.allowedUserId} @ ${new Date().toISOString()}`);
-    return { ok: true, texts: getEffectiveTexts(opts.db, opts.guildId, modConfig) };
-  });
+      setSetting(opts.db, opts.guildId, textSettingKey(key), value, Date.now());
+      clearTextCache(); // este processo reflete já; o bot apanha via TTL
+      console.log(
+        `[api] text ${key} (${value.length} chars) por ${opts.allowedUserId} @ ${new Date().toISOString()}`,
+      );
+      return { ok: true, texts: getEffectiveTexts(opts.db, opts.guildId, modConfig) };
+    },
+  );
 
   // Lista de canais do servidor (para os dropdowns do painel).
-  app.get('/api/channels', { preHandler: guard }, async (_req: FastifyRequest, reply: FastifyReply) => {
-    try {
-      return { channels: await channels(Date.now()) };
-    } catch {
-      return reply.code(502).send({ error: 'discord_unreachable' });
-    }
-  });
+  app.get(
+    '/api/channels',
+    { preHandler: guard },
+    async (_req: FastifyRequest, reply: FastifyReply) => {
+      try {
+        return { channels: await channels(Date.now()) };
+      } catch {
+        return reply.code(502).send({ error: 'discord_unreachable' });
+      }
+    },
+  );
 
   // Estado atual das definições de canal.
   app.get('/api/channel-settings', { preHandler: guard }, async () => {
@@ -276,7 +302,9 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
 
       setSetting(opts.db, opts.guildId, key, value, Date.now());
       clearChannelCache();
-      console.log(`[api] channel ${key}=${value} por ${opts.allowedUserId} @ ${new Date().toISOString()}`);
+      console.log(
+        `[api] channel ${key}=${value} por ${opts.allowedUserId} @ ${new Date().toISOString()}`,
+      );
       return { ok: true, settings: getChannelSettingsView(opts.db, opts.guildId, modConfig) };
     },
   );
