@@ -15,6 +15,11 @@ pub struct Store {
     conn: Arc<Mutex<Connection>>,
 }
 
+/// Durable scheduler row kept as a tuple to preserve the runtime's small
+/// dispatch surface. The fields are `(id, guild_id, action_type, target_id,
+/// payload)`.
+pub type ScheduledAction = (i64, String, String, String, String);
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CaseRecord {
     pub id: i64,
@@ -256,11 +261,7 @@ impl Store {
         Ok(true)
     }
 
-    pub fn due_scheduled_actions(
-        &self,
-        now_ms: i64,
-        limit: u32,
-    ) -> Result<Vec<(i64, String, String, String, String)>> {
+    pub fn due_scheduled_actions(&self, now_ms: i64, limit: u32) -> Result<Vec<ScheduledAction>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut stmt = conn.prepare("SELECT id,guild_id,type,target_id,payload FROM scheduled_actions WHERE execute_at<=?1 ORDER BY execute_at ASC LIMIT ?2")?;
         let rows = stmt.query_map(params![now_ms, i64::from(limit.min(100))], |r| {
@@ -583,6 +584,7 @@ impl Store {
         Ok(stmt.query_row([id], |row| Ok((row.get(0)?, row.get(1)?)))?)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_giveaway(
         &self,
         guild_id: &str,
