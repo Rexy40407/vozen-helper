@@ -1,0 +1,36 @@
+name: Rust Helper release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [migration/helper-rust-public]
+
+permissions:
+  contents: read
+
+jobs:
+  linux-release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test workspace
+        run: cargo test --workspace
+      - name: Build release
+        run: cargo build --release -p helper-runtime
+      - name: Package
+        run: |
+          mkdir -p release/bin release/deploy
+          cp target/release/vozen-helper release/bin/vozen-helper
+          cp deploy/vozen-helper-rust.service release/deploy/
+          cp deploy/ROLLBACK.md release/deploy/
+          tar -czf vozen-helper-rust-${GITHUB_SHA}.tar.gz -C release .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vozen-helper-rust-linux-${{ github.sha }}
+          path: vozen-helper-rust-${{ github.sha }}.tar.gz
+          if-no-files-found: error
