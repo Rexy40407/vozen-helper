@@ -647,6 +647,7 @@ name = "helper-discord"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "helper-contracts",
  "helper-core",
  "helper-modules",
