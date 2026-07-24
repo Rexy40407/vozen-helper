@@ -4,7 +4,7 @@ use anyhow::Result;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
@@ -20,6 +20,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -48,7 +49,8 @@ pub struct Health {
 }
 
 pub fn router(state: ApiState) -> Router {
-    Router::new()
+    let allowed_origin = state.allowed_origin.clone();
+    let router = Router::new()
         .route("/health", get(health))
         .route("/api/v1/health", get(health))
         .route("/api/session", post(create_session))
@@ -85,8 +87,31 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/privacy/delete", post(privacy_delete))
         .route("/api/config/import", post(import_config))
         .route("/api/workflows", get(workflows).post(create_workflow))
-        .route("/api/workflows/{id}", delete(delete_workflow))
-        .with_state(Arc::new(state))
+        .route("/api/workflows/{id}", delete(delete_workflow));
+    let router = if let Some(origin) = allowed_origin {
+        match origin.parse::<HeaderValue>() {
+            Ok(origin) => router.layer(
+                CorsLayer::new()
+                    .allow_origin(origin)
+                    .allow_credentials(true)
+                    .allow_methods([
+                        http::Method::GET,
+                        http::Method::POST,
+                        http::Method::PUT,
+                        http::Method::DELETE,
+                        http::Method::OPTIONS,
+                    ])
+                    .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT]),
+            ),
+            Err(_) => {
+                tracing::warn!("HELPER_ALLOWED_ORIGIN is invalid; CORS disabled");
+                router
+            }
+        }
+    } else {
+        router
+    };
+    router.with_state(Arc::new(state))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1896,6 +1921,32 @@ mod tests {
             "font": "system"
         })
         .to_string();
+
+        let health = router(api_state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .header(header::ORIGIN, "http://127.0.0.1:4173")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+        assert_eq!(
+            health
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "http://127.0.0.1:4173"
+        );
+        assert_eq!(
+            health
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .unwrap(),
+            "true"
+        );
 
         let response = router(api_state.clone())
             .oneshot(

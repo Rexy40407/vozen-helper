@@ -42,7 +42,7 @@ thiserror = "2.0"
 time = { version = "0.3", features = ["serde", "macros"] }
 tokio = { version = "1.43", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "timeout", "request-id"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "request-id"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 url = "2.5"
