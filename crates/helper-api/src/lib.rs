@@ -93,6 +93,11 @@ async fn oauth_start(
     let expires = (Utc::now() + Duration::minutes(10)).timestamp();
     let payload = format!("{}.{}.{}", query.guild_id, expires, query.code_challenge);
     let state_token = sign_oauth_state(&payload, &state.session_secret);
+    let state_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(state_token.as_bytes()));
+    state
+        .store
+        .register_oauth_state(&state_hash, expires)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     let mut url = url::Url::parse("https://discord.com/oauth2/authorize").expect("static URL");
     url.query_pairs_mut()
         .append_pair("client_id", &state.oauth_client_id)
@@ -130,6 +135,17 @@ async fn oauth_callback(
             .is_none_or(|exp| exp < Utc::now().timestamp())
     {
         return Err(client_error(StatusCode::BAD_REQUEST, "expired_oauth_state"));
+    }
+    let state_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(query.state.as_bytes()));
+    let state_is_fresh = state
+        .store
+        .consume_oauth_state(&state_hash, Utc::now().timestamp())
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    if !state_is_fresh {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "oauth_state_replayed",
+        ));
     }
     let guild_id = parts[0].to_string();
     let client = Client::new();
