@@ -775,7 +775,7 @@ impl Store {
         for (name, statement) in [
             (
                 "suggestion_votes",
-                "DELETE FROM suggestion_votes WHERE user_id=?1 AND suggestion_id IN (SELECT id FROM suggestions WHERE guild_id=?2)",
+                "DELETE FROM suggestion_votes WHERE suggestion_id IN (SELECT id FROM suggestions WHERE guild_id=?2 AND author_id=?1) OR (user_id=?1 AND suggestion_id IN (SELECT id FROM suggestions WHERE guild_id=?2))",
             ),
             (
                 "giveaway_entries",
@@ -2138,7 +2138,8 @@ mod tests {
         store.set_afk("g1", "u1", "away").unwrap();
         store.add_xp("g1", "u1", 42).unwrap();
         store.upsert_tag("g1", "mine", "hello", "u1").unwrap();
-        store.create_suggestion("g1", "u1", "feature").unwrap();
+        let suggestion = store.create_suggestion("g1", "u1", "feature").unwrap();
+        store.vote_suggestion(suggestion, "u2", 1).unwrap();
         store
             .schedule_typed("g1", "reminder", "u1", 10, "{}")
             .unwrap();
@@ -2163,5 +2164,6 @@ mod tests {
         assert!(store.recent_cases("g1", 10).unwrap().len() == 1);
         assert!(store.get_tag("g1", "mine").unwrap().is_none());
         assert!(store.get_afk("g1", "u1").unwrap().is_none());
+        assert_eq!(store.suggestion_votes(suggestion).unwrap(), (0, 0));
     }
 }
