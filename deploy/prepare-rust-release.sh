@@ -2,6 +2,7 @@
 set -euo pipefail
 
 version="${1:?release version required}"
+oauth_secret="${DISCORD_OAUTH_CLIENT_SECRET:?set DISCORD_OAUTH_CLIENT_SECRET to the real Discord application secret}"
 root=/home/vozen/vozen-helper-rust
 node_root=/home/vozen/vozen-helper
 release="$root/releases/$version"
@@ -20,17 +21,25 @@ sed -i \
   -e '/^HELPER_SESSION_SECRET=/d' \
   -e '/^HELPER_ALLOWED_ORIGIN=/d' \
   -e '/^HELPER_API_ONLY=/d' \
+  -e '/^HELPER_ALLOW_LEGACY_SESSION=/d' \
+  -e '/^VOZEN_ENTITLEMENT_URL=/d' \
+  -e '/^VOZEN_ENTITLEMENT_SECRET=/d' \
   "$root/shared/.env"
 
 client_id="$(awk -F= '/^CLIENT_ID=/{print $2}' "$node_root/.env")"
 printf '\nDISCORD_APPLICATION_ID=%s\n' "$client_id" >> "$root/shared/.env"
 printf 'DISCORD_OAUTH_CLIENT_ID=%s\n' "$client_id" >> "$root/shared/.env"
-printf 'DISCORD_OAUTH_CLIENT_SECRET=%s\n' "$(openssl rand -hex 32)" >> "$root/shared/.env"
+printf 'DISCORD_OAUTH_CLIENT_SECRET=%s\n' "$oauth_secret" >> "$root/shared/.env"
 printf 'DISCORD_OAUTH_REDIRECT_URI=https://helper.vozen.org/oauth/callback\n' >> "$root/shared/.env"
 printf 'HELPER_DATABASE_URL=%s/vozen-helper.db\n' "$node_root" >> "$root/shared/.env"
 printf 'HELPER_BIND_ADDR=127.0.0.1:8788\n' >> "$root/shared/.env"
 printf 'HELPER_SESSION_SECRET=%s\n' "$(openssl rand -hex 32)" >> "$root/shared/.env"
-printf 'HELPER_ALLOWED_ORIGIN=https://helper.vozen.org\nHELPER_API_ONLY=false\n' >> "$root/shared/.env"
+printf 'HELPER_ALLOWED_ORIGIN=https://helper.vozen.org\nHELPER_API_ONLY=false\nHELPER_ALLOW_LEGACY_SESSION=false\n' >> "$root/shared/.env"
+if [[ -n "${VOZEN_ENTITLEMENT_URL:-}" || -n "${VOZEN_ENTITLEMENT_SECRET:-}" ]]; then
+  : "${VOZEN_ENTITLEMENT_URL:?set both VOZEN_ENTITLEMENT_URL and VOZEN_ENTITLEMENT_SECRET}"
+  : "${VOZEN_ENTITLEMENT_SECRET:?set both VOZEN_ENTITLEMENT_URL and VOZEN_ENTITLEMENT_SECRET}"
+  printf 'VOZEN_ENTITLEMENT_URL=%s\nVOZEN_ENTITLEMENT_SECRET=%s\n' "$VOZEN_ENTITLEMENT_URL" "$VOZEN_ENTITLEMENT_SECRET" >> "$root/shared/.env"
+fi
 chmod 600 "$root/shared/.env"
 chmod 755 "$release/bin/vozen-helper"
 ln -sfn "$release" "$root/current"
