@@ -8,8 +8,9 @@ use serenity::{
     all::{
         ButtonStyle, ChannelId, Client, Command, CommandDataOptionValue, CommandInteraction,
         Context, CreateActionRow, CreateButton, CreateChannel, CreateCommand, CreateCommandOption,
-        CreateInteractionResponse, CreateInteractionResponseMessage, EventHandler, GatewayIntents,
-        Interaction, PermissionOverwrite, PermissionOverwriteType, Permissions, Ready, RoleId,
+        CreateInteractionResponse, CreateInteractionResponseMessage, EditChannel, EventHandler,
+        GatewayIntents, Interaction, PermissionOverwrite, PermissionOverwriteType, Permissions,
+        Ready, RoleId,
     },
     async_trait,
 };
@@ -368,6 +369,26 @@ impl EventHandler for Handler {
                     )
                     .required(false),
                 ),
+            CreateCommand::new("slowmode")
+                .description("Set channel slowmode")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "seconds",
+                        "Seconds from 0 to 21600",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("userinfo")
+                .description("Show basic user information")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::User,
+                        "user",
+                        "User",
+                    )
+                    .required(true),
+                ),
         ];
         if let Err(error) = Command::set_global_commands(&ctx.http, commands).await {
             tracing::error!(%error, "global command registration failed");
@@ -557,6 +578,28 @@ impl Handler {
                         format!("Aviso criado como caso #{case_id} para <@{}>.", target)
                     } else { "Indica um membro.".to_string() }
                 } else { "Este comando só pode ser usado num servidor.".to_string() }
+            }
+            "slowmode" => {
+                let raw_seconds = command.data.options.iter().find_map(|option| match option.value {
+                    CommandDataOptionValue::Integer(value) if option.name == "seconds" => Some(value),
+                    _ => None,
+                }).unwrap_or(0);
+                let seconds = raw_seconds.clamp(0, 21_600) as u16;
+                command
+                    .channel_id
+                    .edit(&ctx.http, EditChannel::new().rate_limit_per_user(seconds))
+                    .await?;
+                format!("Slowmode definido para {} segundos.", seconds)
+            }
+            "userinfo" => {
+                let Some(user_id) = command.data.options.iter().find_map(|option| match option.value {
+                    CommandDataOptionValue::User(user) => Some(user),
+                    _ => None,
+                }) else {
+                    return respond(ctx, command, "Indica um utilizador.").await;
+                };
+                let user = ctx.http.get_user(user_id).await?;
+                format!("{} (<@{}>) · conta criada em {}.", user.name, user.id, user.id.created_at().unix_timestamp())
             }
             "violation" | "note" => {
                 let Some(guild_id) = command.guild_id else {
@@ -1030,6 +1073,7 @@ fn required_permission(command: &str) -> Option<Permissions> {
         "ban" | "unban" => Some(Permissions::BAN_MEMBERS),
         "purge" => Some(Permissions::MANAGE_MESSAGES),
         "ticket-panel" => Some(Permissions::MANAGE_CHANNELS),
+        "slowmode" => Some(Permissions::MANAGE_CHANNELS),
         "rolepanel" => Some(Permissions::MANAGE_ROLES),
         "tag-set" | "tag-delete" => Some(Permissions::MANAGE_GUILD),
         _ => None,
