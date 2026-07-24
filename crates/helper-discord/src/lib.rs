@@ -490,6 +490,42 @@ impl EventHandler for Handler {
                     .required(true),
                 ),
             CreateCommand::new("workflow-list").description("List message automations"),
+            CreateCommand::new("workflow-dry-run")
+                .description("Preview a workflow without executing it (staff)")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "id",
+                        "Workflow ID",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "message",
+                        "Sample message",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("workflow-toggle")
+                .description("Enable or disable a workflow immediately (staff)")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "id",
+                        "Workflow ID",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Boolean,
+                        "enabled",
+                        "Enable workflow",
+                    )
+                    .required(true),
+                ),
             CreateCommand::new("workflow-delete")
                 .description("Delete a message automation (staff)")
                 .add_option(
@@ -1422,6 +1458,13 @@ impl EventHandler for Handler {
                 if workflow.action != "reply" {
                     continue;
                 }
+                let Ok(true) = self.store.record_workflow_run(
+                    workflow.id,
+                    &guild_text,
+                    &message.id.to_string(),
+                ) else {
+                    continue;
+                };
                 let reply = workflow
                     .payload
                     .replace("{user}", &format!("<@{}>", message.author.id))
@@ -1430,11 +1473,6 @@ impl EventHandler for Handler {
                     .channel_id
                     .say(&ctx.http, truncate(&reply, 1_500))
                     .await;
-                let _ = self.store.record_workflow_run(
-                    workflow.id,
-                    &guild_text,
-                    &message.id.to_string(),
-                );
             }
         }
     }
@@ -2362,6 +2400,47 @@ impl Handler {
                     workflows.into_iter().map(|workflow| format!("#{} **{}** · {} · {}", workflow.id, workflow.name, workflow.trigger, if workflow.enabled { "ativo" } else { "desligado" })).collect::<Vec<_>>().join("\n")
                 }
             }
+            "workflow-dry-run" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let id = option_i64(command, "id").unwrap_or(0);
+                let sample = option_string(command, "message").unwrap_or_default().trim();
+                if sample.len() > 2_000 {
+                    return respond(ctx, command, "A mensagem de teste não pode exceder 2000 caracteres.").await;
+                }
+                let Some(workflow) = self.store.workflow(&guild_id.to_string(), id)? else {
+                    return respond(ctx, command, "Workflow não encontrado neste servidor.").await;
+                };
+                let matches = workflow.trigger == "message"
+                    && (workflow.condition.is_empty()
+                        || sample
+                            .to_lowercase()
+                            .contains(&workflow.condition.to_lowercase()));
+                if !matches {
+                    format!("Dry-run: workflow **{}** não seria executado.", workflow.name)
+                } else if workflow.action == "reply" {
+                    let preview = workflow
+                        .payload
+                        .replace("{user}", &format!("<@{}>", command.user.id))
+                        .replace("{message}", &truncate(sample, 500));
+                    format!("Dry-run: workflow **{}** faria reply:\n> {}", workflow.name, truncate(&preview, 1_500))
+                } else {
+                    format!("Dry-run: workflow **{}** correspondeu, mas a action `{}` não é suportada.", workflow.name, workflow.action)
+                }
+            }
+            "workflow-toggle" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let id = option_i64(command, "id").unwrap_or(0);
+                let enabled = option_bool(command, "enabled").unwrap_or(false);
+                if self.store.set_workflow_enabled(&guild_id.to_string(), id, enabled)? {
+                    format!("Workflow #{id} {}.", if enabled { "ativado" } else { "desativado imediatamente" })
+                } else {
+                    "Workflow não encontrado neste servidor.".to_string()
+                }
+            }
             "workflow-delete" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
@@ -3165,7 +3244,9 @@ fn required_permission(command: &str) -> Option<Permissions> {
             Some(Permissions::CREATE_EVENTS)
         }
         "tag-set" | "tag-delete" | "giveaway-start" | "giveaway-end" | "starboard-set"
-        | "workflow-create" | "workflow-delete" => Some(Permissions::MANAGE_GUILD),
+        | "workflow-create" | "workflow-dry-run" | "workflow-toggle" | "workflow-delete" => {
+            Some(Permissions::MANAGE_GUILD)
+        }
         "suggestion" => Some(Permissions::MANAGE_MESSAGES),
         _ => None,
     }

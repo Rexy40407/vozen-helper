@@ -1236,6 +1236,37 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    pub fn workflow(&self, guild_id: &str, id: i64) -> Result<Option<WorkflowRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT id,guild_id,name,trigger,condition,action,payload,enabled,created_at FROM workflows WHERE guild_id=?1 AND id=?2",
+                params![guild_id, id],
+                |row| {
+                    Ok(WorkflowRecord {
+                        id: row.get(0)?,
+                        guild_id: row.get(1)?,
+                        name: row.get(2)?,
+                        trigger: row.get(3)?,
+                        condition: row.get(4)?,
+                        action: row.get(5)?,
+                        payload: row.get(6)?,
+                        enabled: row.get::<_, i64>(7)? != 0,
+                        created_at: row.get(8)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn set_workflow_enabled(&self, guild_id: &str, id: i64, enabled: bool) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "UPDATE workflows SET enabled=?3 WHERE guild_id=?1 AND id=?2",
+            params![guild_id, id, i64::from(enabled)],
+        )? > 0)
+    }
+
     pub fn delete_workflow(&self, guild_id: &str, id: i64) -> Result<bool> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         Ok(conn.execute(
@@ -1249,10 +1280,9 @@ impl Store {
         workflow_id: i64,
         guild_id: &str,
         source_id: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let conn = self.conn.lock().expect("store mutex poisoned");
-        conn.execute("INSERT INTO workflow_runs(workflow_id,guild_id,source_id,created_at) VALUES(?1,?2,?3,?4)", params![workflow_id, guild_id, source_id, Utc::now().timestamp_millis()])?;
-        Ok(())
+        Ok(conn.execute("INSERT INTO workflow_runs(workflow_id,guild_id,source_id,created_at) SELECT ?1,?2,?3,?4 WHERE NOT EXISTS (SELECT 1 FROM workflow_runs WHERE workflow_id=?1 AND guild_id=?2 AND source_id=?3)", params![workflow_id, guild_id, source_id, Utc::now().timestamp_millis()])? > 0)
     }
 
     pub fn save_quarantine(
@@ -1422,9 +1452,16 @@ mod tests {
             store.active_workflows("g", "message").unwrap()[0].id,
             workflow
         );
-        store
-            .record_workflow_run(workflow, "g", "message-1")
-            .unwrap();
+        assert!(
+            store
+                .record_workflow_run(workflow, "g", "message-1")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .record_workflow_run(workflow, "g", "message-1")
+                .unwrap()
+        );
         assert!(store.delete_workflow("g", workflow).unwrap());
         store
             .save_quarantine("g", "u", &["10".into(), "20".into()], "raid")
