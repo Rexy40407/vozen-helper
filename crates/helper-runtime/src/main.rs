@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use helper_api::{ApiState, serve as serve_api};
 use helper_core::Config;
+use helper_modules::EntitlementClient;
 use helper_store::Store;
 use std::time::Instant;
 use tokio::{select, signal};
@@ -71,6 +72,10 @@ async fn main() -> Result<()> {
                     oauth_redirect_uri: config.oauth_redirect_uri.clone(),
                     allow_legacy_session: config.allow_legacy_session,
                     allowed_origin: std::env::var("HELPER_ALLOWED_ORIGIN").ok(),
+                    entitlements: EntitlementClient::new(
+                        config.entitlement_url.clone(),
+                        config.entitlement_secret.clone(),
+                    ),
                 },
             );
             let discord = async {

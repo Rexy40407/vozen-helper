@@ -1,7 +1,9 @@
 //! Discord gateway boundary. Handlers stay thin and delegate to core/modules.
 
 use anyhow::Result;
-use helper_core::Config;
+use chrono::Utc;
+use helper_contracts::Plan;
+use helper_core::{Config, quota_limit};
 use helper_modules::EntitlementClient;
 use helper_store::Store;
 use rand::seq::SliceRandom;
@@ -1562,6 +1564,23 @@ pub async fn run(config: &Config) -> Result<()> {
 }
 
 impl Handler {
+    async fn effective_plan(&self, user_id: &str, guild_id: Option<&str>) -> Plan {
+        let Some(client) = &self.entitlements else {
+            return Plan::Free;
+        };
+        match client.resolve(user_id, guild_id).await {
+            Ok(snapshot)
+                if snapshot.active
+                    && snapshot
+                        .expires_at
+                        .is_none_or(|expires_at| expires_at > Utc::now()) =>
+            {
+                snapshot.plan
+            }
+            Ok(_) | Err(_) => Plan::Free,
+        }
+    }
+
     async fn handle_command(&self, ctx: &Context, command: &CommandInteraction) -> Result<()> {
         if let Some(required) = required_permission(command.data.name.as_str()) {
             let permissions = command
@@ -2511,6 +2530,24 @@ impl Handler {
                 let reply = option_string(command, "reply").unwrap_or_default().trim();
                 if !(1..=50).contains(&name.len()) || !(1..=1_000).contains(&reply.len()) || condition.len() > 200 {
                     return respond(ctx, command, "Nome, condição ou resposta inválidos.").await;
+                }
+                let guild_text = guild_id.to_string();
+                let user_text = command.user.id.to_string();
+                let plan = self.effective_plan(&user_text, Some(&guild_text)).await;
+                let workflow_limit = quota_limit(&plan, "workflows");
+                let current_workflows = self
+                    .store
+                    .workflows(&guild_text, (workflow_limit + 1) as u32)?
+                    .len() as u64;
+                if current_workflows >= workflow_limit {
+                    return respond(
+                        ctx,
+                        command,
+                        &format!(
+                            "A quota de workflows deste plano foi atingida ({workflow_limit}). Consulta `/plan` para saber como aumentar a capacidade da guild."
+                        ),
+                    )
+                    .await;
                 }
                 let id = self.store.create_workflow(&guild_id.to_string(), name, "message", condition, "reply", reply)?;
                 format!("Workflow #{id} criado. É executado quando uma mensagem corresponde à condição.")

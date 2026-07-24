@@ -63,6 +63,14 @@ impl EntitlementClient {
         subject_id: &str,
         guild_id: Option<&str>,
     ) -> anyhow::Result<EntitlementSnapshot> {
+        if let Some(snapshot) = self.cached(subject_id, guild_id)
+            && snapshot.active
+            && snapshot
+                .expires_at
+                .is_none_or(|expires_at| expires_at > Utc::now())
+        {
+            return Ok(snapshot);
+        }
         let body = serde_json::json!({"subject_id": subject_id, "guild_id": guild_id});
         let bytes = serde_json::to_vec(&body)?;
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -105,12 +113,20 @@ impl EntitlementClient {
         self.cache
             .lock()
             .expect("entitlement cache poisoned")
-            .insert(snapshot.subject_id.clone(), snapshot.clone());
+            .insert(Self::cache_key(subject_id, guild_id), snapshot.clone());
         Ok(snapshot)
     }
 
-    pub fn cached(&self, subject_id: &str) -> Option<EntitlementSnapshot> {
-        self.cache.lock().ok()?.get(subject_id).cloned()
+    fn cache_key(subject_id: &str, guild_id: Option<&str>) -> String {
+        format!("{subject_id}:{}", guild_id.unwrap_or("user"))
+    }
+
+    pub fn cached(&self, subject_id: &str, guild_id: Option<&str>) -> Option<EntitlementSnapshot> {
+        self.cache
+            .lock()
+            .ok()?
+            .get(&Self::cache_key(subject_id, guild_id))
+            .cloned()
     }
 }
 

@@ -10,8 +10,10 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
+use helper_contracts::Plan;
 use helper_contracts::{ApiError, SessionClaims};
 use helper_core::{Capability, quota_limit};
+use helper_modules::EntitlementClient;
 use helper_store::Store;
 use hmac::{Hmac, Mac};
 use reqwest::Client;
@@ -34,6 +36,7 @@ pub struct ApiState {
     pub oauth_redirect_uri: String,
     pub allow_legacy_session: bool,
     pub allowed_origin: Option<String>,
+    pub entitlements: Option<EntitlementClient>,
 }
 
 #[derive(Debug, Serialize)]
@@ -862,6 +865,33 @@ async fn create_workflow(
     {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_workflow"));
     }
+    let plan = match &state.entitlements {
+        Some(client) => client
+            .resolve(&claims.user_id, Some(&claims.guild_id))
+            .await
+            .ok()
+            .filter(|snapshot| {
+                snapshot.active
+                    && snapshot
+                        .expires_at
+                        .is_none_or(|expires_at| expires_at > Utc::now())
+            })
+            .map(|snapshot| snapshot.plan)
+            .unwrap_or(Plan::Free),
+        None => Plan::Free,
+    };
+    let workflow_limit = quota_limit(&plan, "workflows");
+    let workflow_count = state
+        .store
+        .workflows(&claims.guild_id, (workflow_limit + 1) as u32)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .len() as u64;
+    if workflow_count >= workflow_limit {
+        return Err(client_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "workflow_quota_exceeded",
+        ));
+    }
     let id = state
         .store
         .create_workflow(
@@ -1024,6 +1054,7 @@ mod tests {
             oauth_redirect_uri: "https://example.test/callback".into(),
             allow_legacy_session: false,
             allowed_origin: None,
+            entitlements: None,
         }
     }
 
@@ -1179,6 +1210,48 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn api_enforces_free_workflow_quota() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        store.save_session(&session).unwrap();
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        for index in 0..3 {
+            store
+                .create_workflow(
+                    "guild-a",
+                    &format!("workflow-{index}"),
+                    "message",
+                    "hello",
+                    "reply",
+                    "Hi",
+                )
+                .unwrap();
+        }
+        let response = router(state(store))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/workflows")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "workflow-4",
+                            "trigger": "message",
+                            "condition": "hello",
+                            "action": "reply",
+                            "payload": "Hi"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[test]
