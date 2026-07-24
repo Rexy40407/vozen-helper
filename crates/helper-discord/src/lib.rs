@@ -9,7 +9,7 @@ use serenity::{
         ButtonStyle, ChannelId, Client, Command, CommandDataOptionValue, CommandInteraction,
         Context, CreateActionRow, CreateButton, CreateChannel, CreateCommand, CreateCommandOption,
         CreateInteractionResponse, CreateInteractionResponseMessage, EventHandler, GatewayIntents,
-        Interaction, PermissionOverwrite, PermissionOverwriteType, Permissions, Ready,
+        Interaction, PermissionOverwrite, PermissionOverwriteType, Permissions, Ready, RoleId,
     },
     async_trait,
 };
@@ -226,6 +226,56 @@ impl EventHandler for Handler {
             CreateCommand::new("leaderboard").description("Show the XP leaderboard"),
             CreateCommand::new("serverstats").description("Show basic server statistics"),
             CreateCommand::new("ticket-panel").description("Create a support ticket panel"),
+            CreateCommand::new("rolepanel")
+                .description("Create a self-role panel")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "title",
+                        "Panel title",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Role,
+                        "role1",
+                        "Role 1",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Role,
+                        "role2",
+                        "Role 2",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Role,
+                        "role3",
+                        "Role 3",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Role,
+                        "role4",
+                        "Role 4",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Role,
+                        "role5",
+                        "Role 5",
+                    )
+                    .required(false),
+                ),
         ];
         if let Err(error) = Command::set_global_commands(&ctx.http, commands).await {
             tracing::error!(%error, "global command registration failed");
@@ -553,6 +603,40 @@ impl Handler {
                     .await?;
                 format!("Painel de tickets criado em <#{}>.", command.channel_id)
             }
+            "rolepanel" => {
+                let Some(_guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let title = option_string(command, "title").unwrap_or("Escolhe os teus cargos");
+                let mut buttons = Vec::new();
+                for name in ["role1", "role2", "role3", "role4", "role5"] {
+                    if let Some(role_id) = command.data.options.iter().find_map(|option| {
+                        (option.name == name).then_some(match option.value {
+                            CommandDataOptionValue::Role(role) => role,
+                            _ => return None,
+                        })
+                    }) {
+                        buttons.push(
+                            CreateButton::new(format!("role:toggle:{}", role_id.get()))
+                                .label(format!("Role {}", buttons.len() + 1))
+                                .style(ButtonStyle::Secondary),
+                        );
+                    }
+                }
+                if buttons.is_empty() {
+                    return respond(ctx, command, "Indica pelo menos um cargo válido.").await;
+                }
+                command
+                    .channel_id
+                    .send_message(
+                        &ctx.http,
+                        serenity::all::CreateMessage::new()
+                            .content(title)
+                            .components(vec![CreateActionRow::Buttons(buttons)]),
+                    )
+                    .await?;
+                "Painel de cargos criado.".to_string()
+            }
             _ => "Comando desconhecido.".to_string(),
         };
         command
@@ -576,6 +660,20 @@ impl Handler {
         let Some(guild_id) = component.guild_id else {
             return respond_component(ctx, component, "Este botão só funciona num servidor.").await;
         };
+        if let Some(raw_role_id) = component.data.custom_id.strip_prefix("role:toggle:") {
+            let role_id = raw_role_id
+                .parse::<u64>()
+                .ok()
+                .map(RoleId::new)
+                .ok_or_else(|| anyhow::anyhow!("invalid role button"))?;
+            let member = guild_id.member(&ctx.http, component.user.id).await?;
+            if member.roles.contains(&role_id) {
+                member.remove_role(&ctx.http, role_id).await?;
+                return respond_component(ctx, component, "Cargo removido.").await;
+            }
+            member.add_role(&ctx.http, role_id).await?;
+            return respond_component(ctx, component, "Cargo atribuído.").await;
+        }
         match component.data.custom_id.as_str() {
             "ticket:open" => {
                 if let Some(ticket) = self
