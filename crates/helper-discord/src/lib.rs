@@ -9,7 +9,7 @@ use helper_store::Store;
 use rand::seq::SliceRandom;
 use serenity::{
     all::{
-        ButtonStyle, ChannelId, Client, Command, CommandDataOptionValue, CommandInteraction,
+        ButtonStyle, ChannelId, ChannelType, Client, Command, CommandDataOptionValue, CommandInteraction,
         Context, CreateActionRow, CreateButton, CreateChannel, CreateCommand, CreateCommandOption,
         CreateInteractionResponse, CreateInteractionResponseMessage, EditChannel, EventHandler,
         GatewayIntents, Interaction, PermissionOverwrite, PermissionOverwriteType, Permissions,
@@ -50,11 +50,12 @@ impl EventHandler for Handler {
                     if let Ok(actions) =
                         store.due_scheduled_actions(chrono::Utc::now().timestamp_millis(), 100)
                     {
-                        for (id, _guild_id, action_type, target_id, payload) in actions {
+                        for (id, guild_id, action_type, target_id, payload) in actions {
                             let _ = deliver_scheduled_action(
                                 &http,
                                 &store,
                                 id,
+                                &guild_id,
                                 &action_type,
                                 &target_id,
                                 &payload,
@@ -123,8 +124,30 @@ impl EventHandler for Handler {
             CreateCommand::new("status").description("Show Helper setup and health status"),
             CreateCommand::new("dashboard").description("Open the Helper dashboard"),
             CreateCommand::new("plan").description("Show the active Vozen plan"),
+            CreateCommand::new("privacy")
+                .description("Request your Helper data or erase voluntary data")
+                .add_option(CreateCommandOption::new(
+                    serenity::all::CommandOptionType::SubCommand,
+                    "data",
+                    "Explain how to export your data",
+                ))
+                .add_option(CreateCommandOption::new(
+                    serenity::all::CommandOptionType::SubCommand,
+                    "erase",
+                    "Explain how to erase voluntary data",
+                )),
             CreateCommand::new("permissions").description("Show the Helper Permission Passport"),
             CreateCommand::new("cases").description("List recent moderation cases"),
+            CreateCommand::new("modlogs")
+                .description("Show a member's moderation history")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::User,
+                        "user",
+                        "Member",
+                    )
+                    .required(true),
+                ),
             CreateCommand::new("warn")
                 .description("Create a moderation warning")
                 .add_option(
@@ -258,6 +281,50 @@ impl EventHandler for Handler {
                         "Duration in seconds (max 28 days)",
                     )
                     .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "reason",
+                        "Reason",
+                    )
+                    .required(false),
+                ),
+            CreateCommand::new("tempban")
+                .description("Temporarily ban a member; automatically unban after the duration")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::User,
+                        "user",
+                        "Member",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "duration",
+                        "Examples: 10m, 2h, 1d",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "reason",
+                        "Reason",
+                    )
+                    .required(false),
+                ),
+            CreateCommand::new("softban")
+                .description("Ban and immediately unban a member to clear recent messages")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::User,
+                        "user",
+                        "Member",
+                    )
+                    .required(true),
                 )
                 .add_option(
                     CreateCommandOption::new(
@@ -448,6 +515,40 @@ impl EventHandler for Handler {
                     )
                     .required(false),
                 ),
+            CreateCommand::new("gstart")
+                .description("Legacy alias for giveaway-start")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "prize",
+                        "Prize",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "duration",
+                        "Examples: 10m, 2h, 1d",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "winners",
+                        "Number of winners",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Role,
+                        "required_role",
+                        "Optional required role",
+                    )
+                    .required(false),
+                ),
             CreateCommand::new("giveaway-end")
                 .description("End a giveaway now (staff)")
                 .add_option(
@@ -458,7 +559,28 @@ impl EventHandler for Handler {
                     )
                     .required(true),
                 ),
+            CreateCommand::new("gend")
+                .description("Legacy alias for giveaway-end")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "id",
+                        "Giveaway ID",
+                    )
+                    .required(true),
+                ),
             CreateCommand::new("giveaway-list").description("List active giveaways"),
+            CreateCommand::new("glist").description("Legacy alias for giveaway-list"),
+            CreateCommand::new("greroll")
+                .description("Reroll a finished giveaway")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "id",
+                        "Giveaway ID",
+                    )
+                    .required(true),
+                ),
             CreateCommand::new("poll")
                 .description("Create a multi-choice poll")
                 .add_option(
@@ -781,6 +903,20 @@ impl EventHandler for Handler {
                     )
                     .required(false),
                 ),
+            CreateCommand::new("verify-panel")
+                .description("Post the verification panel using the configured join gate"),
+            CreateCommand::new("lockdown")
+                .description("Lock text channels for @everyone")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "reason",
+                        "Reason",
+                    )
+                    .required(false),
+                ),
+            CreateCommand::new("unlock")
+                .description("Remove the Helper lockdown from text channels"),
             CreateCommand::new("anti-raid")
                 .description("Configure the bounded join-burst anti-raid response")
                 .add_option(
@@ -1701,12 +1837,36 @@ impl Handler {
                     }
                 } else { "Entitlements central ainda não estão configurados nesta instalação.".to_string() }
             }
+            "privacy" => {
+                let subcommand = command.data.options.first().map(|option| option.name.as_str());
+                match subcommand {
+                    Some("erase") => "Para apagar os teus dados voluntÃ¡rios, abre o painel autenticado e confirma em `/api/privacy/erase`. O Helper nÃ£o apaga dados de moderaÃ§Ã£o exigidos para auditoria.".to_string(),
+                    _ => "Para exportar os teus dados, abre o painel autenticado e solicita `/api/privacy/export`. O resultado Ã© entregue apenas Ã  tua sessÃ£o autenticada.".to_string(),
+                }
+            }
             "permissions" => permission_passport_message(),
             "cases" => {
                 if let Some(guild_id) = command.guild_id {
                     let cases = self.store.recent_cases(&guild_id.to_string(), 10)?;
                     if cases.is_empty() { "Ainda não existem casos neste servidor.".to_string() } else { cases.into_iter().map(|case_record| format!("#{} {} <@{}>: {}", case_record.id, case_record.kind, case_record.target_id, case_record.reason)).collect::<Vec<_>>().join("\n") }
                 } else { "Este comando só pode ser usado num servidor.".to_string() }
+            }
+            "modlogs" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando sÃ³ pode ser usado num servidor.").await;
+                };
+                let Some(target) = command.data.options.iter().find_map(|option| match option.value {
+                    CommandDataOptionValue::User(user) => Some(user),
+                    _ => None,
+                }) else {
+                    return respond(ctx, command, "Indica um membro.").await;
+                };
+                let cases = self.store.cases_for_target(&guild_id.to_string(), &target.to_string(), 50)?;
+                if cases.is_empty() {
+                    format!("NÃ£o existem casos para <@{}>.", target)
+                } else {
+                    cases.into_iter().map(|case_record| format!("#{} {}: {}", case_record.id, case_record.kind, case_record.reason)).collect::<Vec<_>>().join("\n")
+                }
             }
             "warn" => {
                 if let Some(guild_id) = command.guild_id {
@@ -1830,6 +1990,36 @@ impl Handler {
                     let ids: Vec<_> = messages.iter().map(|message| message.id).collect();
                     command.channel_id.delete_messages(&ctx.http, ids).await?;
                     format!("{} mensagens apagadas.", messages.len())
+                }
+            }
+            "tempban" | "softban" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando sÃ³ pode ser usado num servidor.").await;
+                };
+                let Some(target) = command.data.options.iter().find_map(|option| match option.value {
+                    CommandDataOptionValue::User(user) => Some(user),
+                    _ => None,
+                }) else {
+                    return respond(ctx, command, "Indica um membro.").await;
+                };
+                let reason = option_string(command, "reason").unwrap_or("Sem motivo");
+                let action = guild_id.ban_with_reason(&ctx.http, target, 0, reason).await;
+                if let Err(error) = action {
+                    tracing::warn!(%error, action = %command.data.name, "ban action failed");
+                    return Ok(respond(ctx, command, "NÃ£o foi possÃ­vel executar o ban; confirma as permissÃµes e a hierarquia.").await?);
+                }
+                if command.data.name == "softban" {
+                    let _ = guild_id.unban(&ctx.http, target).await;
+                    let case_id = self.store.record_case(&guild_id.to_string(), "softban", &target.to_string(), &command.user.id.to_string(), reason, None)?;
+                    format!("Softban concluÃ­do como caso #{case_id} para <@{}>.", target)
+                } else {
+                    let Some(delay) = parse_duration(option_string(command, "duration").unwrap_or_default()) else {
+                        let _ = guild_id.unban(&ctx.http, target).await;
+                        return respond(ctx, command, "DuraÃ§Ã£o invÃ¡lida. Usa 10m, 2h ou 1d.").await;
+                    };
+                    let case_id = self.store.record_case(&guild_id.to_string(), "tempban", &target.to_string(), &command.user.id.to_string(), reason, Some(delay))?;
+                    self.store.schedule_typed(&guild_id.to_string(), "unban", &target.to_string(), chrono::Utc::now().timestamp_millis() + delay, "")?;
+                    format!("Tempban concluÃ­do como caso #{case_id} para <@{}>; expira em {}.", target, format_duration(delay))
                 }
             }
             "kick" | "ban" | "timeout" => {
@@ -2012,7 +2202,7 @@ impl Handler {
                     "Sugestão não encontrada neste servidor.".to_string()
                 }
             }
-            "giveaway-start" => {
+            "giveaway-start" | "gstart" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
@@ -2037,7 +2227,7 @@ impl Handler {
                 self.store.schedule_typed(&guild_id.to_string(), "giveaway_end", &command.user.id.to_string(), end_at, &serde_json::json!({"channel_id": command.channel_id.to_string(), "giveaway_id": id}).to_string())?;
                 format!("Giveaway #{id} criado.")
             }
-            "giveaway-end" => {
+            "giveaway-end" | "gend" => {
                 let id = option_i64(command, "id").unwrap_or(0);
                 if finish_giveaway(&ctx.http, &self.store, id).await? {
                     format!("Giveaway #{id} terminado.")
@@ -2045,13 +2235,20 @@ impl Handler {
                     "Giveaway não encontrado ou já terminado.".to_string()
                 }
             }
-            "giveaway-list" => {
+            "giveaway-list" | "glist" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
                 let rows = self.store.active_giveaways(&guild_id.to_string(), 20)?;
                 if rows.is_empty() { "Não existem giveaways ativos.".to_string() } else {
                     rows.into_iter().map(|row| format!("#{} — {} — termina <t:{}:R>", row.id, row.prize, row.end_at / 1_000)).collect::<Vec<_>>().join("\n")
+                }
+            }
+            "greroll" => {
+                let id = option_i64(command, "id").unwrap_or(0);
+                match reroll_giveaway(&ctx.http, &self.store, id).await? {
+                    Some(winner) => format!("Giveaway #{id} rerolled: <@{winner}>.")
+                    None => "Giveaway nÃ£o encontrado, ainda ativo ou sem participantes.".to_string(),
                 }
             }
             "poll" => {
@@ -2162,6 +2359,47 @@ impl Handler {
                 } else {
                     "Join gate desativado; as definições guardadas podem ser reativadas.".to_string()
                 }
+            }
+            "verify-panel" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando sÃ³ pode ser usado num servidor.").await;
+                };
+                let guild_text = guild_id.to_string();
+                let enabled = self.store.get_setting(&guild_text, "security.join_gate.enabled")?
+                    .is_some_and(|value| value == "true");
+                let Some(role_id) = self.store.get_setting(&guild_text, "security.join_gate.role_id")? else {
+                    return respond(ctx, command, "Configura primeiro `/join-gate` com um cargo de verificaÃ§Ã£o.").await;
+                };
+                if !enabled {
+                    return respond(ctx, command, "Ativa primeiro o `/join-gate`; o painel nÃ£o deve ficar exposto enquanto o gate estÃ¡ desligado.").await;
+                }
+                command.channel_id.send_message(
+                    &ctx.http,
+                    serenity::all::CreateMessage::new()
+                        .content("Carrega no botÃ£o para receber o cargo de membro verificado.")
+                        .components(vec![CreateActionRow::Buttons(vec![
+                            CreateButton::new(format!("verify:{guild_text}:{role_id}"))
+                                .label("Verificar")
+                                .style(ButtonStyle::Success),
+                        ])]),
+                ).await?;
+                "Painel de verificaÃ§Ã£o publicado neste canal.".to_string()
+            }
+            "lockdown" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando sÃ³ pode ser usado num servidor.").await;
+                };
+                let reason = option_string(command, "reason").unwrap_or("Lockdown manual");
+                let count = apply_lockdown(&ctx.http, &self.store, guild_id, true).await?;
+                self.store.set_setting(&guild_id.to_string(), "security.lockdown.reason", reason)?;
+                format!("Lockdown aplicado em {count} canal(is) de texto. Motivo: {reason}.")
+            }
+            "unlock" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando sÃ³ pode ser usado num servidor.").await;
+                };
+                let count = apply_lockdown(&ctx.http, &self.store, guild_id, false).await?;
+                format!("Lockdown removido de {count} canal(is); overwrites anteriores restaurados quando estavam guardados.")
             }
             "security-mode" => {
                 let Some(guild_id) = command.guild_id else {
@@ -3027,6 +3265,24 @@ impl Handler {
             member.add_role(&ctx.http, role_id).await?;
             return respond_component(ctx, component, "Cargo atribuído.").await;
         }
+        if let Some(raw) = component.data.custom_id.strip_prefix("verify:") {
+            let mut parts = raw.split(':');
+            let expected_guild = parts.next().unwrap_or_default();
+            let role_id = parts.next().and_then(|value| value.parse::<u64>().ok());
+            if expected_guild != guild_id.to_string() {
+                return respond_component(ctx, component, "Este painel pertence a outro servidor.").await;
+            }
+            let Some(role_id) = role_id else {
+                return respond_component(ctx, component, "Painel de verificaÃ§Ã£o invÃ¡lido.").await;
+            };
+            let member = guild_id.member(&ctx.http, component.user.id).await?;
+            let role = RoleId::new(role_id);
+            if member.roles.contains(&role) {
+                return respond_component(ctx, component, "JÃ¡ estÃ¡s verificado.").await;
+            }
+            member.add_role(&ctx.http, role).await?;
+            return respond_component(ctx, component, "VerificaÃ§Ã£o concluÃ­da; cargo atribuÃ­do.").await;
+        }
         match component.data.custom_id.as_str() {
             "ticket:open" => {
                 if let Some(ticket) = self
@@ -3477,6 +3733,37 @@ async fn finish_giveaway(http: &serenity::http::Http, store: &Store, id: i64) ->
     Ok(true)
 }
 
+async fn reroll_giveaway(
+    http: &serenity::http::Http,
+    store: &Store,
+    id: i64,
+) -> Result<Option<String>> {
+    let Some(giveaway) = store.giveaway(id)? else {
+        return Ok(None);
+    };
+    if !giveaway.ended {
+        return Ok(None);
+    }
+    let mut entries = store.giveaway_entries(id)?;
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    entries.shuffle(&mut rand::rng());
+    let winner = entries[0].clone();
+    if let Ok(channel) = giveaway.channel_id.parse::<u64>() {
+        ChannelId::new(channel)
+            .say(
+                http,
+                format!(
+                    "ðŸŽ² Giveaway #{} reroll: novo vencedor <@{}> recebeu **{}**.",
+                    giveaway.id, winner, giveaway.prize
+                ),
+            )
+            .await?;
+    }
+    Ok(Some(winner))
+}
+
 async fn finish_poll(http: &serenity::http::Http, store: &Store, id: i64) -> Result<bool> {
     let Some(poll) = store.poll(id)? else {
         return Ok(false);
@@ -3522,16 +3809,75 @@ async fn finish_poll(http: &serenity::http::Http, store: &Store, id: i64) -> Res
     Ok(true)
 }
 
+async fn apply_lockdown(
+    http: &serenity::http::Http,
+    store: &Store,
+    guild_id: serenity::all::GuildId,
+    enabled: bool,
+) -> Result<usize> {
+    let channels = http.get_channels(guild_id).await?;
+    let everyone = RoleId::new(guild_id.get());
+    let mut changed = 0;
+    for channel in channels.into_iter().filter(|channel| {
+        matches!(channel.kind, ChannelType::Text | ChannelType::News)
+    }) {
+        let key = format!("security.lockdown.previous.{}", channel.id);
+        if enabled {
+            if store.get_setting(&guild_id.to_string(), &key)?.is_none() {
+                if let Some(existing) = channel.permission_overwrites.iter().find(|overwrite| {
+                    matches!(overwrite.kind, PermissionOverwriteType::Role(role) if role == everyone)
+                }) {
+                    store.set_setting(
+                        &guild_id.to_string(),
+                        &key,
+                        &serde_json::to_string(existing)?,
+                    )?;
+                } else {
+                    store.set_setting(&guild_id.to_string(), &key, "")?;
+                }
+            }
+            channel
+                .create_permission(
+                    http,
+                    PermissionOverwrite {
+                        allow: Permissions::empty(),
+                        deny: Permissions::SEND_MESSAGES,
+                        kind: PermissionOverwriteType::Role(everyone),
+                    },
+                )
+                .await?;
+            changed += 1;
+        } else if let Some(previous) = store.get_setting(&guild_id.to_string(), &key)? {
+            if previous.is_empty() {
+                channel
+                    .delete_permission(http, PermissionOverwriteType::Role(everyone))
+                    .await?;
+            } else {
+                let overwrite = serde_json::from_str::<PermissionOverwrite>(&previous)?;
+                channel.create_permission(http, overwrite).await?;
+            }
+            store.delete_setting(&guild_id.to_string(), &key)?;
+            changed += 1;
+        }
+    }
+    store.set_setting(
+        &guild_id.to_string(),
+        "security.lockdown.active",
+        if enabled { "true" } else { "false" },
+    )?;
+    Ok(changed)
+}
+
 fn required_permission(command: &str) -> Option<Permissions> {
     match command {
         "warn" | "violation" | "timeout" | "untimeout" | "note" | "reason" | "quarantine"
-        | "unquarantine" => Some(Permissions::MODERATE_MEMBERS),
+        | "unquarantine" | "modlogs" => Some(Permissions::MODERATE_MEMBERS),
         "kick" => Some(Permissions::KICK_MEMBERS),
-        "ban" | "unban" => Some(Permissions::BAN_MEMBERS),
+        "ban" | "unban" | "tempban" | "softban" => Some(Permissions::BAN_MEMBERS),
         "purge" => Some(Permissions::MANAGE_MESSAGES),
         "ticket-panel" | "ticket-config" | "ticket-update" => Some(Permissions::MANAGE_CHANNELS),
-        "slowmode" => Some(Permissions::MANAGE_CHANNELS),
-        "setup" => Some(Permissions::MANAGE_GUILD),
+        "slowmode" | "lockdown" | "unlock" => Some(Permissions::MANAGE_CHANNELS),
+        "setup" | "verify-panel" => Some(Permissions::MANAGE_GUILD),
         "rolepanel" => Some(Permissions::MANAGE_ROLES),
         "join-gate" => Some(Permissions::MANAGE_ROLES),
         "anti-raid" => Some(Permissions::MANAGE_GUILD),
@@ -3540,7 +3886,7 @@ fn required_permission(command: &str) -> Option<Permissions> {
         "event-create" | "event-edit" | "event-cancel" | "event-attendees" => {
             Some(Permissions::CREATE_EVENTS)
         }
-        "tag-set" | "tag-delete" | "giveaway-start" | "giveaway-end" | "starboard-set"
+        "tag-set" | "tag-delete" | "giveaway-start" | "giveaway-end" | "gstart" | "gend" | "greroll" | "starboard-set"
         | "workflow-create" | "workflow-dry-run" | "workflow-toggle" | "workflow-delete" => {
             Some(Permissions::MANAGE_GUILD)
         }
@@ -3593,11 +3939,25 @@ async fn deliver_scheduled_action(
     http: &serenity::http::Http,
     store: &Store,
     id: i64,
+    guild_id: &str,
     action_type: &str,
     target_id: &str,
     payload: &str,
 ) -> Result<()> {
     let value: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+    if action_type == "unban" {
+        let guild = guild_id
+            .parse::<u64>()
+            .map(serenity::all::GuildId::new)
+            .map_err(|_| anyhow::anyhow!("invalid scheduled unban guild"))?;
+        let user = target_id
+            .parse::<u64>()
+            .map(serenity::all::UserId::new)
+            .map_err(|_| anyhow::anyhow!("invalid scheduled unban user"))?;
+        let _ = guild.unban(http, user).await;
+        store.delete_scheduled_action(id)?;
+        return Ok(());
+    }
     if action_type == "giveaway_end" {
         if let Some(giveaway_id) = value.get("giveaway_id").and_then(serde_json::Value::as_i64) {
             let _ = finish_giveaway(http, store, giveaway_id).await?;

@@ -339,6 +339,32 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    pub fn cases_for_target(
+        &self,
+        guild_id: &str,
+        target_id: &str,
+        limit: u32,
+    ) -> Result<Vec<CaseRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id,guild_id,type,target_id,moderator_id,reason,duration_ms,created_at FROM cases WHERE guild_id=?1 AND target_id=?2 ORDER BY id DESC LIMIT ?3")?;
+        let rows = stmt.query_map(
+            params![guild_id, target_id, i64::from(limit.min(200))],
+            |row| {
+                Ok(CaseRecord {
+                    id: row.get(0)?,
+                    guild_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    target_id: row.get(3)?,
+                    moderator_id: row.get(4)?,
+                    reason: row.get(5)?,
+                    duration_ms: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn update_case_reason(&self, guild_id: &str, case_id: i64, reason: &str) -> Result<bool> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         Ok(conn.execute(
@@ -1616,6 +1642,7 @@ mod tests {
         assert_eq!(id, 1);
         let cases = store.recent_cases("guild", 10).unwrap();
         assert_eq!(cases[0].target_id, "user");
+        assert_eq!(store.cases_for_target("guild", "user", 10).unwrap().len(), 1);
         assert!(
             store
                 .consume_quota("guild", "user", "workflow_runs", 1, Utc::now())
