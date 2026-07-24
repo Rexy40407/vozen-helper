@@ -52,6 +52,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/oauth/callback", get(oauth_callback))
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
+        .route("/api/guilds", get(guilds))
         .route("/api/cases", get(cases))
         .route("/api/stats", get(stats))
         .route("/api/quotas", get(quotas))
@@ -222,6 +223,7 @@ struct DiscordUser {
 #[derive(Debug, Deserialize)]
 struct DiscordGuild {
     id: String,
+    name: String,
     permissions: Option<String>,
 }
 #[derive(Debug, Serialize)]
@@ -304,6 +306,26 @@ async fn create_session_inner(
         .store
         .save_session(&claims)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let managed_guilds = guilds
+        .iter()
+        .filter(|guild| {
+            guild
+                .permissions
+                .as_deref()
+                .is_some_and(has_manage_permission)
+        })
+        .map(|guild| {
+            (
+                guild.id.clone(),
+                guild.name.clone(),
+                guild.permissions.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    state
+        .store
+        .replace_session_guilds(claims.session_id, &managed_guilds)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     let token = sign_session(&claims, &state.session_secret);
     let mut response = Json(SessionResponse {
         ok: true,
@@ -355,6 +377,23 @@ async fn me(
     Ok(Json(
         serde_json::json!({"id":claims.user_id,"guildId":claims.guild_id,"expiresAt":claims.expires_at,"dbOk":true}),
     ))
+}
+
+async fn guilds(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let guilds = state
+        .store
+        .session_guilds(claims.session_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    Ok(Json(serde_json::json!({
+        "guilds": guilds
+            .into_iter()
+            .map(|guild| serde_json::json!({"id": guild.guild_id, "name": guild.name, "canManage": true}))
+            .collect::<Vec<_>>()
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -668,7 +707,8 @@ async fn privacy_receipt(
         ],
         "persistedFields": [
             "guild-scoped settings", "moderation cases", "aggregate daily stats",
-            "ticket metadata", "workflow definitions and run metadata", "quota counters"
+            "ticket metadata", "workflow definitions and run metadata", "quota counters",
+            "managed guild metadata scoped to the session"
         ],
         "notPersistedByDefault": ["message bodies", "Discord tokens", "OAuth client secrets", "session cookies"],
         "retention": {
