@@ -814,6 +814,14 @@ impl Store {
         )? > 0)
     }
 
+    pub fn reopen_ticket(&self, channel_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "UPDATE tickets SET status='open' WHERE channel_id=?1 AND status='closed'",
+            [channel_id],
+        )? > 0)
+    }
+
     pub fn create_suggestion(&self, guild_id: &str, author_id: &str, content: &str) -> Result<i64> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
@@ -1222,6 +1230,17 @@ mod tests {
         let jobs = store.due_scheduled_actions(1, 10).unwrap();
         assert_eq!(jobs[0].0, id);
         assert_eq!(jobs[0].4, r#"{"channel_id":"2","text":"hello"}"#);
+        store.open_ticket("g", "u", "20").unwrap();
+        assert!(store.close_ticket("20").unwrap());
+        assert_eq!(
+            store.ticket_by_channel("20").unwrap().unwrap().status,
+            "closed"
+        );
+        assert!(store.reopen_ticket("20").unwrap());
+        assert_eq!(
+            store.ticket_by_channel("20").unwrap().unwrap().status,
+            "open"
+        );
     }
 
     #[test]

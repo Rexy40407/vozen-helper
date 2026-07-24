@@ -2528,10 +2528,98 @@ impl Handler {
                     respond_component(ctx, component, "Este ticket já foi fechado.").await
                 }
             }
+            "ticket:reopen" => {
+                let Some(ticket) = self
+                    .store
+                    .ticket_by_channel(&component.channel_id.to_string())?
+                else {
+                    return respond_component(ctx, component, "Ticket não encontrado.").await;
+                };
+                let is_opener = ticket.user_id == component.user.id.to_string();
+                let is_staff = if let Ok(Some(raw_role)) = self
+                    .store
+                    .get_setting(&guild_id.to_string(), "support.ticket.staff_role_id")
+                {
+                    raw_role.parse::<u64>().ok().is_some_and(|role_id| {
+                        component.member.as_ref().is_some_and(|member| {
+                            member.roles.iter().any(|role| role.get() == role_id)
+                        })
+                    })
+                } else {
+                    false
+                };
+                if !is_opener && !is_staff {
+                    return respond_component(
+                        ctx,
+                        component,
+                        "Só o autor ou a equipa de suporte pode reabrir este ticket.",
+                    )
+                    .await;
+                }
+                if !self
+                    .store
+                    .reopen_ticket(&component.channel_id.to_string())?
+                {
+                    return respond_component(
+                        ctx,
+                        component,
+                        "Este ticket já está aberto ou não existe.",
+                    )
+                    .await;
+                }
+                component
+                    .channel_id
+                    .edit(
+                        &ctx.http,
+                        EditChannel::new().name(format!("ticket-{}", ticket.user_id)),
+                    )
+                    .await?;
+                component
+                    .channel_id
+                    .send_message(
+                        &ctx.http,
+                        serenity::all::CreateMessage::new()
+                            .content("Ticket reaberto. A equipa pode continuar a responder.")
+                            .components(vec![CreateActionRow::Buttons(vec![
+                                CreateButton::new("ticket:claim")
+                                    .label("Assumir")
+                                    .style(ButtonStyle::Secondary),
+                                CreateButton::new("ticket:close")
+                                    .label("Fechar")
+                                    .style(ButtonStyle::Danger),
+                            ])]),
+                    )
+                    .await?;
+                respond_component(ctx, component, "Ticket reaberto.").await
+            }
             "ticket:close" => {
                 let ticket = self
                     .store
                     .ticket_by_channel(&component.channel_id.to_string())?;
+                let Some(ticket_for_auth) = ticket.as_ref() else {
+                    return respond_component(ctx, component, "Ticket não encontrado.").await;
+                };
+                let is_opener = ticket_for_auth.user_id == component.user.id.to_string();
+                let is_staff = if let Ok(Some(raw_role)) = self
+                    .store
+                    .get_setting(&guild_id.to_string(), "support.ticket.staff_role_id")
+                {
+                    raw_role.parse::<u64>().ok().is_some_and(|role_id| {
+                        component.member.as_ref().is_some_and(|member| {
+                            member.roles.iter().any(|role| role.get() == role_id)
+                        })
+                    })
+                } else {
+                    false
+                };
+                if !is_opener && !is_staff {
+                    return respond_component(
+                        ctx,
+                        component,
+                        "Só o autor ou a equipa de suporte pode fechar este ticket.",
+                    )
+                    .await;
+                }
                 if self.store.close_ticket(&component.channel_id.to_string())? {
                     if let Some(raw_channel) = self.store.get_setting(
                         &guild_id.to_string(),
@@ -2561,9 +2649,32 @@ impl Handler {
                                 .await;
                         }
                     }
-                    respond_component(ctx, component, "Ticket fechado. O canal será removido.")
+                    component
+                        .channel_id
+                        .edit(
+                            &ctx.http,
+                            EditChannel::new().name(format!("closed-ticket-{}", component.user.id)),
+                        )
                         .await?;
-                    component.channel_id.delete(&ctx.http).await?;
+                    component
+                        .channel_id
+                        .send_message(
+                            &ctx.http,
+                            serenity::all::CreateMessage::new()
+                                .content("Ticket fechado. O histórico foi preservado; o autor ou a equipa pode reabri-lo.")
+                                .components(vec![CreateActionRow::Buttons(vec![
+                                    CreateButton::new("ticket:reopen")
+                                        .label("Reabrir")
+                                        .style(ButtonStyle::Success),
+                                ])]),
+                        )
+                        .await?;
+                    respond_component(
+                        ctx,
+                        component,
+                        "Ticket fechado e arquivado. O canal não foi apagado.",
+                    )
+                    .await?;
                 } else {
                     respond_component(ctx, component, "Este ticket já está fechado.").await?;
                 }
