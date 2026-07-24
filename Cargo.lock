@@ -648,6 +648,7 @@ dependencies = [
  "chrono",
  "helper-contracts",
  "helper-core",
+ "helper-modules",
  "helper-store",
  "hmac",
  "http",
