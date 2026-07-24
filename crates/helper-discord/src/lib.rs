@@ -3911,6 +3911,21 @@ fn parse_duration(raw: &str) -> Option<i64> {
     (amount > 0 && amount <= 365 * 86_400_000).then_some(amount)
 }
 
+fn format_duration(milliseconds: i64) -> String {
+    let units = [
+        (86_400_000, "d"),
+        (3_600_000, "h"),
+        (60_000, "m"),
+        (1_000, "s"),
+    ];
+    for (unit_ms, suffix) in units {
+        if milliseconds % unit_ms == 0 {
+            return format!("{}{}", milliseconds / unit_ms, suffix);
+        }
+    }
+    format!("{}ms", milliseconds)
+}
+
 fn shadow_mode_enabled(raw: Option<&str>) -> bool {
     raw.is_some_and(|value| value.eq_ignore_ascii_case("true"))
 }
