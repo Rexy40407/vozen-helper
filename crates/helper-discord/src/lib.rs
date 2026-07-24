@@ -676,6 +676,16 @@ impl EventHandler for Handler {
                     )
                     .required(false),
                 ),
+            CreateCommand::new("security-mode")
+                .description("Enable or disable shadow mode for high-risk security responses")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Boolean,
+                        "shadow",
+                        "Record and alert without automatic containment",
+                    )
+                    .required(true),
+                ),
             CreateCommand::new("anti-nuke")
                 .description("Configure the audit-log destructive-action guard")
                 .add_option(
@@ -836,17 +846,35 @@ impl EventHandler for Handler {
                 )
             };
             if armed {
+                let shadow_mode = shadow_mode_enabled(
+                    self.store
+                        .get_setting(&guild_text, "security.shadow_mode")
+                        .ok()
+                        .flatten()
+                        .as_deref(),
+                );
                 // Bounded response: latch the existing gate and alert moderators.
-                // It deliberately never mass-bans members automatically.
-                let _ = self
-                    .store
-                    .set_setting(&guild_text, "security.join_gate.enabled", "true");
+                // Shadow mode records and alerts but deliberately does not contain.
+                if !shadow_mode {
+                    let _ =
+                        self.store
+                            .set_setting(&guild_text, "security.join_gate.enabled", "true");
+                }
                 let reason = format!(
-                    "Anti-raid: {threshold} joins dentro de {window_seconds}s; join gate ativado"
+                    "Anti-raid: {threshold} joins dentro de {window_seconds}s; {}",
+                    if shadow_mode {
+                        "shadow mode, sem contenção automática"
+                    } else {
+                        "join gate ativado"
+                    }
                 );
                 let _ = self.store.record_case(
                     &guild_text,
-                    "anti_raid",
+                    if shadow_mode {
+                        "anti_raid_shadow"
+                    } else {
+                        "anti_raid"
+                    },
                     &new_member.user.id.to_string(),
                     "helper",
                     &reason,
@@ -859,7 +887,12 @@ impl EventHandler for Handler {
                         .say(
                             &ctx.http,
                             format!(
-                                "⚠️ Possível raid detetada: {threshold} entradas em {window_seconds}s. O join gate foi ativado; verifica os casos recentes."
+                                "⚠️ Possível raid detetada: {threshold} entradas em {window_seconds}s. {} Verifica os casos recentes.",
+                                if shadow_mode {
+                                    "Shadow mode ativo; não foi aplicada contenção automática."
+                                } else {
+                                    "O join gate foi ativado."
+                                }
                             ),
                         )
                         .await;
@@ -1021,6 +1054,38 @@ impl EventHandler for Handler {
             None,
         );
         if !armed {
+            return;
+        }
+        let shadow_mode = shadow_mode_enabled(
+            self.store
+                .get_setting(&guild_text, "security.shadow_mode")
+                .ok()
+                .flatten()
+                .as_deref(),
+        );
+        if shadow_mode {
+            let _ = self.store.record_case(
+                &guild_text,
+                "anti_nuke_shadow",
+                &executor,
+                "helper",
+                &format!(
+                    "{threshold} ações destrutivas em {window_seconds}s; shadow mode, sem contenção automática"
+                ),
+                None,
+            );
+            if let Ok(guild) = guild_id.to_partial_guild(&ctx.http).await
+                && let Some(channel_id) = guild.system_channel_id
+            {
+                let _ = channel_id
+                    .say(
+                        &ctx.http,
+                        format!(
+                            "🚨 Possível ataque nuke: <@{executor}> executou {threshold} ações destrutivas em {window_seconds}s. Shadow mode ativo; não foi aplicada contenção automática."
+                        ),
+                    )
+                    .await;
+            }
             return;
         }
         // Containment is intentionally reversible and non-destructive: latch the
@@ -1774,6 +1839,22 @@ impl Handler {
                     format!("Join gate ativado para contas com menos de {minimum_age} dia(s){role_note}.")
                 } else {
                     "Join gate desativado; as definições guardadas podem ser reativadas.".to_string()
+                }
+            }
+            "security-mode" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let shadow = option_bool(command, "shadow").unwrap_or(false);
+                self.store.set_setting(
+                    &guild_id.to_string(),
+                    "security.shadow_mode",
+                    if shadow { "true" } else { "false" },
+                )?;
+                if shadow {
+                    "Shadow mode ativado: respostas anti-raid/anti-nuke ficam em observação, com casos e alertas, sem contenção automática.".to_string()
+                } else {
+                    "Shadow mode desativado: as respostas de segurança configuradas podem aplicar contenção limitada.".to_string()
                 }
             }
             "anti-raid" => {
@@ -2572,6 +2653,7 @@ fn required_permission(command: &str) -> Option<Permissions> {
         "rolepanel" => Some(Permissions::MANAGE_ROLES),
         "join-gate" => Some(Permissions::MANAGE_ROLES),
         "anti-raid" => Some(Permissions::MANAGE_GUILD),
+        "security-mode" => Some(Permissions::MANAGE_GUILD),
         "anti-nuke" => Some(Permissions::MANAGE_GUILD),
         "event-create" | "event-cancel" => Some(Permissions::CREATE_EVENTS),
         "tag-set" | "tag-delete" | "giveaway-start" | "giveaway-end" | "starboard-set"
@@ -2592,6 +2674,10 @@ fn parse_duration(raw: &str) -> Option<i64> {
         _ => return None,
     })?;
     (amount > 0 && amount <= 365 * 86_400_000).then_some(amount)
+}
+
+fn shadow_mode_enabled(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
 fn parse_scheduled_event_window(
@@ -2679,7 +2765,7 @@ async fn deliver_scheduled_action(
 mod tests {
     use super::{
         account_age_days, is_destructive_audit_action, join_burst_armed, parse_duration,
-        parse_scheduled_event_window,
+        parse_scheduled_event_window, shadow_mode_enabled,
     };
     use std::{
         collections::{HashMap, VecDeque},
@@ -2800,5 +2886,13 @@ mod tests {
             .unwrap_err(),
             "event_too_long"
         );
+    }
+
+    #[test]
+    fn shadow_mode_is_explicit_and_case_insensitive() {
+        assert!(shadow_mode_enabled(Some("true")));
+        assert!(shadow_mode_enabled(Some("TRUE")));
+        assert!(!shadow_mode_enabled(Some("false")));
+        assert!(!shadow_mode_enabled(None));
     }
 }
