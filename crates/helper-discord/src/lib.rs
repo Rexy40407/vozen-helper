@@ -146,6 +146,36 @@ impl EventHandler for Handler {
                     )
                     .required(false),
                 ),
+            CreateCommand::new("untimeout")
+                .description("Remove a member timeout")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::User,
+                        "user",
+                        "Member",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("unban")
+                .description("Unban a user")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "user_id",
+                        "User ID",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("purge")
+                .description("Delete recent messages")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "count",
+                        "Messages to delete (1-100)",
+                    )
+                    .required(true),
+                ),
             CreateCommand::new("afk")
                 .description("Set or clear your AFK status")
                 .add_option(
@@ -449,6 +479,60 @@ impl Handler {
                         format!("Aviso criado como caso #{case_id} para <@{}>.", target)
                     } else { "Indica um membro.".to_string() }
                 } else { "Este comando só pode ser usado num servidor.".to_string() }
+            }
+            "untimeout" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let Some(target) = command.data.options.iter().find_map(|option| match option.value {
+                    CommandDataOptionValue::User(user) => Some(user),
+                    _ => None,
+                }) else {
+                    return respond(ctx, command, "Indica um membro.").await;
+                };
+                let result = guild_id
+                    .edit_member(&ctx.http, target, serenity::all::EditMember::new().enable_communication())
+                    .await;
+                match result {
+                    Ok(_) => format!("Timeout removido para <@{}>.", target),
+                    Err(error) => {
+                        tracing::warn!(%error, "untimeout failed");
+                        "Não foi possível remover o timeout; confirma as permissões.".to_string()
+                    }
+                }
+            }
+            "unban" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let Some(raw_user_id) = option_string(command, "user_id") else {
+                    return respond(ctx, command, "Indica um ID de utilizador.").await;
+                };
+                let Ok(user_id) = raw_user_id.parse::<u64>() else {
+                    return respond(ctx, command, "ID de utilizador inválido.").await;
+                };
+                match guild_id.unban(&ctx.http, serenity::all::UserId::new(user_id)).await {
+                    Ok(()) => "Utilizador desbanido.".to_string(),
+                    Err(error) => {
+                        tracing::warn!(%error, "unban failed");
+                        "Não foi possível remover o ban.".to_string()
+                    }
+                }
+            }
+            "purge" => {
+                let raw_count = command.data.options.iter().find_map(|option| match option.value {
+                    CommandDataOptionValue::Integer(value) if option.name == "count" => Some(value),
+                    _ => None,
+                }).unwrap_or(0);
+                let count = raw_count.clamp(1, 100) as u8;
+                let messages = command.channel_id.messages(&ctx.http, serenity::all::GetMessages::new().limit(count)).await?;
+                if messages.is_empty() {
+                    "Não encontrei mensagens para apagar.".to_string()
+                } else {
+                    let ids: Vec<_> = messages.iter().map(|message| message.id).collect();
+                    command.channel_id.delete_messages(&ctx.http, ids).await?;
+                    format!("{} mensagens apagadas.", messages.len())
+                }
             }
             "kick" | "ban" | "timeout" => {
                 let Some(guild_id) = command.guild_id else {
