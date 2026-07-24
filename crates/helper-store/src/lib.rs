@@ -986,6 +986,27 @@ impl Store {
             .optional()?)
     }
 
+    pub fn tickets_for_guild(&self, guild_id: &str, limit: u32) -> Result<Vec<TicketRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT guild_id,opener_id,channel_id,status,claimed_by,category,priority,notes,csat,created_at,closed_at FROM tickets WHERE guild_id=?1 ORDER BY created_at DESC LIMIT ?2")?;
+        let rows = stmt.query_map(params![guild_id, i64::from(limit.min(200))], |row| {
+            Ok(TicketRecord {
+                guild_id: row.get(0)?,
+                user_id: row.get(1)?,
+                channel_id: row.get(2)?,
+                status: row.get(3)?,
+                claimed_by: row.get(4)?,
+                category: row.get(5)?,
+                priority: row.get(6)?,
+                notes: row.get(7)?,
+                csat: row.get(8)?,
+                created_at: row.get(9)?,
+                closed_at: row.get(10)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn check_in_event(&self, guild_id: &str, event_id: &str, user_id: &str) -> Result<bool> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         Ok(conn.execute(

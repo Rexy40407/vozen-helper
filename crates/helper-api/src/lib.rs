@@ -54,6 +54,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/me", get(me))
         .route("/api/guilds", get(guilds))
         .route("/api/cases", get(cases))
+        .route("/api/tickets", get(tickets))
         .route("/api/stats", get(stats))
         .route("/api/quotas", get(quotas))
         .route("/api/modules", get(modules))
@@ -423,6 +424,21 @@ async fn stats(
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     Ok(Json(
         serde_json::json!({"totalCases":cases.len(),"guildId":claims.guild_id}),
+    ))
+}
+
+async fn tickets(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Query(query): Query<LimitQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let list = state
+        .store
+        .tickets_for_guild(&claims.guild_id, query.limit.unwrap_or(50).min(200))
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    Ok(Json(
+        serde_json::json!({"guildId": claims.guild_id, "tickets": list}),
     ))
 }
 
@@ -1032,6 +1048,8 @@ mod tests {
         store
             .record_case("guild-b", "warn", "user-b", "mod", "b", None)
             .unwrap();
+        store.open_ticket("guild-a", "user-a", "channel-a").unwrap();
+        store.open_ticket("guild-b", "user-b", "channel-b").unwrap();
         let session = claims("guild-a");
         store.save_session(&session).unwrap();
         let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
@@ -1053,6 +1071,23 @@ mod tests {
         assert_eq!(body["cases"].as_array().unwrap().len(), 1);
         assert_eq!(body["cases"][0]["guild_id"], "guild-a");
         assert!(!body.to_string().contains("guild-b"));
+
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tickets")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["tickets"].as_array().unwrap().len(), 1);
+        assert_eq!(body["tickets"][0]["guild_id"], "guild-a");
+        assert!(!body.to_string().contains("channel-b"));
 
         let response = router(state(store.clone()))
             .oneshot(
