@@ -1,0 +1,24 @@
+[Unit]
+Description=Vozen Helper (Rust)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vozen
+Group=vozen
+WorkingDirectory=/home/vozen/vozen-helper-rust/current
+EnvironmentFile=/home/vozen/vozen-helper-rust/shared/.env
+ExecStart=/home/vozen/vozen-helper-rust/current/bin/vozen-helper serve
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/home/vozen/vozen-helper-rust/shared/data
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

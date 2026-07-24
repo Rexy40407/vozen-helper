@@ -1,0 +1,22 @@
+[package]
+name = "helper-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap = { version = "4.5", features = ["derive", "env"] }
+chrono.workspace = true
+helper-api = { path = "../helper-api" }
+helper-core = { path = "../helper-core" }
+helper-discord = { path = "../helper-discord" }
+helper-modules = { path = "../helper-modules" }
+helper-store = { path = "../helper-store" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[[bin]]
+name = "vozen-helper"
+path = "src/main.rs"
