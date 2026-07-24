@@ -452,6 +452,22 @@ pub async fn run(config: &Config) -> Result<()> {
 
 impl Handler {
     async fn handle_command(&self, ctx: &Context, command: &CommandInteraction) -> Result<()> {
+        if let Some(required) = required_permission(command.data.name.as_str()) {
+            let permissions = command
+                .member
+                .as_deref()
+                .and_then(|member| member.permissions)
+                .unwrap_or_else(Permissions::empty);
+            if !permissions.contains(required) && !permissions.contains(Permissions::ADMINISTRATOR)
+            {
+                return respond(
+                    ctx,
+                    command,
+                    "Não tens a permissão necessária para este comando.",
+                )
+                .await;
+            }
+        }
         let content = match command.data.name.as_str() {
             "ping" => "Pong — Vozen Helper está online.".to_string(),
             "help" => "Vozen Helper público: Core, Studio, Security, Support, Events, Community, Automate e Insights. Usa /dashboard para configurar o servidor.".to_string(),
@@ -903,6 +919,19 @@ fn option_string<'a>(command: &'a CommandInteraction, name: &str) -> Option<&'a 
             _ => return None,
         })
     })
+}
+
+fn required_permission(command: &str) -> Option<Permissions> {
+    match command {
+        "warn" | "timeout" | "untimeout" => Some(Permissions::MODERATE_MEMBERS),
+        "kick" => Some(Permissions::KICK_MEMBERS),
+        "ban" | "unban" => Some(Permissions::BAN_MEMBERS),
+        "purge" => Some(Permissions::MANAGE_MESSAGES),
+        "ticket-panel" => Some(Permissions::MANAGE_CHANNELS),
+        "rolepanel" => Some(Permissions::MANAGE_ROLES),
+        "tag-set" | "tag-delete" => Some(Permissions::MANAGE_GUILD),
+        _ => None,
+    }
 }
 
 fn parse_duration(raw: &str) -> Option<i64> {
