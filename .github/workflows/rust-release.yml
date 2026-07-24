@@ -22,6 +22,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Audit Rust dependencies
+        run: cargo audit
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Test workspace
