@@ -469,6 +469,17 @@ async fn privacy_delete(
     headers: HeaderMap,
     Json(request): Json<PrivacyDeleteRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    // Destructive privacy operations must not be authorisable by the ambient
+    // SameSite=None session cookie; require an explicit bearer token to limit
+    // cross-site request-forgery impact.
+    let bearer_present = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|value| !value.trim().is_empty());
+    if !bearer_present {
+        return Err(client_error(StatusCode::UNAUTHORIZED, "bearer_required"));
+    }
     let claims = require_auth(&state, &headers)?;
     if request.confirmation.trim() != claims.guild_id {
         return Err(client_error(
