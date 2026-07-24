@@ -2006,7 +2006,7 @@ impl Handler {
                 let action = guild_id.ban_with_reason(&ctx.http, target, 0, reason).await;
                 if let Err(error) = action {
                     tracing::warn!(%error, action = %command.data.name, "ban action failed");
-                    return Ok(respond(ctx, command, "NÃ£o foi possÃ­vel executar o ban; confirma as permissÃµes e a hierarquia.").await?);
+                    return respond(ctx, command, "Nao foi possivel executar o ban; confirma as permissoes e a hierarquia.").await;
                 }
                 if command.data.name == "softban" {
                     let _ = guild_id.unban(&ctx.http, target).await;
@@ -3283,7 +3283,7 @@ impl Handler {
                 return respond_component(ctx, component, "JÃ¡ estÃ¡s verificado.").await;
             }
             member.add_role(&ctx.http, role).await?;
-            return respond_component(ctx, component, "VerificaÃ§Ã£o concluÃ­da; cargo atribuÃ­do.")
+            return respond_component(ctx, component, "Verificacao concluida; cargo atribuido.")
                 .await;
         }
         match component.data.custom_id.as_str() {
