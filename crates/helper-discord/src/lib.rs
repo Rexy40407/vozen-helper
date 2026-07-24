@@ -756,6 +756,56 @@ impl EventHandler for Handler {
                     .required(false),
                 ),
             CreateCommand::new("event-list").description("List native Discord scheduled events"),
+            CreateCommand::new("event-edit")
+                .description("Edit a native Discord scheduled event")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "event_id",
+                        "Discord scheduled event ID",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "name",
+                        "New event name",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "start",
+                        "New RFC3339 start",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "end",
+                        "New RFC3339 end",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "location",
+                        "New external event location",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "description",
+                        "New event description (empty clears it)",
+                    )
+                    .required(false),
+                ),
             CreateCommand::new("event-cancel")
                 .description("Cancel a native Discord scheduled event")
                 .add_option(
@@ -1994,6 +2044,110 @@ impl Handler {
                         .join("\n")
                 }
             }
+            "event-edit" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let event_id = option_i64(command, "event_id").unwrap_or(0);
+                if event_id <= 0 {
+                    return respond(ctx, command, "Indica um ID de evento válido.").await;
+                }
+                let event_id = serenity::all::ScheduledEventId::new(event_id as u64);
+                let events = guild_id.scheduled_events(&ctx.http, false).await?;
+                let Some(existing) = events.into_iter().find(|event| event.id == event_id) else {
+                    return respond(ctx, command, "Não encontrei esse evento neste servidor.").await;
+                };
+                if matches!(
+                    existing.status,
+                    serenity::all::ScheduledEventStatus::Completed
+                        | serenity::all::ScheduledEventStatus::Canceled
+                ) {
+                    return respond(ctx, command, "Eventos concluídos ou cancelados não podem ser editados.").await;
+                }
+
+                let name = option_string(command, "name").map(str::trim);
+                if let Some(name) = name
+                    && !(1..=100).contains(&name.len())
+                {
+                    return respond(ctx, command, "O nome tem de ter entre 1 e 100 caracteres.").await;
+                }
+
+                let location = option_string(command, "location").map(str::trim);
+                if let Some(location) = location
+                    && (existing.kind != serenity::all::ScheduledEventType::External
+                        || !(1..=100).contains(&location.len()))
+                {
+                    return respond(ctx, command, "A localização só pode ser alterada em eventos externos e deve ter 1–100 caracteres.").await;
+                }
+
+                let description = option_string(command, "description").map(str::trim);
+                if let Some(description) = description
+                    && description.len() > 1_000
+                {
+                    return respond(ctx, command, "A descrição não pode exceder 1000 caracteres.").await;
+                }
+
+                let start_raw = option_string(command, "start").map(str::trim);
+                let end_raw = option_string(command, "end").map(str::trim);
+                let (start, end) = if start_raw.is_some() || end_raw.is_some() {
+                    let start = match start_raw {
+                        Some(raw) => serenity::all::Timestamp::parse(raw)
+                            .map_err(|_| anyhow::anyhow!("A nova data de início não é RFC3339 válida."))?,
+                        None => existing.start_time,
+                    };
+                    let end = match end_raw {
+                        Some(raw) => serenity::all::Timestamp::parse(raw)
+                            .map_err(|_| anyhow::anyhow!("A nova data de fim não é RFC3339 válida."))?,
+                        None => existing.end_time.ok_or_else(|| {
+                            anyhow::anyhow!("Este evento não tem data de fim; indica `end` para o editar.")
+                        })?,
+                    };
+                    if start_raw.is_some()
+                        && start.unix_timestamp()
+                            <= serenity::all::Timestamp::now().unix_timestamp()
+                    {
+                        return respond(ctx, command, "A nova data de início tem de estar no futuro.").await;
+                    }
+                    if end.unix_timestamp() <= start.unix_timestamp() {
+                        return respond(ctx, command, "O fim tem de ser depois do início.").await;
+                    }
+                    if end.unix_timestamp() - start.unix_timestamp() > 365 * 86_400 {
+                        return respond(ctx, command, "O evento não pode durar mais de 365 dias.").await;
+                    }
+                    (Some(start), Some(end))
+                } else {
+                    (None, None)
+                };
+
+                if name.is_none()
+                    && start.is_none()
+                    && end.is_none()
+                    && location.is_none()
+                    && description.is_none()
+                {
+                    return respond(ctx, command, "Indica pelo menos um campo para alterar.").await;
+                }
+
+                let mut builder = serenity::all::EditScheduledEvent::new()
+                    .audit_log_reason("Vozen Helper event-edit");
+                if let Some(name) = name {
+                    builder = builder.name(name.to_string());
+                }
+                if let Some(start) = start {
+                    builder = builder.start_time(start);
+                }
+                if let Some(end) = end {
+                    builder = builder.end_time(end);
+                }
+                if let Some(location) = location {
+                    builder = builder.location(location.to_string());
+                }
+                if let Some(description) = description {
+                    builder = builder.description(description.to_string());
+                }
+                let edited = guild_id.edit_scheduled_event(&ctx.http, event_id, builder).await?;
+                format!("Evento nativo #{} atualizado: **{}**.", edited.id, edited.name)
+            }
             "event-cancel" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
@@ -2657,7 +2811,7 @@ fn required_permission(command: &str) -> Option<Permissions> {
         "anti-raid" => Some(Permissions::MANAGE_GUILD),
         "security-mode" => Some(Permissions::MANAGE_GUILD),
         "anti-nuke" => Some(Permissions::MANAGE_GUILD),
-        "event-create" | "event-cancel" => Some(Permissions::CREATE_EVENTS),
+        "event-create" | "event-edit" | "event-cancel" => Some(Permissions::CREATE_EVENTS),
         "tag-set" | "tag-delete" | "giveaway-start" | "giveaway-end" | "starboard-set"
         | "workflow-create" | "workflow-delete" => Some(Permissions::MANAGE_GUILD),
         "suggestion" => Some(Permissions::MANAGE_MESSAGES),
