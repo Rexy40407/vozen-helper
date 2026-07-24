@@ -5,7 +5,7 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 const COOKIE: &str = "vh_session";
+const OAUTH_COOKIE: &str = "vh_oauth_verifier";
 const SESSION_MAX_HOURS: i64 = 8;
 const IDLE_MINUTES: i64 = 30;
 
@@ -92,6 +93,7 @@ pub fn router(state: ApiState) -> Router {
 struct OAuthStartQuery {
     guild_id: String,
     code_challenge: String,
+    code_verifier: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -103,11 +105,21 @@ struct OAuthStartResponse {
 async fn oauth_start(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<OAuthStartQuery>,
-) -> Result<Json<OAuthStartResponse>, (StatusCode, Json<ApiError>)> {
-    if query.guild_id.trim().is_empty() || query.code_challenge.trim().len() < 43 {
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    if query.guild_id.trim().is_empty()
+        || !(43..=128).contains(&query.code_verifier.len())
+        || query.code_challenge.trim().len() < 43
+    {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
             "invalid_oauth_request",
+        ));
+    }
+    let expected_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(query.code_verifier.as_bytes()));
+    if expected_challenge != query.code_challenge {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "pkce_challenge_mismatch",
         ));
     }
     let expires = (Utc::now() + Duration::minutes(10)).timestamp();
@@ -127,17 +139,28 @@ async fn oauth_start(
         .append_pair("state", &state_token)
         .append_pair("code_challenge", &query.code_challenge)
         .append_pair("code_challenge_method", "S256");
-    Ok(Json(OAuthStartResponse {
+    let mut response = Json(OAuthStartResponse {
         authorization_url: url.into(),
         state: state_token,
-    }))
+    })
+    .into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        format!(
+            "{OAUTH_COOKIE}={}; HttpOnly; Secure; SameSite=Lax; Path=/api/oauth; Max-Age=600",
+            query.code_verifier
+        )
+        .parse()
+        .unwrap(),
+    );
+    Ok(response)
 }
 
 #[derive(Debug, Deserialize)]
 struct OAuthCallbackQuery {
     code: String,
     state: String,
-    code_verifier: String,
+    code_verifier: Option<String>,
 }
 
 async fn oauth_callback(
@@ -145,6 +168,10 @@ async fn oauth_callback(
     headers: HeaderMap,
     Query(query): Query<OAuthCallbackQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    let code_verifier = query
+        .code_verifier
+        .or_else(|| cookie_value(&headers, OAUTH_COOKIE))
+        .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "missing_pkce_verifier"))?;
     let payload = verify_oauth_state(&query.state, &state.session_secret)
         .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "invalid_oauth_state"))?;
     let parts: Vec<&str> = payload.splitn(3, '.').collect();
@@ -169,7 +196,7 @@ async fn oauth_callback(
     }
     let guild_id = parts[0].to_string();
     let client = Client::new();
-    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(query.code_verifier.as_bytes()));
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
     if challenge != parts[2] {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
@@ -184,7 +211,7 @@ async fn oauth_callback(
             ("grant_type", "authorization_code"),
             ("code", query.code.as_str()),
             ("redirect_uri", state.oauth_redirect_uri.as_str()),
-            ("code_verifier", query.code_verifier.as_str()),
+            ("code_verifier", code_verifier.as_str()),
         ])
         .send()
         .await
@@ -209,7 +236,7 @@ async fn oauth_callback(
             "oauth_token_missing",
         ));
     }
-    create_session_inner(
+    let mut response = create_session_inner(
         State(state),
         headers,
         Json(SessionRequest {
@@ -217,7 +244,14 @@ async fn oauth_callback(
             guild_id,
         }),
     )
-    .await
+    .await?;
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        format!("{OAUTH_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/api/oauth; Max-Age=0")
+            .parse()
+            .unwrap(),
+    );
+    Ok(response)
 }
 
 async fn health() -> impl IntoResponse {
@@ -268,7 +302,7 @@ async fn create_session_inner(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Json(req): Json<SessionRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
     if req.token.trim().is_empty() || req.guild_id.trim().is_empty() {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
@@ -1347,6 +1381,20 @@ fn authenticate(state: &ApiState, headers: &HeaderMap) -> Option<SessionClaims> 
     }
     claims
 }
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value
+                .split(';')
+                .find_map(|item| item.trim().strip_prefix(&format!("{name}=")))
+        })
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn sign_session(claims: &SessionClaims, secret: &str) -> String {
     let payload = format!(
         "{}.{}.{}.{}",
@@ -1844,6 +1892,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn oauth_start_binds_verifier_and_sets_http_only_cookie() {
+        let store = Store::open(":memory:").unwrap();
+        let verifier = "a".repeat(64);
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        let response = router(state(store))
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/oauth/start?guild_id=guild-a&code_challenge={challenge}&code_verifier={verifier}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(cookie.starts_with("vh_oauth_verifier="));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Lax"));
+
+        let mismatch = router(state(Store::open(":memory:").unwrap()))
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/oauth/start?guild_id=guild-a&code_challenge={challenge}&code_verifier={}"
+                        , "b".repeat(64)
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
