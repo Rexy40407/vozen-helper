@@ -30,6 +30,7 @@ struct Handler {
     store: Store,
     spam: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
     joins: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+    nuke_events: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
     xp_ticks: Arc<Mutex<HashMap<String, u32>>>,
     scheduler_started: Arc<AtomicBool>,
     entitlements: Option<EntitlementClient>,
@@ -675,6 +676,32 @@ impl EventHandler for Handler {
                     )
                     .required(false),
                 ),
+            CreateCommand::new("anti-nuke")
+                .description("Configure the audit-log destructive-action guard")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Boolean,
+                        "enabled",
+                        "Enable or disable the guard",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "actions",
+                        "Destructive actions that arm the guard (2-25)",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "window_seconds",
+                        "Sliding window in seconds (3-60)",
+                    )
+                    .required(false),
+                ),
         ];
         if let Err(error) = Command::set_global_commands(&ctx.http, commands).await {
             tracing::error!(%error, "global command registration failed");
@@ -885,6 +912,91 @@ impl EventHandler for Handler {
             &reason,
             None,
         );
+    }
+
+    async fn guild_audit_log_entry_create(
+        &self,
+        ctx: Context,
+        entry: serenity::all::AuditLogEntry,
+        guild_id: serenity::all::GuildId,
+    ) {
+        let guild_text = guild_id.to_string();
+        let enabled = self
+            .store
+            .get_setting(&guild_text, "security.anti_nuke.enabled")
+            .ok()
+            .flatten()
+            .is_some_and(|value| value == "true");
+        if !enabled || !is_destructive_audit_action(entry.action) {
+            return;
+        }
+        let threshold = self
+            .store
+            .get_setting(&guild_text, "security.anti_nuke.actions")
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(3)
+            .clamp(2, 25);
+        let window_seconds = self
+            .store
+            .get_setting(&guild_text, "security.anti_nuke.window_seconds")
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(10)
+            .clamp(3, 60);
+        let executor = entry.user_id.to_string();
+        let armed = {
+            let mut events = self.nuke_events.lock().expect("anti-nuke mutex poisoned");
+            join_burst_armed(
+                &mut events,
+                &format!("{guild_text}:{executor}"),
+                Instant::now(),
+                Duration::from_secs(window_seconds),
+                threshold,
+            )
+        };
+        let action = format!("audit action {}", entry.action.num());
+        let reason = format!("Anti-nuke audit: {action} by <@{executor}>");
+        let _ = self.store.record_case(
+            &guild_text,
+            "anti_nuke_audit",
+            &executor,
+            "discord-audit-log",
+            &reason,
+            None,
+        );
+        if !armed {
+            return;
+        }
+        // Containment is intentionally reversible and non-destructive: latch the
+        // join gate and ask staff to review the executor before any role removal.
+        let _ = self
+            .store
+            .set_setting(&guild_text, "security.join_gate.enabled", "true");
+        let _ = self.store.record_case(
+            &guild_text,
+            "anti_nuke",
+            &executor,
+            "helper",
+            &format!(
+                "{threshold} ações destrutivas em {window_seconds}s; join gate ativado para revisão"
+            ),
+            None,
+        );
+        if let Ok(guild) = guild_id.to_partial_guild(&ctx.http).await
+            && let Some(channel_id) = guild.system_channel_id
+        {
+            let _ = channel_id
+                .say(
+                    &ctx.http,
+                    format!(
+                        "🚨 Possível ataque nuke: <@{executor}> executou {threshold} ações destrutivas em {window_seconds}s. O join gate foi ativado; revê o Audit Log antes de remover cargos."
+                    ),
+                )
+                .await;
+        }
     }
 
     async fn reaction_add(&self, ctx: Context, reaction: serenity::all::Reaction) {
@@ -1106,6 +1218,7 @@ pub async fn run(config: &Config) -> Result<()> {
             store,
             spam: Arc::new(Mutex::new(HashMap::new())),
             joins: Arc::new(Mutex::new(HashMap::new())),
+            nuke_events: Arc::new(Mutex::new(HashMap::new())),
             xp_ticks: Arc::new(Mutex::new(HashMap::new())),
             scheduler_started: Arc::new(AtomicBool::new(false)),
             entitlements: EntitlementClient::new(
@@ -1639,6 +1752,35 @@ impl Handler {
                     "Anti-raid desativado; nenhuma resposta automática a bursts de joins será aplicada.".to_string()
                 }
             }
+            "anti-nuke" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let enabled = option_bool(command, "enabled").unwrap_or(false);
+                let actions = option_i64(command, "actions").unwrap_or(3).clamp(2, 25);
+                let window_seconds = option_i64(command, "window_seconds").unwrap_or(10).clamp(3, 60);
+                let guild_text = guild_id.to_string();
+                self.store.set_setting(
+                    &guild_text,
+                    "security.anti_nuke.enabled",
+                    if enabled { "true" } else { "false" },
+                )?;
+                self.store.set_setting(
+                    &guild_text,
+                    "security.anti_nuke.actions",
+                    &actions.to_string(),
+                )?;
+                self.store.set_setting(
+                    &guild_text,
+                    "security.anti_nuke.window_seconds",
+                    &window_seconds.to_string(),
+                )?;
+                if enabled {
+                    format!("Anti-nuke ativado: {actions} ações destrutivas em {window_seconds}s ativam contenção e alerta.")
+                } else {
+                    "Anti-nuke desativado; os eventos de Audit Log não ativam contenção automática.".to_string()
+                }
+            }
             "workflow-create" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
@@ -2129,6 +2271,25 @@ fn account_age_days(now_timestamp: i64, created_timestamp: i64) -> i64 {
     ((now_timestamp - created_timestamp) / 86_400).max(0)
 }
 
+fn is_destructive_audit_action(action: serenity::model::guild::audit_log::Action) -> bool {
+    matches!(
+        action,
+        serenity::model::guild::audit_log::Action::Channel(
+            serenity::model::guild::audit_log::ChannelAction::Delete,
+        ) | serenity::model::guild::audit_log::Action::ChannelOverwrite(
+            serenity::model::guild::audit_log::ChannelOverwriteAction::Delete,
+        ) | serenity::model::guild::audit_log::Action::Role(
+            serenity::model::guild::audit_log::RoleAction::Delete,
+        ) | serenity::model::guild::audit_log::Action::Webhook(
+            serenity::model::guild::audit_log::WebhookAction::Delete,
+        ) | serenity::model::guild::audit_log::Action::Member(
+            serenity::model::guild::audit_log::MemberAction::BanAdd,
+        ) | serenity::model::guild::audit_log::Action::Member(
+            serenity::model::guild::audit_log::MemberAction::Kick,
+        )
+    )
+}
+
 fn join_burst_armed(
     joins: &mut HashMap<String, VecDeque<Instant>>,
     guild_id: &str,
@@ -2265,6 +2426,7 @@ fn required_permission(command: &str) -> Option<Permissions> {
         "rolepanel" => Some(Permissions::MANAGE_ROLES),
         "join-gate" => Some(Permissions::MANAGE_ROLES),
         "anti-raid" => Some(Permissions::MANAGE_GUILD),
+        "anti-nuke" => Some(Permissions::MANAGE_GUILD),
         "tag-set" | "tag-delete" | "giveaway-start" | "giveaway-end" | "starboard-set"
         | "workflow-create" | "workflow-delete" => Some(Permissions::MANAGE_GUILD),
         "suggestion" => Some(Permissions::MANAGE_MESSAGES),
@@ -2349,7 +2511,7 @@ async fn deliver_scheduled_action(
 
 #[cfg(test)]
 mod tests {
-    use super::{account_age_days, join_burst_armed, parse_duration};
+    use super::{account_age_days, is_destructive_audit_action, join_burst_armed, parse_duration};
     use std::{
         collections::{HashMap, VecDeque},
         time::{Duration, Instant},
@@ -2406,6 +2568,28 @@ mod tests {
             start + Duration::from_secs(4),
             window,
             2
+        ));
+    }
+
+    #[test]
+    fn anti_nuke_action_filter_is_destructive_only() {
+        assert!(is_destructive_audit_action(
+            serenity::model::guild::audit_log::Action::Role(
+                serenity::model::guild::audit_log::RoleAction::Delete,
+            )
+        ));
+        assert!(is_destructive_audit_action(
+            serenity::model::guild::audit_log::Action::Member(
+                serenity::model::guild::audit_log::MemberAction::BanAdd,
+            )
+        ));
+        assert!(!is_destructive_audit_action(
+            serenity::model::guild::audit_log::Action::Role(
+                serenity::model::guild::audit_log::RoleAction::Create,
+            )
+        ));
+        assert!(!is_destructive_audit_action(
+            serenity::model::guild::audit_log::Action::GuildUpdate
         ));
     }
 }
