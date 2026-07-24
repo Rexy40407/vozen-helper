@@ -9,11 +9,11 @@ use helper_store::Store;
 use rand::seq::SliceRandom;
 use serenity::{
     all::{
-        ButtonStyle, ChannelId, ChannelType, Client, Command, CommandDataOptionValue, CommandInteraction,
-        Context, CreateActionRow, CreateButton, CreateChannel, CreateCommand, CreateCommandOption,
-        CreateInteractionResponse, CreateInteractionResponseMessage, EditChannel, EventHandler,
-        GatewayIntents, Interaction, PermissionOverwrite, PermissionOverwriteType, Permissions,
-        Ready, RoleId,
+        ButtonStyle, ChannelId, ChannelType, Client, Command, CommandDataOptionValue,
+        CommandInteraction, Context, CreateActionRow, CreateButton, CreateChannel, CreateCommand,
+        CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseMessage,
+        EditChannel, EventHandler, GatewayIntents, Interaction, PermissionOverwrite,
+        PermissionOverwriteType, Permissions, Ready, RoleId,
     },
     async_trait,
 };
@@ -3270,10 +3270,12 @@ impl Handler {
             let expected_guild = parts.next().unwrap_or_default();
             let role_id = parts.next().and_then(|value| value.parse::<u64>().ok());
             if expected_guild != guild_id.to_string() {
-                return respond_component(ctx, component, "Este painel pertence a outro servidor.").await;
+                return respond_component(ctx, component, "Este painel pertence a outro servidor.")
+                    .await;
             }
             let Some(role_id) = role_id else {
-                return respond_component(ctx, component, "Painel de verificaÃ§Ã£o invÃ¡lido.").await;
+                return respond_component(ctx, component, "Painel de verificaÃ§Ã£o invÃ¡lido.")
+                    .await;
             };
             let member = guild_id.member(&ctx.http, component.user.id).await?;
             let role = RoleId::new(role_id);
@@ -3281,7 +3283,8 @@ impl Handler {
                 return respond_component(ctx, component, "JÃ¡ estÃ¡s verificado.").await;
             }
             member.add_role(&ctx.http, role).await?;
-            return respond_component(ctx, component, "VerificaÃ§Ã£o concluÃ­da; cargo atribuÃ­do.").await;
+            return respond_component(ctx, component, "VerificaÃ§Ã£o concluÃ­da; cargo atribuÃ­do.")
+                .await;
         }
         match component.data.custom_id.as_str() {
             "ticket:open" => {
@@ -3818,9 +3821,10 @@ async fn apply_lockdown(
     let channels = http.get_channels(guild_id).await?;
     let everyone = RoleId::new(guild_id.get());
     let mut changed = 0;
-    for channel in channels.into_iter().filter(|channel| {
-        matches!(channel.kind, ChannelType::Text | ChannelType::News)
-    }) {
+    for channel in channels
+        .into_iter()
+        .filter(|channel| matches!(channel.kind, ChannelType::Text | ChannelType::News))
+    {
         let key = format!("security.lockdown.previous.{}", channel.id);
         if enabled {
             if store.get_setting(&guild_id.to_string(), &key)?.is_none() {
@@ -3886,10 +3890,9 @@ fn required_permission(command: &str) -> Option<Permissions> {
         "event-create" | "event-edit" | "event-cancel" | "event-attendees" => {
             Some(Permissions::CREATE_EVENTS)
         }
-        "tag-set" | "tag-delete" | "giveaway-start" | "giveaway-end" | "gstart" | "gend" | "greroll" | "starboard-set"
-        | "workflow-create" | "workflow-dry-run" | "workflow-toggle" | "workflow-delete" => {
-            Some(Permissions::MANAGE_GUILD)
-        }
+        "tag-set" | "tag-delete" | "giveaway-start" | "giveaway-end" | "gstart" | "gend"
+        | "greroll" | "starboard-set" | "workflow-create" | "workflow-dry-run"
+        | "workflow-toggle" | "workflow-delete" => Some(Permissions::MANAGE_GUILD),
         "suggestion" => Some(Permissions::MANAGE_MESSAGES),
         _ => None,
     }
