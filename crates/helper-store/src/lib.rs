@@ -394,6 +394,101 @@ impl Store {
         Ok(())
     }
 
+    /// Export the guild-scoped configuration and durable module state without
+    /// including Discord message bodies or session/entitlement secrets.
+    pub fn export_guild(&self, guild_id: &str) -> Result<serde_json::Value> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut settings = Vec::new();
+        let mut stmt = conn
+            .prepare("SELECT key,value,updated_at FROM settings WHERE guild_id=?1 ORDER BY key")?;
+        for row in stmt.query_map([guild_id], |row| {
+            Ok(serde_json::json!({
+                "key": row.get::<_, String>(0)?,
+                "value": row.get::<_, String>(1)?,
+                "updatedAt": row.get::<_, i64>(2)?,
+            }))
+        })? {
+            settings.push(row?);
+        }
+
+        let mut tags = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT name,content,author_id,created_at FROM tags WHERE guild_id=?1 ORDER BY name",
+        )?;
+        for row in stmt.query_map([guild_id], |row| {
+            Ok(serde_json::json!({
+                "name": row.get::<_, String>(0)?,
+                "content": row.get::<_, String>(1)?,
+                "authorId": row.get::<_, String>(2)?,
+                "createdAt": row.get::<_, i64>(3)?,
+            }))
+        })? {
+            tags.push(row?);
+        }
+
+        let mut workflows = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT id,name,trigger,condition,action,payload,enabled,created_at FROM workflows WHERE guild_id=?1 ORDER BY id",
+        )?;
+        for row in stmt.query_map([guild_id], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, i64>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "trigger": row.get::<_, String>(2)?,
+                "condition": row.get::<_, String>(3)?,
+                "action": row.get::<_, String>(4)?,
+                "payload": row.get::<_, String>(5)?,
+                "enabled": row.get::<_, i64>(6)? != 0,
+                "createdAt": row.get::<_, i64>(7)?,
+            }))
+        })? {
+            workflows.push(row?);
+        }
+
+        Ok(serde_json::json!({
+            "version": 1,
+            "guildId": guild_id,
+            "exportedAt": Utc::now().to_rfc3339(),
+            "settings": settings,
+            "tags": tags,
+            "workflows": workflows,
+        }))
+    }
+
+    /// Erase all guild-scoped operational data. User entitlements and login
+    /// sessions are intentionally outside this operation's scope.
+    pub fn purge_guild(&self, guild_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.unchecked_transaction()?;
+        for statement in [
+            "DELETE FROM suggestion_votes WHERE suggestion_id IN (SELECT id FROM suggestions WHERE guild_id=?1)",
+            "DELETE FROM suggestions WHERE guild_id=?1",
+            "DELETE FROM giveaway_entries WHERE giveaway_id IN (SELECT id FROM giveaways WHERE guild_id=?1)",
+            "DELETE FROM giveaways WHERE guild_id=?1",
+            "DELETE FROM poll_votes WHERE poll_id IN (SELECT id FROM polls WHERE guild_id=?1)",
+            "DELETE FROM polls WHERE guild_id=?1",
+            "DELETE FROM workflow_runs WHERE guild_id=?1",
+            "DELETE FROM workflows WHERE guild_id=?1",
+            "DELETE FROM cases WHERE guild_id=?1",
+            "DELETE FROM activity_log WHERE guild_id=?1",
+            "DELETE FROM scheduled_actions WHERE guild_id=?1",
+            "DELETE FROM infractions WHERE guild_id=?1",
+            "DELETE FROM afk WHERE guild_id=?1",
+            "DELETE FROM tags WHERE guild_id=?1",
+            "DELETE FROM levels WHERE guild_id=?1",
+            "DELETE FROM stats WHERE guild_id=?1",
+            "DELETE FROM tickets WHERE guild_id=?1",
+            "DELETE FROM quarantine WHERE guild_id=?1",
+            "DELETE FROM starboard WHERE guild_id=?1",
+            "DELETE FROM helper_usage WHERE guild_id=?1",
+            "DELETE FROM settings WHERE guild_id=?1",
+        ] {
+            tx.execute(statement, [guild_id])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn add_xp(&self, guild_id: &str, user_id: &str, amount: i64) -> Result<i64> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
@@ -989,5 +1084,38 @@ mod tests {
             vec!["10", "20"]
         );
         assert!(store.clear_quarantine("g", "u").unwrap());
+    }
+
+    #[test]
+    fn guild_export_and_purge_are_scoped() {
+        let store = Store::open(":memory:").unwrap();
+        store.set_setting("g1", "welcome.channel", "10").unwrap();
+        store.upsert_tag("g1", "rules", "be kind", "u1").unwrap();
+        store
+            .create_workflow("g1", "hello", "message", "hi", "reply", "Hello")
+            .unwrap();
+        store
+            .record_case("g1", "warn", "u1", "mod", "reason", None)
+            .unwrap();
+        store
+            .record_case("g2", "warn", "u2", "mod", "reason", None)
+            .unwrap();
+
+        let export = store.export_guild("g1").unwrap();
+        assert_eq!(export["guildId"], "g1");
+        assert_eq!(export["settings"][0]["key"], "welcome.channel");
+        assert_eq!(export["tags"][0]["name"], "rules");
+        assert_eq!(export["workflows"][0]["name"], "hello");
+
+        store.purge_guild("g1").unwrap();
+        assert!(store.recent_cases("g1", 10).unwrap().is_empty());
+        assert!(
+            store
+                .get_setting("g1", "welcome.channel")
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.get_tag("g1", "rules").unwrap().is_none());
+        assert_eq!(store.recent_cases("g2", 10).unwrap().len(), 1);
     }
 }

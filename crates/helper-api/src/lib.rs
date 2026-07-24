@@ -57,6 +57,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/quotas", get(quotas))
         .route("/api/modules", get(modules))
         .route("/api/analytics", get(analytics))
+        .route("/api/privacy/export", get(privacy_export))
+        .route("/api/privacy/delete", post(privacy_delete))
         .route("/api/workflows", get(workflows).post(create_workflow))
         .route("/api/workflows/{id}", delete(delete_workflow))
         .with_state(Arc::new(state))
@@ -442,6 +444,46 @@ async fn analytics(
         "guildId": claims.guild_id,
         "days": rows,
         "totalCases": cases.len(),
+    })))
+}
+
+async fn privacy_export(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let export = state
+        .store
+        .export_guild(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    Ok(Json(export))
+}
+
+#[derive(Debug, Deserialize)]
+struct PrivacyDeleteRequest {
+    confirmation: String,
+}
+
+async fn privacy_delete(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(request): Json<PrivacyDeleteRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    if request.confirmation.trim() != claims.guild_id {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "confirmation_required",
+        ));
+    }
+    state
+        .store
+        .purge_guild(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "guildId": claims.guild_id,
+        "deleted": "guild_operational_data"
     })))
 }
 
