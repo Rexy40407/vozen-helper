@@ -9,7 +9,7 @@ This matrix is a release gate, not a claim that the migration is complete.
 | Moderation | Partial but growing | warn, violation, note, reason, timeout, untimeout, kick, ban, unban, purge, quarantine, native AutoMod audit, bounded join-gate, configurable join-burst anti-raid latch and Audit Log anti-nuke containment; role restoration/advanced recovery remains |
 | Support | Functional core | private ticket panel, claim, close, routing, transcripts and durable SLA reminders; richer escalation remains |
 | Community | Functional core | AFK, reminders, tags, XP/leaderboard, stats, self-role panels, suggestions, giveaways, welcome and starboard; scoped export/delete now available |
-| Events | Functional lifecycle | durable polls and giveaways with votes/entries, scheduled close and anti-abuse bounds; richer event templates remain |
+| Events | Functional lifecycle | native Discord Scheduled Events create/list/cancel plus durable polls and giveaways with votes/entries, scheduled close and anti-abuse bounds; richer event templates remain |
 | Automate | Functional bounded MVP | message trigger, optional contains condition, reply action, durable workflows/runs and dashboard endpoints; broader trigger/action catalog remains |
 | Insights | Functional API | cases/stats/quotas, analytics and workflow endpoints; privacy-scoped export/delete now available |
 | Entitlements | Source integrated | signed central resolver exists and is tested; production service activation remains |

@@ -702,6 +702,59 @@ impl EventHandler for Handler {
                     )
                     .required(false),
                 ),
+            CreateCommand::new("event-create")
+                .description("Create a native Discord scheduled event")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "name",
+                        "Event name",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "start",
+                        "RFC3339 start, for example 2026-07-24T20:00:00Z",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "end",
+                        "RFC3339 end",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "location",
+                        "External event location",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "description",
+                        "Optional event description",
+                    )
+                    .required(false),
+                ),
+            CreateCommand::new("event-list").description("List native Discord scheduled events"),
+            CreateCommand::new("event-cancel")
+                .description("Cancel a native Discord scheduled event")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "event_id",
+                        "Discord scheduled event ID",
+                    )
+                    .required(true),
+                ),
         ];
         if let Err(error) = Command::set_global_commands(&ctx.http, commands).await {
             tracing::error!(%error, "global command registration failed");
@@ -1781,6 +1834,99 @@ impl Handler {
                     "Anti-nuke desativado; os eventos de Audit Log não ativam contenção automática.".to_string()
                 }
             }
+            "event-create" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let name = option_string(command, "name").unwrap_or_default().trim();
+                let start_raw = option_string(command, "start").unwrap_or_default().trim();
+                let end_raw = option_string(command, "end").unwrap_or_default().trim();
+                let location = option_string(command, "location").unwrap_or_default().trim();
+                let description = option_string(command, "description").unwrap_or_default().trim();
+                if !(1..=100).contains(&name.len())
+                    || !(1..=100).contains(&location.len())
+                    || description.len() > 1_000
+                {
+                    return respond(ctx, command, "Nome, local ou descrição inválidos.").await;
+                }
+                let (start, end) = match parse_scheduled_event_window(
+                    start_raw,
+                    end_raw,
+                    serenity::all::Timestamp::now().unix_timestamp(),
+                ) {
+                    Ok(window) => window,
+                    Err(reason) => {
+                        let message = match reason {
+                            "invalid_start" => "A data de início não é RFC3339 válida.",
+                            "invalid_end" => "A data de fim não é RFC3339 válida.",
+                            "start_must_be_in_future" => "O início tem de estar no futuro.",
+                            "end_must_follow_start" => "O fim tem de ser depois do início.",
+                            "event_too_long" => "O evento não pode durar mais de 365 dias.",
+                            _ => "A janela do evento é inválida.",
+                        };
+                        return respond(ctx, command, message).await;
+                    }
+                };
+                let mut builder = serenity::all::CreateScheduledEvent::new(
+                    serenity::all::ScheduledEventType::External,
+                    name.to_string(),
+                    start,
+                )
+                .end_time(end)
+                .location(location.to_string())
+                .audit_log_reason("Vozen Helper event-create");
+                if !description.is_empty() {
+                    builder = builder.description(description.to_string());
+                }
+                let event = guild_id.create_scheduled_event(&ctx.http, builder).await?;
+                format!(
+                    "Evento nativo #{} criado: **{}** (<t:{}:F>–<t:{}:F>).",
+                    event.id,
+                    event.name,
+                    start.unix_timestamp(),
+                    end.unix_timestamp()
+                )
+            }
+            "event-list" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let events = guild_id.scheduled_events(&ctx.http, false).await?;
+                if events.is_empty() {
+                    "Não existem eventos agendados neste servidor.".to_string()
+                } else {
+                    events
+                        .into_iter()
+                        .take(25)
+                        .map(|event| {
+                            format!(
+                                "#{} **{}** · {:?} · <t:{}:F>",
+                                event.id,
+                                event.name,
+                                event.status,
+                                event.start_time.unix_timestamp()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            }
+            "event-cancel" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let event_id = option_i64(command, "event_id").unwrap_or(0);
+                if event_id <= 0 {
+                    return respond(ctx, command, "Indica um ID de evento válido.").await;
+                }
+                guild_id
+                    .delete_scheduled_event(
+                        &ctx.http,
+                        serenity::all::ScheduledEventId::new(event_id as u64),
+                    )
+                    .await?;
+                format!("Evento nativo #{} cancelado.", event_id)
+            }
             "workflow-create" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
@@ -2427,6 +2573,7 @@ fn required_permission(command: &str) -> Option<Permissions> {
         "join-gate" => Some(Permissions::MANAGE_ROLES),
         "anti-raid" => Some(Permissions::MANAGE_GUILD),
         "anti-nuke" => Some(Permissions::MANAGE_GUILD),
+        "event-create" | "event-cancel" => Some(Permissions::CREATE_EVENTS),
         "tag-set" | "tag-delete" | "giveaway-start" | "giveaway-end" | "starboard-set"
         | "workflow-create" | "workflow-delete" => Some(Permissions::MANAGE_GUILD),
         "suggestion" => Some(Permissions::MANAGE_MESSAGES),
@@ -2445,6 +2592,25 @@ fn parse_duration(raw: &str) -> Option<i64> {
         _ => return None,
     })?;
     (amount > 0 && amount <= 365 * 86_400_000).then_some(amount)
+}
+
+fn parse_scheduled_event_window(
+    start_raw: &str,
+    end_raw: &str,
+    now_timestamp: i64,
+) -> Result<(serenity::all::Timestamp, serenity::all::Timestamp), &'static str> {
+    let start = serenity::all::Timestamp::parse(start_raw).map_err(|_| "invalid_start")?;
+    let end = serenity::all::Timestamp::parse(end_raw).map_err(|_| "invalid_end")?;
+    if start.unix_timestamp() <= now_timestamp {
+        return Err("start_must_be_in_future");
+    }
+    if end.unix_timestamp() <= start.unix_timestamp() {
+        return Err("end_must_follow_start");
+    }
+    if end.unix_timestamp() - start.unix_timestamp() > 365 * 86_400 {
+        return Err("event_too_long");
+    }
+    Ok((start, end))
 }
 
 async fn deliver_scheduled_action(
@@ -2511,7 +2677,10 @@ async fn deliver_scheduled_action(
 
 #[cfg(test)]
 mod tests {
-    use super::{account_age_days, is_destructive_audit_action, join_burst_armed, parse_duration};
+    use super::{
+        account_age_days, is_destructive_audit_action, join_burst_armed, parse_duration,
+        parse_scheduled_event_window,
+    };
     use std::{
         collections::{HashMap, VecDeque},
         time::{Duration, Instant},
@@ -2591,5 +2760,45 @@ mod tests {
         assert!(!is_destructive_audit_action(
             serenity::model::guild::audit_log::Action::GuildUpdate
         ));
+    }
+
+    #[test]
+    fn scheduled_event_window_requires_rfc3339_future_and_bounded_end() {
+        let now = serenity::all::Timestamp::parse("2026-07-24T00:00:00Z").unwrap();
+        assert!(
+            parse_scheduled_event_window(
+                "2026-07-24T01:00:00Z",
+                "2026-07-24T02:00:00Z",
+                now.unix_timestamp()
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            parse_scheduled_event_window(
+                "2026-07-23T23:00:00Z",
+                "2026-07-24T02:00:00Z",
+                now.unix_timestamp()
+            )
+            .unwrap_err(),
+            "start_must_be_in_future"
+        );
+        assert_eq!(
+            parse_scheduled_event_window(
+                "2026-07-24T01:00:00Z",
+                "2026-07-24T01:00:00Z",
+                now.unix_timestamp()
+            )
+            .unwrap_err(),
+            "end_must_follow_start"
+        );
+        assert_eq!(
+            parse_scheduled_event_window(
+                "2026-07-24T01:00:00Z",
+                "2027-07-25T01:00:00Z",
+                now.unix_timestamp()
+            )
+            .unwrap_err(),
+            "event_too_long"
+        );
     }
 }
