@@ -668,15 +668,15 @@ impl EventHandler for Handler {
         let guild_id = new_member.guild_id;
         let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let _ = self.store.record_join(&guild_id.to_string(), &day);
-        if let Ok(guild) = guild_id.to_partial_guild(&ctx.http).await {
-            if let Some(channel_id) = guild.system_channel_id {
-                let _ = channel_id
-                    .say(
-                        &ctx.http,
-                        format!("👋 Bem-vindo ao servidor, <@{}>!", new_member.user.id),
-                    )
-                    .await;
-            }
+        if let Ok(guild) = guild_id.to_partial_guild(&ctx.http).await
+            && let Some(channel_id) = guild.system_channel_id
+        {
+            let _ = channel_id
+                .say(
+                    &ctx.http,
+                    format!("👋 Bem-vindo ao servidor, <@{}>!", new_member.user.id),
+                )
+                .await;
         }
     }
 
@@ -837,7 +837,7 @@ impl EventHandler for Handler {
             let mut ticks = self.xp_ticks.lock().expect("xp mutex poisoned");
             let value = ticks.entry(xp_key).or_default();
             *value = value.saturating_add(1);
-            *value % 5 == 0
+            (*value).is_multiple_of(5)
         };
         if should_award {
             let _ = self.store.add_xp(&guild_text, &user_text, 5);
@@ -1167,7 +1167,7 @@ impl Handler {
                 };
                 let time = option_string(command, "time").unwrap_or_default();
                 let text = option_string(command, "text").unwrap_or_default();
-                let Some(delay) = parse_duration(&time) else {
+                let Some(delay) = parse_duration(time) else {
                     return respond(ctx, command, "Duração inválida. Usa formatos como 10m, 2h ou 1d.").await;
                 };
                 if text.len() > 500 {
@@ -1207,7 +1207,7 @@ impl Handler {
                 if !(1..=32).contains(&name.len()) || content.len() > 1_000 {
                     return respond(ctx, command, "Nome ou conteúdo inválido.").await;
                 }
-                self.store.upsert_tag(&guild_id.to_string(), &name, &content, &command.user.id.to_string())?;
+                self.store.upsert_tag(&guild_id.to_string(), &name, content, &command.user.id.to_string())?;
                 format!("Tag `{name}` guardada.")
             }
             "tag-delete" => {
@@ -1390,8 +1390,10 @@ impl Handler {
                 let member = guild_id.member(&ctx.http, target).await?;
                 let mut restored = 0;
                 for raw_role in record.role_ids {
-                    if let Ok(role_id) = raw_role.parse::<u64>() {
-                        if member.add_role(&ctx.http, RoleId::new(role_id)).await.is_ok() { restored += 1; }
+                    if let Ok(role_id) = raw_role.parse::<u64>()
+                        && member.add_role(&ctx.http, RoleId::new(role_id)).await.is_ok()
+                    {
+                        restored += 1;
                     }
                 }
                 self.store.clear_quarantine(&guild_id.to_string(), &target.to_string())?;
@@ -1686,14 +1688,13 @@ impl Handler {
                 if let Ok(Some(raw_role)) = self
                     .store
                     .get_setting(&guild_id.to_string(), "support.ticket.staff_role_id")
+                    && let Ok(role_id) = raw_role.parse::<u64>()
                 {
-                    if let Ok(role_id) = raw_role.parse::<u64>() {
-                        overwrites.push(PermissionOverwrite {
-                            allow: visible,
-                            deny: Permissions::empty(),
-                            kind: PermissionOverwriteType::Role(RoleId::new(role_id)),
-                        });
-                    }
+                    overwrites.push(PermissionOverwrite {
+                        allow: visible,
+                        deny: Permissions::empty(),
+                        kind: PermissionOverwriteType::Role(RoleId::new(role_id)),
+                    });
                 }
                 let channel = guild_id
                     .create_channel(
@@ -1770,30 +1771,29 @@ impl Handler {
                     if let Some(raw_channel) = self.store.get_setting(
                         &guild_id.to_string(),
                         "support.ticket.transcript_channel_id",
-                    )? {
-                        if let Ok(transcript_channel) = raw_channel.parse::<u64>() {
-                            let messages = component
-                                .channel_id
-                                .messages(&ctx.http, serenity::all::GetMessages::new().limit(100))
-                                .await
-                                .unwrap_or_default();
-                            let opener = ticket
-                                .as_ref()
-                                .map(|ticket| format!("<@{}>", ticket.user_id))
-                                .unwrap_or_else(|| "unknown".to_string());
-                            let mut transcript = format!("Transcript do ticket de {opener}\n");
-                            for message in messages.iter().rev() {
-                                transcript.push_str(&format!(
-                                    "{}: {}\n",
-                                    message.author.name, message.content
-                                ));
-                            }
-                            for chunk in transcript.as_bytes().chunks(1_800) {
-                                let text = String::from_utf8_lossy(chunk);
-                                let _ = ChannelId::new(transcript_channel)
-                                    .say(&ctx.http, text)
-                                    .await;
-                            }
+                    )? && let Ok(transcript_channel) = raw_channel.parse::<u64>()
+                    {
+                        let messages = component
+                            .channel_id
+                            .messages(&ctx.http, serenity::all::GetMessages::new().limit(100))
+                            .await
+                            .unwrap_or_default();
+                        let opener = ticket
+                            .as_ref()
+                            .map(|ticket| format!("<@{}>", ticket.user_id))
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let mut transcript = format!("Transcript do ticket de {opener}\n");
+                        for message in messages.iter().rev() {
+                            transcript.push_str(&format!(
+                                "{}: {}\n",
+                                message.author.name, message.content
+                            ));
+                        }
+                        for chunk in transcript.as_bytes().chunks(1_800) {
+                            let text = String::from_utf8_lossy(chunk);
+                            let _ = ChannelId::new(transcript_channel)
+                                .say(&ctx.http, text)
+                                .await;
                         }
                     }
                     respond_component(ctx, component, "Ticket fechado. O canal será removido.")
@@ -1902,25 +1902,22 @@ async fn finish_giveaway(http: &serenity::http::Http, store: &Store, id: i64) ->
         .message_id
         .as_deref()
         .and_then(|raw| raw.parse::<u64>().ok())
+        && let Ok(channel) = giveaway.channel_id.parse::<u64>()
     {
-        if let Ok(channel) = giveaway.channel_id.parse::<u64>() {
-            let channel_id = ChannelId::new(channel);
-            edited = channel_id
-                .edit_message(
-                    http,
-                    serenity::all::MessageId::new(message_id),
-                    serenity::all::EditMessage::new()
-                        .content(result.clone())
-                        .components(Vec::new()),
-                )
-                .await
-                .is_ok();
-        }
+        let channel_id = ChannelId::new(channel);
+        edited = channel_id
+            .edit_message(
+                http,
+                serenity::all::MessageId::new(message_id),
+                serenity::all::EditMessage::new()
+                    .content(result.clone())
+                    .components(Vec::new()),
+            )
+            .await
+            .is_ok();
     }
-    if !edited {
-        if let Ok(channel) = giveaway.channel_id.parse::<u64>() {
-            let _ = ChannelId::new(channel).say(http, result).await;
-        }
+    if !edited && let Ok(channel) = giveaway.channel_id.parse::<u64>() {
+        let _ = ChannelId::new(channel).say(http, result).await;
     }
     Ok(true)
 }
@@ -1955,18 +1952,17 @@ async fn finish_poll(http: &serenity::http::Http, store: &Store, id: i64) -> Res
         .message_id
         .as_deref()
         .and_then(|raw| raw.parse::<u64>().ok())
+        && let Ok(channel) = poll.channel_id.parse::<u64>()
     {
-        if let Ok(channel) = poll.channel_id.parse::<u64>() {
-            let _ = ChannelId::new(channel)
-                .edit_message(
-                    http,
-                    serenity::all::MessageId::new(message_id),
-                    serenity::all::EditMessage::new()
-                        .content(content)
-                        .components(Vec::new()),
-                )
-                .await;
-        }
+        let _ = ChannelId::new(channel)
+            .edit_message(
+                http,
+                serenity::all::MessageId::new(message_id),
+                serenity::all::EditMessage::new()
+                    .content(content)
+                    .components(Vec::new()),
+            )
+            .await;
     }
     Ok(true)
 }
@@ -2001,19 +1997,6 @@ fn parse_duration(raw: &str) -> Option<i64> {
     (amount > 0 && amount <= 365 * 86_400_000).then_some(amount)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parse_duration;
-
-    #[test]
-    fn duration_parser_is_bounded_and_explicit() {
-        assert_eq!(parse_duration("10m"), Some(600_000));
-        assert_eq!(parse_duration("2h"), Some(7_200_000));
-        assert_eq!(parse_duration("0m"), None);
-        assert_eq!(parse_duration("10weeks"), None);
-    }
-}
-
 async fn deliver_scheduled_action(
     http: &serenity::http::Http,
     store: &Store,
@@ -2038,19 +2021,17 @@ async fn deliver_scheduled_action(
         return Ok(());
     }
     if action_type == "ticket_sla" {
-        if let Some(raw_channel) = value.get("channel_id").and_then(serde_json::Value::as_str) {
-            if let Ok(Some(ticket)) = store.ticket_by_channel(raw_channel) {
-                if ticket.status == "open" {
-                    if let Ok(channel) = raw_channel.parse::<u64>() {
-                        let _ = ChannelId::new(channel)
-                            .say(
-                                http,
-                                "⏱️ Este ticket aguarda resposta da equipa de suporte.",
-                            )
-                            .await;
-                    }
-                }
-            }
+        if let Some(raw_channel) = value.get("channel_id").and_then(serde_json::Value::as_str)
+            && let Ok(Some(ticket)) = store.ticket_by_channel(raw_channel)
+            && ticket.status == "open"
+            && let Ok(channel) = raw_channel.parse::<u64>()
+        {
+            let _ = ChannelId::new(channel)
+                .say(
+                    http,
+                    "⏱️ Este ticket aguarda resposta da equipa de suporte.",
+                )
+                .await;
         }
         store.delete_scheduled_action(id)?;
         return Ok(());
@@ -2076,4 +2057,17 @@ async fn deliver_scheduled_action(
     }
     store.delete_scheduled_action(id)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_duration;
+
+    #[test]
+    fn duration_parser_is_bounded_and_explicit() {
+        assert_eq!(parse_duration("10m"), Some(600_000));
+        assert_eq!(parse_duration("2h"), Some(7_200_000));
+        assert_eq!(parse_duration("0m"), None);
+        assert_eq!(parse_duration("10weeks"), None);
+    }
 }

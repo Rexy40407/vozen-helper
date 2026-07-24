@@ -263,7 +263,7 @@ async fn create_session_inner(
             guild
                 .permissions
                 .as_deref()
-                .map_or(false, has_manage_permission)
+                .is_some_and(has_manage_permission)
         })
         .unwrap_or(false);
     if !can_manage {
@@ -290,16 +290,15 @@ async fn create_session_inner(
         expires_at: claims.expires_at.to_rfc3339(),
     })
     .into_response();
-    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        if state
+    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())
+        && state
             .allowed_origin
             .as_deref()
             .is_some_and(|allowed| allowed == origin)
-        {
-            response
-                .headers_mut()
-                .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin.parse().unwrap());
-        }
+    {
+        response
+            .headers_mut()
+            .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin.parse().unwrap());
     }
     response.headers_mut().insert(
         header::SET_COOKIE,
@@ -540,16 +539,8 @@ fn authenticate(state: &ApiState, headers: &HeaderMap) -> Option<SessionClaims> 
             claims.expires_at > Utc::now()
                 && claims.last_seen_at + Duration::minutes(IDLE_MINUTES) > Utc::now()
         });
-    if let Some(ref claims) = claims {
-        if state
-            .store
-            .load_session(claims.session_id)
-            .ok()
-            .flatten()
-            .is_none()
-        {
-            return None;
-        }
+    if let Some(claims) = claims.as_ref() {
+        state.store.load_session(claims.session_id).ok().flatten()?;
     }
     claims
 }

@@ -24,6 +24,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Test workspace
         run: cargo test --workspace
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Build release
         run: cargo build --release -p helper-runtime
       - name: Package
