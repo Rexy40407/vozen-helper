@@ -95,6 +95,7 @@ pub fn quota_limit(plan: &Plan, key: &str) -> u64 {
         "analytics_days" => 30,
         "audit_days" => 30,
         "transcript_days" => 30,
+        "personal_drafts" | "personal_views" | "personal_templates" => 5,
         _ => 0,
     };
     let paid = match key {
@@ -108,11 +109,18 @@ pub fn quota_limit(plan: &Plan, key: &str) -> u64 {
         "analytics_days" => 365,
         "audit_days" => 365,
         "transcript_days" => 365,
+        "personal_drafts" | "personal_views" | "personal_templates" => 100,
         _ => 0,
     };
     match plan {
         Plan::Free => free,
-        Plan::Plus | Plan::Premium { .. } => paid,
+        // Plus is user-scoped: it can unlock personal drafts, views and
+        // templates, but must not increase a guild's operational quotas.
+        Plan::Plus => match key {
+            "personal_drafts" | "personal_views" | "personal_templates" => paid,
+            _ => free,
+        },
+        Plan::Premium { .. } => paid,
     }
 }
 
@@ -128,7 +136,8 @@ mod tests {
     #[test]
     fn quota_matrix_keeps_free_small_and_paid_bounded() {
         assert_eq!(quota_limit(&Plan::Free, "workflow_runs"), 500);
-        assert_eq!(quota_limit(&Plan::Plus, "workflow_runs"), 25_000);
+        assert_eq!(quota_limit(&Plan::Plus, "workflow_runs"), 500);
+        assert_eq!(quota_limit(&Plan::Plus, "personal_drafts"), 100);
         assert_eq!(quota_limit(&Plan::Premium { guild_limit: 8 }, "panels"), 10);
     }
 

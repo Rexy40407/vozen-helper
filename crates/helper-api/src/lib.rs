@@ -396,6 +396,9 @@ async fn quotas(
         "analytics_days",
         "audit_days",
         "transcript_days",
+        "personal_drafts",
+        "personal_views",
+        "personal_templates",
     ];
     let limits = keys
         .into_iter()
