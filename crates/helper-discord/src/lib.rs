@@ -527,6 +527,46 @@ impl EventHandler for Handler {
                     )
                     .required(false),
                 ),
+            CreateCommand::new("ticket-update")
+                .description("Update ticket category, priority or internal note")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "priority",
+                        "Ticket priority",
+                    )
+                    .add_string_choice("Baixa", "low")
+                    .add_string_choice("Normal", "normal")
+                    .add_string_choice("Alta", "high")
+                    .add_string_choice("Urgente", "urgent")
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "category",
+                        "Ticket category",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "note",
+                        "Internal note (empty clears it)",
+                    )
+                    .required(false),
+                ),
+            CreateCommand::new("ticket-rate")
+                .description("Rate a closed support ticket")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "score",
+                        "Satisfaction score from 1 to 5",
+                    )
+                    .required(true),
+                ),
             CreateCommand::new("rolepanel")
                 .description("Create a self-role panel")
                 .add_option(
@@ -2237,6 +2277,68 @@ impl Handler {
                     .await?;
                 format!("Painel de tickets criado em <#{}>.", command.channel_id)
             }
+            "ticket-update" => {
+                let Some(_guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let Some(ticket) = self.store.ticket_by_channel(&command.channel_id.to_string())? else {
+                    return respond(ctx, command, "Este canal não é um ticket do Helper.").await;
+                };
+                let priority = option_string(command, "priority").map(str::trim);
+                let category = option_string(command, "category").map(str::trim);
+                let note = option_string(command, "note").map(str::trim);
+                if priority.is_none() && category.is_none() && note.is_none() {
+                    return respond(ctx, command, "Indica prioridade, categoria ou nota.").await;
+                }
+                if let Some(priority) = priority
+                    && !matches!(priority, "low" | "normal" | "high" | "urgent")
+                {
+                    return respond(ctx, command, "Prioridade inválida.").await;
+                }
+                if let Some(category) = category
+                    && !(1..=50).contains(&category.len())
+                {
+                    return respond(ctx, command, "A categoria tem de ter entre 1 e 50 caracteres.").await;
+                }
+                if let Some(note) = note
+                    && note.len() > 2_000
+                {
+                    return respond(ctx, command, "A nota não pode exceder 2000 caracteres.").await;
+                }
+                if let Some(priority) = priority {
+                    self.store.set_ticket_priority(&ticket.channel_id, priority)?;
+                }
+                if let Some(category) = category {
+                    self.store.set_ticket_category(&ticket.channel_id, category)?;
+                }
+                if let Some(note) = note {
+                    self.store.set_ticket_notes(&ticket.channel_id, note)?;
+                }
+                let updated = self.store.ticket_by_channel(&ticket.channel_id)?.ok_or_else(|| anyhow::anyhow!("ticket disappeared"))?;
+                format!("Ticket atualizado: categoria **{}**, prioridade **{}**{}.", updated.category, updated.priority, if updated.notes.is_empty() { String::new() } else { " · nota interna guardada".to_string() })
+            }
+            "ticket-rate" => {
+                let Some(_guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let Some(ticket) = self.store.ticket_by_channel(&command.channel_id.to_string())? else {
+                    return respond(ctx, command, "Este canal não é um ticket do Helper.").await;
+                };
+                if ticket.user_id != command.user.id.to_string() {
+                    return respond(ctx, command, "Só o autor do ticket pode avaliá-lo.").await;
+                }
+                let score = option_i64(command, "score").unwrap_or(0);
+                if !(1..=5).contains(&score) {
+                    return respond(ctx, command, "A avaliação tem de ser entre 1 e 5.").await;
+                }
+                if ticket.status != "closed" {
+                    return respond(ctx, command, "Só podes avaliar um ticket fechado.").await;
+                }
+                if !self.store.set_ticket_csat(&ticket.channel_id, score)? {
+                    return respond(ctx, command, "Não foi possível guardar a avaliação.").await;
+                }
+                format!("Obrigado pela avaliação: **{score}/5**.")
+            }
             "rolepanel" => {
                 let Some(_guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
@@ -2653,7 +2755,8 @@ impl Handler {
                         .channel_id
                         .edit(
                             &ctx.http,
-                            EditChannel::new().name(format!("closed-ticket-{}", component.user.id)),
+                            EditChannel::new()
+                                .name(format!("closed-ticket-{}", ticket_for_auth.user_id)),
                         )
                         .await?;
                     component
@@ -2915,7 +3018,7 @@ fn required_permission(command: &str) -> Option<Permissions> {
         "kick" => Some(Permissions::KICK_MEMBERS),
         "ban" | "unban" => Some(Permissions::BAN_MEMBERS),
         "purge" => Some(Permissions::MANAGE_MESSAGES),
-        "ticket-panel" | "ticket-config" => Some(Permissions::MANAGE_CHANNELS),
+        "ticket-panel" | "ticket-config" | "ticket-update" => Some(Permissions::MANAGE_CHANNELS),
         "slowmode" => Some(Permissions::MANAGE_CHANNELS),
         "rolepanel" => Some(Permissions::MANAGE_ROLES),
         "join-gate" => Some(Permissions::MANAGE_ROLES),

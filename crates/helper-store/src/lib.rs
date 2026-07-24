@@ -63,7 +63,12 @@ pub struct TicketRecord {
     pub channel_id: String,
     pub status: String,
     pub claimed_by: Option<String>,
+    pub category: String,
+    pub priority: String,
+    pub notes: String,
+    pub csat: Option<i64>,
     pub created_at: i64,
+    pub closed_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -162,6 +167,25 @@ impl Store {
         // The owner column is named `opener_id` there; changing it to `user_id`
         // would make an in-place Rust cutover fail on the live database.
         conn.execute_batch("CREATE TABLE IF NOT EXISTS tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, opener_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', claimed_by TEXT, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_tickets_owner ON tickets(guild_id,opener_id,status); CREATE TABLE IF NOT EXISTS suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, author_id TEXT NOT NULL, content TEXT NOT NULL, message_id TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS suggestion_votes (suggestion_id INTEGER NOT NULL, user_id TEXT NOT NULL, vote INTEGER NOT NULL, PRIMARY KEY(suggestion_id,user_id)); CREATE TABLE IF NOT EXISTS giveaways (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, prize TEXT NOT NULL, winners INTEGER NOT NULL DEFAULT 1, end_at INTEGER NOT NULL, ended INTEGER NOT NULL DEFAULT 0, required_role_id TEXT, host_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS giveaway_entries (giveaway_id INTEGER NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY(giveaway_id,user_id)); CREATE TABLE IF NOT EXISTS polls (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, question TEXT NOT NULL, options TEXT NOT NULL, end_at INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS poll_votes (poll_id INTEGER NOT NULL, user_id TEXT NOT NULL, choice INTEGER NOT NULL, PRIMARY KEY(poll_id,user_id)); CREATE TABLE IF NOT EXISTS workflows (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, name TEXT NOT NULL, trigger TEXT NOT NULL, condition TEXT NOT NULL DEFAULT '', action TEXT NOT NULL, payload TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS workflow_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id INTEGER NOT NULL, guild_id TEXT NOT NULL, source_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_workflows_trigger ON workflows(guild_id,trigger,enabled); CREATE TABLE IF NOT EXISTS quarantine (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, role_ids TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE TABLE IF NOT EXISTS starboard (guild_id TEXT NOT NULL, original_message_id TEXT NOT NULL, starboard_message_id TEXT NOT NULL, star_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,original_message_id));")?;
+        for (column, definition) in [
+            ("category", "TEXT NOT NULL DEFAULT 'general'"),
+            ("priority", "TEXT NOT NULL DEFAULT 'normal'"),
+            ("notes", "TEXT NOT NULL DEFAULT ''"),
+            ("csat", "INTEGER"),
+            ("closed_at", "INTEGER"),
+        ] {
+            let exists: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('tickets') WHERE name=?1",
+                [column],
+                |row| row.get(0),
+            )?;
+            if exists == 0 {
+                conn.execute(
+                    &format!("ALTER TABLE tickets ADD COLUMN {column} {definition}"),
+                    [],
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -783,18 +807,18 @@ impl Store {
     ) -> Result<Option<TicketRecord>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         Ok(conn.query_row(
-            "SELECT guild_id,opener_id,channel_id,status,claimed_by,created_at FROM tickets WHERE guild_id=?1 AND opener_id=?2 AND status='open' ORDER BY created_at DESC LIMIT 1",
+            "SELECT guild_id,opener_id,channel_id,status,claimed_by,category,priority,notes,csat,created_at,closed_at FROM tickets WHERE guild_id=?1 AND opener_id=?2 AND status='open' ORDER BY created_at DESC LIMIT 1",
             params![guild_id, user_id],
-            |row| Ok(TicketRecord { guild_id: row.get(0)?, user_id: row.get(1)?, channel_id: row.get(2)?, status: row.get(3)?, claimed_by: row.get(4)?, created_at: row.get(5)? }),
+            |row| Ok(TicketRecord { guild_id: row.get(0)?, user_id: row.get(1)?, channel_id: row.get(2)?, status: row.get(3)?, claimed_by: row.get(4)?, category: row.get(5)?, priority: row.get(6)?, notes: row.get(7)?, csat: row.get(8)?, created_at: row.get(9)?, closed_at: row.get(10)? }),
         ).optional()?)
     }
 
     pub fn ticket_by_channel(&self, channel_id: &str) -> Result<Option<TicketRecord>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         Ok(conn.query_row(
-            "SELECT guild_id,opener_id,channel_id,status,claimed_by,created_at FROM tickets WHERE channel_id=?1",
+            "SELECT guild_id,opener_id,channel_id,status,claimed_by,category,priority,notes,csat,created_at,closed_at FROM tickets WHERE channel_id=?1",
             [channel_id],
-            |row| Ok(TicketRecord { guild_id: row.get(0)?, user_id: row.get(1)?, channel_id: row.get(2)?, status: row.get(3)?, claimed_by: row.get(4)?, created_at: row.get(5)? }),
+            |row| Ok(TicketRecord { guild_id: row.get(0)?, user_id: row.get(1)?, channel_id: row.get(2)?, status: row.get(3)?, claimed_by: row.get(4)?, category: row.get(5)?, priority: row.get(6)?, notes: row.get(7)?, csat: row.get(8)?, created_at: row.get(9)?, closed_at: row.get(10)? }),
         ).optional()?)
     }
 
@@ -809,16 +833,48 @@ impl Store {
     pub fn close_ticket(&self, channel_id: &str) -> Result<bool> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         Ok(conn.execute(
-            "UPDATE tickets SET status='closed' WHERE channel_id=?1 AND status='open'",
-            [channel_id],
+            "UPDATE tickets SET status='closed',closed_at=?2 WHERE channel_id=?1 AND status='open'",
+            params![channel_id, Utc::now().timestamp_millis()],
         )? > 0)
     }
 
     pub fn reopen_ticket(&self, channel_id: &str) -> Result<bool> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         Ok(conn.execute(
-            "UPDATE tickets SET status='open' WHERE channel_id=?1 AND status='closed'",
+            "UPDATE tickets SET status='open',closed_at=NULL WHERE channel_id=?1 AND status='closed'",
             [channel_id],
+        )? > 0)
+    }
+
+    pub fn set_ticket_priority(&self, channel_id: &str, priority: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "UPDATE tickets SET priority=?2 WHERE channel_id=?1",
+            params![channel_id, priority],
+        )? > 0)
+    }
+
+    pub fn set_ticket_category(&self, channel_id: &str, category: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "UPDATE tickets SET category=?2 WHERE channel_id=?1",
+            params![channel_id, category],
+        )? > 0)
+    }
+
+    pub fn set_ticket_notes(&self, channel_id: &str, notes: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "UPDATE tickets SET notes=?2 WHERE channel_id=?1",
+            params![channel_id, notes],
+        )? > 0)
+    }
+
+    pub fn set_ticket_csat(&self, channel_id: &str, score: i64) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "UPDATE tickets SET csat=?2 WHERE channel_id=?1 AND status='closed'",
+            params![channel_id, score],
         )? > 0)
     }
 
