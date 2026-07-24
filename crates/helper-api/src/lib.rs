@@ -450,15 +450,7 @@ async fn quotas(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_auth(&state, &headers)?;
-    let snapshot = state
-        .store
-        .load_entitlement(&claims.user_id)
-        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
-    let free_plan = helper_contracts::Plan::Free;
-    let plan = snapshot
-        .as_ref()
-        .map(|snapshot| &snapshot.plan)
-        .unwrap_or(&free_plan);
+    let plan = effective_plan(&state, &claims).await;
     let keys = [
         "panels",
         "forms",
@@ -476,14 +468,65 @@ async fn quotas(
     ];
     let limits = keys
         .into_iter()
-        .map(|key| (key, quota_limit(plan, key)))
+        .map(|key| (key, quota_limit(&plan, key)))
         .collect::<std::collections::BTreeMap<_, _>>();
+    let usage = std::collections::BTreeMap::from([
+        (
+            "panels",
+            state
+                .store
+                .count_settings_prefix(&claims.guild_id, "support.panel.")
+                .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?,
+        ),
+        (
+            "role_panels",
+            state
+                .store
+                .count_settings_prefix(&claims.guild_id, "community.role_panel.")
+                .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?,
+        ),
+        (
+            "workflows",
+            state
+                .store
+                .workflows(&claims.guild_id, u32::MAX)
+                .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+                .len() as u64,
+        ),
+    ]);
     Ok(Json(serde_json::json!({
         "plan": plan,
         "guildLimit": plan.guild_limit(),
         "limits": limits,
-        "entitlementVersion": snapshot.as_ref().map(|snapshot| snapshot.version).unwrap_or(0),
+        "usage": usage,
     })))
+}
+
+async fn effective_plan(state: &ApiState, claims: &SessionClaims) -> Plan {
+    if let Some(client) = &state.entitlements
+        && let Ok(snapshot) = client
+            .resolve(&claims.user_id, Some(&claims.guild_id))
+            .await
+        && snapshot.active
+        && snapshot
+            .expires_at
+            .is_none_or(|expires_at| expires_at > Utc::now())
+    {
+        return snapshot.plan;
+    }
+    state
+        .store
+        .load_entitlement(&claims.user_id)
+        .ok()
+        .flatten()
+        .filter(|snapshot| {
+            snapshot.active
+                && snapshot
+                    .expires_at
+                    .is_none_or(|expires_at| expires_at > Utc::now())
+        })
+        .map(|snapshot| snapshot.plan)
+        .unwrap_or(Plan::Free)
 }
 
 async fn modules(
@@ -865,21 +908,7 @@ async fn create_workflow(
     {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_workflow"));
     }
-    let plan = match &state.entitlements {
-        Some(client) => client
-            .resolve(&claims.user_id, Some(&claims.guild_id))
-            .await
-            .ok()
-            .filter(|snapshot| {
-                snapshot.active
-                    && snapshot
-                        .expires_at
-                        .is_none_or(|expires_at| expires_at > Utc::now())
-            })
-            .map(|snapshot| snapshot.plan)
-            .unwrap_or(Plan::Free),
-        None => Plan::Free,
-    };
+    let plan = effective_plan(&state, &claims).await;
     let workflow_limit = quota_limit(&plan, "workflows");
     let Some(id) = state
         .store
@@ -1175,6 +1204,25 @@ mod tests {
                 .iter()
                 .any(|value| value == "Discord tokens")
         );
+
+        store
+            .set_setting("guild-a", "support.panel.1", "{}")
+            .unwrap();
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/quotas")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["usage"]["panels"], 1);
+        assert_eq!(body["limits"]["panels"], 1);
 
         let import = serde_json::json!({
             "version": 1,
