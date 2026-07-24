@@ -15,7 +15,7 @@ use helper_store::Store;
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -29,6 +29,8 @@ pub struct ApiState {
     pub store: Store,
     pub session_secret: String,
     pub oauth_client_id: String,
+    pub oauth_client_secret: String,
+    pub oauth_redirect_uri: String,
     pub allowed_origin: Option<String>,
 }
 
@@ -44,11 +46,129 @@ pub fn router(state: ApiState) -> Router {
         .route("/health", get(health))
         .route("/api/v1/health", get(health))
         .route("/api/session", post(create_session))
+        .route("/api/oauth/start", get(oauth_start))
+        .route("/api/oauth/callback", get(oauth_callback))
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
         .route("/api/cases", get(cases))
         .route("/api/stats", get(stats))
         .with_state(Arc::new(state))
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthStartQuery {
+    guild_id: String,
+    code_challenge: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OAuthStartResponse {
+    authorization_url: String,
+    state: String,
+}
+
+async fn oauth_start(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<OAuthStartQuery>,
+) -> Result<Json<OAuthStartResponse>, (StatusCode, Json<ApiError>)> {
+    if query.guild_id.trim().is_empty() || query.code_challenge.trim().len() < 43 {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_oauth_request",
+        ));
+    }
+    let expires = (Utc::now() + Duration::minutes(10)).timestamp();
+    let payload = format!("{}.{}.{}", query.guild_id, expires, query.code_challenge);
+    let state_token = sign_oauth_state(&payload, &state.session_secret);
+    let mut url = url::Url::parse("https://discord.com/oauth2/authorize").expect("static URL");
+    url.query_pairs_mut()
+        .append_pair("client_id", &state.oauth_client_id)
+        .append_pair("response_type", "code")
+        .append_pair("redirect_uri", &state.oauth_redirect_uri)
+        .append_pair("scope", "identify guilds")
+        .append_pair("state", &state_token)
+        .append_pair("code_challenge", &query.code_challenge)
+        .append_pair("code_challenge_method", "S256");
+    Ok(Json(OAuthStartResponse {
+        authorization_url: url.into(),
+        state: state_token,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthCallbackQuery {
+    code: String,
+    state: String,
+    code_verifier: String,
+}
+
+async fn oauth_callback(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Query(query): Query<OAuthCallbackQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    let payload = verify_oauth_state(&query.state, &state.session_secret)
+        .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "invalid_oauth_state"))?;
+    let parts: Vec<&str> = payload.splitn(3, '.').collect();
+    if parts.len() != 3
+        || parts[1]
+            .parse::<i64>()
+            .ok()
+            .is_none_or(|exp| exp < Utc::now().timestamp())
+    {
+        return Err(client_error(StatusCode::BAD_REQUEST, "expired_oauth_state"));
+    }
+    let guild_id = parts[0].to_string();
+    let client = Client::new();
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(query.code_verifier.as_bytes()));
+    if challenge != parts[2] {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "pkce_verifier_mismatch",
+        ));
+    }
+    let token = client
+        .post("https://discord.com/api/v10/oauth2/token")
+        .form(&[
+            ("client_id", state.oauth_client_id.as_str()),
+            ("client_secret", state.oauth_client_secret.as_str()),
+            ("grant_type", "authorization_code"),
+            ("code", query.code.as_str()),
+            ("redirect_uri", state.oauth_redirect_uri.as_str()),
+            ("code_verifier", query.code_verifier.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_unreachable"))?;
+    if !token.status().is_success() {
+        return Err(client_error(
+            StatusCode::UNAUTHORIZED,
+            "oauth_exchange_failed",
+        ));
+    }
+    let token: serde_json::Value = token
+        .json()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "invalid_discord_response"))?;
+    let access_token = token
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if access_token.is_empty() {
+        return Err(client_error(
+            StatusCode::UNAUTHORIZED,
+            "oauth_token_missing",
+        ));
+    }
+    create_session(
+        State(state),
+        headers,
+        Json(SessionRequest {
+            token: access_token.to_string(),
+            guild_id,
+        }),
+    )
+    .await
 }
 
 async fn health() -> impl IntoResponse {
@@ -305,6 +425,25 @@ fn verify_session(token: &str, secret: &str) -> Option<SessionClaims> {
         expires_at: chrono::DateTime::from_timestamp(values[3].parse().ok()?, 0)?,
         last_seen_at: Utc::now(),
     })
+}
+fn sign_oauth_state(payload: &str, secret: &str) -> String {
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts every key length");
+    mac.update(payload.as_bytes());
+    format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(payload),
+        URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    )
+}
+fn verify_oauth_state(token: &str, secret: &str) -> Option<String> {
+    let (payload, signature) = token.split_once('.')?;
+    let payload_bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let signature = URL_SAFE_NO_PAD.decode(signature).ok()?;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).ok()?;
+    mac.update(&payload_bytes);
+    mac.verify_slice(&signature).ok()?;
+    String::from_utf8(payload_bytes).ok()
 }
 fn has_manage_permission(value: &str) -> bool {
     value

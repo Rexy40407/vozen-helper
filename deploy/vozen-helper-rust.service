@@ -17,7 +17,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/home/vozen/vozen-helper-rust/shared/data
+ReadWritePaths=/home/vozen/vozen-helper-rust/shared/data /home/vozen/vozen-helper
 LimitNOFILE=65536
 
 [Install]
