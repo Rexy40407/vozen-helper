@@ -361,10 +361,10 @@ impl Store {
         let period = now.format("%Y-%m").to_string();
         let conn = self.conn.lock().expect("store mutex poisoned");
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let changed = conn.execute(
+        let mut statement = conn.prepare_cached(
             "INSERT INTO helper_usage(guild_id,user_id,quota_key,period,used) VALUES(?1,?2,?3,?4,1) ON CONFLICT(guild_id,user_id,quota_key,period) DO UPDATE SET used=used+1 WHERE used < ?5",
-            params![guild_id, user_id, key, period, limit],
         )?;
+        let changed = statement.execute(params![guild_id, user_id, key, period, limit])?;
         Ok(changed > 0)
     }
 
