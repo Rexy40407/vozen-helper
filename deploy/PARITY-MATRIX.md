@@ -7,7 +7,7 @@ This matrix is a release gate, not a claim that the migration is complete.
 | Core gateway and API | Implemented | `cargo test --workspace`, release build, API smoke |
 | OAuth and sessions | Implemented with PKCE | HMAC state, S256 verifier, guild permission recheck; legacy token route is opt-in |
 | Moderation | Partial but growing | warn, violation, note, reason, timeout, untimeout, kick, ban, unban, purge, quarantine and native AutoMod audit; raid/join-gate parity remains |
-| Support | Basic workflow | private ticket panel, claim, close, durable ticket rows; transcripts, SLA, routing and retention remain |
+| Support | Functional core | private ticket panel, claim, close, routing, transcripts and durable SLA reminders; retention and richer escalation remain |
 | Community | Functional core | AFK, reminders, tags, XP/leaderboard, stats, self-role panels, suggestions, giveaways, welcome and starboard; retention/privacy parity remains |
 | Events | Functional lifecycle | durable polls and giveaways with votes/entries, scheduled close and anti-abuse bounds; richer event templates remain |
 | Automate | Functional bounded MVP | message trigger, optional contains condition, reply action, durable workflows/runs and dashboard endpoints; broader trigger/action catalog remains |
