@@ -44,3 +44,21 @@ Antes de commitar: `npm run build` + `npm run typecheck` + `npm test` verdes.
 - Dá ao bot um **role acima de todos os moderadores** (mas abaixo do owner): o
   anti-nuke silencia contas comprometidas removendo-lhes os roles, e o timeout não
   funciona em admins.
+
+## Runtime público Rust
+
+O runtime público está a ser migrado para Rust (Serenity + Axum + SQLite WAL),
+mantendo o Node como rollback até os gates de memória, segurança, paridade e
+soak serem aprovados. A instalação pública é multi-guild e separa os módulos
+Core, Studio, Security, Support, Events, Community, Automate e Insights por
+guild.
+
+O painel local usa OAuth Discord com PKCE, estado de OAuth de uso único e
+sessões HttpOnly. O Studio expõe Brand Kit e templates versionados por guild;
+templates e painéis são limitados por quotas. O plano Plus (€1,99) é pessoal;
+Premium é de servidor (€3,99 para 3 guilds ou €7,99 para 8 guilds), resolvido
+através do serviço central de entitlements quando configurado.
+
+Para staging, publicar primeiro o artefacto Linux e manter o symlink `current`
+no release anterior. Nunca executar dois gateways com o mesmo token; o
+procedimento de rollback está em [`deploy/ROLLBACK.md`](deploy/ROLLBACK.md).
