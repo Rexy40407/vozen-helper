@@ -652,6 +652,7 @@ dependencies = [
  "helper-core",
  "helper-modules",
  "helper-store",
+ "serde_json",
  "serenity",
  "tokio",
  "tracing",
