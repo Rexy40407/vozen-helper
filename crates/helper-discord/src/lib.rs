@@ -29,6 +29,7 @@ use tracing::info;
 struct Handler {
     store: Store,
     spam: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+    joins: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
     xp_ticks: Arc<Mutex<HashMap<String, u32>>>,
     scheduler_started: Arc<AtomicBool>,
     entitlements: Option<EntitlementClient>,
@@ -648,6 +649,32 @@ impl EventHandler for Handler {
                     )
                     .required(false),
                 ),
+            CreateCommand::new("anti-raid")
+                .description("Configure the bounded join-burst anti-raid response")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Boolean,
+                        "enabled",
+                        "Enable or disable the response",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "joins",
+                        "Join count that arms the response (2-100)",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "window_seconds",
+                        "Sliding window in seconds (3-60)",
+                    )
+                    .required(false),
+                ),
         ];
         if let Err(error) = Command::set_global_commands(&ctx.http, commands).await {
             tracing::error!(%error, "global command registration failed");
@@ -695,6 +722,70 @@ impl EventHandler for Handler {
         let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let _ = self.store.record_join(&guild_id.to_string(), &day);
         let guild_text = guild_id.to_string();
+        let anti_raid_enabled = self
+            .store
+            .get_setting(&guild_text, "security.anti_raid.enabled")
+            .ok()
+            .flatten()
+            .is_some_and(|value| value == "true");
+        if anti_raid_enabled {
+            let threshold = self
+                .store
+                .get_setting(&guild_text, "security.anti_raid.joins")
+                .ok()
+                .flatten()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(10)
+                .clamp(2, 100);
+            let window_seconds = self
+                .store
+                .get_setting(&guild_text, "security.anti_raid.window_seconds")
+                .ok()
+                .flatten()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(10)
+                .clamp(3, 60);
+            let armed = {
+                let mut joins = self.joins.lock().expect("join mutex poisoned");
+                join_burst_armed(
+                    &mut joins,
+                    &guild_text,
+                    Instant::now(),
+                    Duration::from_secs(window_seconds),
+                    threshold,
+                )
+            };
+            if armed {
+                // Bounded response: latch the existing gate and alert moderators.
+                // It deliberately never mass-bans members automatically.
+                let _ = self
+                    .store
+                    .set_setting(&guild_text, "security.join_gate.enabled", "true");
+                let reason = format!(
+                    "Anti-raid: {threshold} joins dentro de {window_seconds}s; join gate ativado"
+                );
+                let _ = self.store.record_case(
+                    &guild_text,
+                    "anti_raid",
+                    &new_member.user.id.to_string(),
+                    "helper",
+                    &reason,
+                    None,
+                );
+                if let Ok(guild) = guild_id.to_partial_guild(&ctx.http).await
+                    && let Some(channel_id) = guild.system_channel_id
+                {
+                    let _ = channel_id
+                        .say(
+                            &ctx.http,
+                            format!(
+                                "⚠️ Possível raid detetada: {threshold} entradas em {window_seconds}s. O join gate foi ativado; verifica os casos recentes."
+                            ),
+                        )
+                        .await;
+                }
+            }
+        }
         let gate_enabled = self
             .store
             .get_setting(&guild_text, "security.join_gate.enabled")
@@ -1014,6 +1105,7 @@ pub async fn run(config: &Config) -> Result<()> {
         .event_handler(Handler {
             store,
             spam: Arc::new(Mutex::new(HashMap::new())),
+            joins: Arc::new(Mutex::new(HashMap::new())),
             xp_ticks: Arc::new(Mutex::new(HashMap::new())),
             scheduler_started: Arc::new(AtomicBool::new(false)),
             entitlements: EntitlementClient::new(
@@ -1518,6 +1610,35 @@ impl Handler {
                     "Join gate desativado; as definições guardadas podem ser reativadas.".to_string()
                 }
             }
+            "anti-raid" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let enabled = option_bool(command, "enabled").unwrap_or(false);
+                let joins = option_i64(command, "joins").unwrap_or(10).clamp(2, 100);
+                let window_seconds = option_i64(command, "window_seconds").unwrap_or(10).clamp(3, 60);
+                let guild_text = guild_id.to_string();
+                self.store.set_setting(
+                    &guild_text,
+                    "security.anti_raid.enabled",
+                    if enabled { "true" } else { "false" },
+                )?;
+                self.store.set_setting(
+                    &guild_text,
+                    "security.anti_raid.joins",
+                    &joins.to_string(),
+                )?;
+                self.store.set_setting(
+                    &guild_text,
+                    "security.anti_raid.window_seconds",
+                    &window_seconds.to_string(),
+                )?;
+                if enabled {
+                    format!("Anti-raid ativado: {joins} entradas em {window_seconds}s ativam o join gate.")
+                } else {
+                    "Anti-raid desativado; nenhuma resposta automática a bursts de joins será aplicada.".to_string()
+                }
+            }
             "workflow-create" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
@@ -2008,6 +2129,30 @@ fn account_age_days(now_timestamp: i64, created_timestamp: i64) -> i64 {
     ((now_timestamp - created_timestamp) / 86_400).max(0)
 }
 
+fn join_burst_armed(
+    joins: &mut HashMap<String, VecDeque<Instant>>,
+    guild_id: &str,
+    now: Instant,
+    window: Duration,
+    threshold: usize,
+) -> bool {
+    let window = window.max(Duration::from_secs(1));
+    let threshold = threshold.max(2);
+    let entries = joins.entry(guild_id.to_owned()).or_default();
+    while entries
+        .front()
+        .is_some_and(|joined_at| now.duration_since(*joined_at) > window)
+    {
+        entries.pop_front();
+    }
+    entries.push_back(now);
+    if entries.len() < threshold {
+        return false;
+    }
+    entries.clear();
+    true
+}
+
 async fn finish_giveaway(http: &serenity::http::Http, store: &Store, id: i64) -> Result<bool> {
     let Some(giveaway) = store.giveaway(id)? else {
         return Ok(false);
@@ -2119,6 +2264,7 @@ fn required_permission(command: &str) -> Option<Permissions> {
         "slowmode" => Some(Permissions::MANAGE_CHANNELS),
         "rolepanel" => Some(Permissions::MANAGE_ROLES),
         "join-gate" => Some(Permissions::MANAGE_ROLES),
+        "anti-raid" => Some(Permissions::MANAGE_GUILD),
         "tag-set" | "tag-delete" | "giveaway-start" | "giveaway-end" | "starboard-set"
         | "workflow-create" | "workflow-delete" => Some(Permissions::MANAGE_GUILD),
         "suggestion" => Some(Permissions::MANAGE_MESSAGES),
@@ -2203,7 +2349,11 @@ async fn deliver_scheduled_action(
 
 #[cfg(test)]
 mod tests {
-    use super::{account_age_days, parse_duration};
+    use super::{account_age_days, join_burst_armed, parse_duration};
+    use std::{
+        collections::{HashMap, VecDeque},
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn duration_parser_is_bounded_and_explicit() {
@@ -2213,5 +2363,49 @@ mod tests {
         assert_eq!(parse_duration("10weeks"), None);
         assert_eq!(account_age_days(172800, 86400), 1);
         assert_eq!(account_age_days(86400, 172800), 0);
+    }
+
+    #[test]
+    fn join_burst_arms_once_and_resets_after_threshold() {
+        let mut joins: HashMap<String, VecDeque<Instant>> = HashMap::new();
+        let start = Instant::now();
+        let window = Duration::from_secs(10);
+        assert!(!join_burst_armed(&mut joins, "guild", start, window, 3));
+        assert!(!join_burst_armed(
+            &mut joins,
+            "guild",
+            start + Duration::from_secs(1),
+            window,
+            3
+        ));
+        assert!(join_burst_armed(
+            &mut joins,
+            "guild",
+            start + Duration::from_secs(2),
+            window,
+            3
+        ));
+        assert!(!join_burst_armed(
+            &mut joins,
+            "guild",
+            start + Duration::from_secs(3),
+            window,
+            3
+        ));
+    }
+
+    #[test]
+    fn join_burst_ignores_expired_entries() {
+        let mut joins: HashMap<String, VecDeque<Instant>> = HashMap::new();
+        let start = Instant::now();
+        let window = Duration::from_secs(3);
+        assert!(!join_burst_armed(&mut joins, "guild", start, window, 2));
+        assert!(!join_burst_armed(
+            &mut joins,
+            "guild",
+            start + Duration::from_secs(4),
+            window,
+            2
+        ));
     }
 }
