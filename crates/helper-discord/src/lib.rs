@@ -884,6 +884,14 @@ impl EventHandler for Handler {
                         "Optional event description",
                     )
                     .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "capacity",
+                        "Optional attendee limit (1-100000)",
+                    )
+                    .required(false),
                 ),
             CreateCommand::new("event-list").description("List native Discord scheduled events"),
             CreateCommand::new("event-edit")
@@ -938,6 +946,16 @@ impl EventHandler for Handler {
                 ),
             CreateCommand::new("event-register")
                 .description("Register yourself for a native Discord scheduled event")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "event_id",
+                        "Discord scheduled event ID",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("event-unregister")
+                .description("Remove yourself from a scheduled event")
                 .add_option(
                     CreateCommandOption::new(
                         serenity::all::CommandOptionType::Integer,
@@ -2227,6 +2245,12 @@ impl Handler {
                 let end_raw = option_string(command, "end").unwrap_or_default().trim();
                 let location = option_string(command, "location").unwrap_or_default().trim();
                 let description = option_string(command, "description").unwrap_or_default().trim();
+                let capacity = option_i64(command, "capacity");
+                if let Some(capacity) = capacity
+                    && !(1..=100_000).contains(&capacity)
+                {
+                    return respond(ctx, command, "A lotação deve estar entre 1 e 100000.").await;
+                }
                 if !(1..=100).contains(&name.len())
                     || !(1..=100).contains(&location.len())
                     || description.len() > 1_000
@@ -2263,6 +2287,13 @@ impl Handler {
                     builder = builder.description(description.to_string());
                 }
                 let event = guild_id.create_scheduled_event(&ctx.http, builder).await?;
+                if let Some(capacity) = capacity {
+                    self.store.set_setting(
+                        &guild_id.to_string(),
+                        &format!("events.capacity.{}", event.id),
+                        &capacity.to_string(),
+                    )?;
+                }
                 format!(
                     "Evento nativo #{} criado: **{}** (<t:{}:F>–<t:{}:F>).",
                     event.id,
@@ -2419,14 +2450,63 @@ impl Handler {
                 ) {
                     return respond(ctx, command, "Este evento já terminou ou foi cancelado.").await;
                 }
-                if self.store.register_event(
-                    &guild_id.to_string(),
-                    &event_id.to_string(),
-                    &command.user.id.to_string(),
-                )? {
-                    format!("Inscrição confirmada para **{}**.", event.name)
+                let guild_text = guild_id.to_string();
+                let capacity = self
+                    .store
+                    .get_setting(&guild_text, &format!("events.capacity.{}", event_id))?
+                    .and_then(|value| value.parse::<u64>().ok());
+                let inserted = self
+                    .store
+                    .register_event_with_capacity(
+                        &guild_text,
+                        &event_id.to_string(),
+                        &command.user.id.to_string(),
+                        capacity,
+                    )?
+                    .is_some();
+                if inserted {
+                    let waitlisted = self
+                        .store
+                        .event_registration(
+                            &guild_text,
+                            &event_id.to_string(),
+                            &command.user.id.to_string(),
+                        )?
+                        .is_some_and(|registration| registration.status == "waitlisted");
+                    if waitlisted {
+                        format!(
+                            "O evento **{}** está cheio; ficaste na lista de espera.",
+                            event.name
+                        )
+                    } else {
+                        format!("Inscrição confirmada para **{}**.", event.name)
+                    }
                 } else {
                     "Já estás inscrito neste evento.".to_string()
+                }
+            }
+            "event-unregister" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let raw_event_id = option_i64(command, "event_id").unwrap_or(0);
+                if raw_event_id <= 0 {
+                    return respond(ctx, command, "Indica um ID de evento válido.").await;
+                }
+                let (removed, promoted) = self.store.remove_event_registration(
+                    &guild_id.to_string(),
+                    &raw_event_id.to_string(),
+                    &command.user.id.to_string(),
+                )?;
+                if !removed {
+                    return respond(ctx, command, "Não tens uma inscrição neste evento.").await;
+                }
+                match promoted {
+                    Some(user_id) => format!(
+                        "Inscrição removida; <@{}> foi promovido da lista de espera.",
+                        user_id
+                    ),
+                    None => "Inscrição removida do evento.".to_string(),
                 }
             }
             "event-checkin" => {

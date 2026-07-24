@@ -972,6 +972,92 @@ impl Store {
         )? > 0)
     }
 
+    pub fn register_event_with_capacity(
+        &self,
+        guild_id: &str,
+        event_id: &str,
+        user_id: &str,
+        capacity: Option<u64>,
+    ) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.unchecked_transaction()?;
+        let exists: Option<String> = tx
+            .query_row(
+                "SELECT status FROM event_registrations WHERE guild_id=?1 AND event_id=?2 AND user_id=?3",
+                params![guild_id, event_id, user_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_some() {
+            return Ok(None);
+        }
+        let registered: u64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM event_registrations WHERE guild_id=?1 AND event_id=?2 AND status IN ('registered','checked_in')",
+                params![guild_id, event_id],
+                |row| row.get::<_, i64>(0),
+            )?
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let status = if capacity.is_some_and(|limit| limit > 0 && registered >= limit) {
+            "waitlisted"
+        } else {
+            "registered"
+        };
+        tx.execute(
+            "INSERT INTO event_registrations(guild_id,event_id,user_id,status,created_at,checked_in_at) VALUES(?1,?2,?3,?4,?5,NULL)",
+            params![guild_id, event_id, user_id, status, Utc::now().timestamp_millis()],
+        )?;
+        tx.commit()?;
+        Ok(Some(status.to_string()))
+    }
+
+    pub fn remove_event_registration(
+        &self,
+        guild_id: &str,
+        event_id: &str,
+        user_id: &str,
+    ) -> Result<(bool, Option<String>)> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.unchecked_transaction()?;
+        let status: Option<String> = tx
+            .query_row(
+                "SELECT status FROM event_registrations WHERE guild_id=?1 AND event_id=?2 AND user_id=?3",
+                params![guild_id, event_id, user_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(status) = status else {
+            return Ok((false, None));
+        };
+        tx.execute(
+            "DELETE FROM event_registrations WHERE guild_id=?1 AND event_id=?2 AND user_id=?3",
+            params![guild_id, event_id, user_id],
+        )?;
+        let promoted = if status == "registered" || status == "checked_in" {
+            let next: Option<(i64, String)> = tx
+                .query_row(
+                    "SELECT rowid,user_id FROM event_registrations WHERE guild_id=?1 AND event_id=?2 AND status='waitlisted' ORDER BY created_at ASC,rowid ASC LIMIT 1",
+                    params![guild_id, event_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((rowid, user_id)) = next {
+                tx.execute(
+                    "UPDATE event_registrations SET status='registered' WHERE rowid=?1",
+                    [rowid],
+                )?;
+                Some(user_id)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok((true, promoted))
+    }
+
     pub fn event_registration(
         &self,
         guild_id: &str,
@@ -1587,6 +1673,34 @@ mod tests {
                 .unwrap()
                 .status,
             "checked_in"
+        );
+        assert_eq!(
+            store
+                .register_event_with_capacity("g", "limited", "first", Some(1))
+                .unwrap()
+                .as_deref(),
+            Some("registered")
+        );
+        assert_eq!(
+            store
+                .register_event_with_capacity("g", "limited", "second", Some(1))
+                .unwrap()
+                .as_deref(),
+            Some("waitlisted")
+        );
+        assert_eq!(
+            store
+                .remove_event_registration("g", "limited", "first")
+                .unwrap(),
+            (true, Some("second".to_string()))
+        );
+        assert_eq!(
+            store
+                .event_registration("g", "limited", "second")
+                .unwrap()
+                .unwrap()
+                .status,
+            "registered"
         );
         let suggestion = store
             .create_suggestion("g", "u", "Add a weekly event")
