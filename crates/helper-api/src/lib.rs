@@ -61,6 +61,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/stats", get(stats))
         .route("/api/quotas", get(quotas))
         .route("/api/modules", get(modules))
+        .route(
+            "/api/studio/brand",
+            get(studio_brand).put(update_studio_brand),
+        )
         .route("/api/permissions", get(permissions))
         .route("/api/security/health", get(security_health))
         .route("/api/analytics", get(analytics))
@@ -547,6 +551,85 @@ async fn modules(
     Ok(Json(serde_json::json!({
         "modules": modules.into_iter().map(|(name, _)| name).collect::<Vec<_>>()
     })))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BrandKit {
+    primary_color: String,
+    secondary_color: String,
+    logo_url: Option<String>,
+    font: String,
+}
+
+fn default_brand_kit() -> BrandKit {
+    BrandKit {
+        primary_color: "#5865F2".into(),
+        secondary_color: "#2B2D31".into(),
+        logo_url: None,
+        font: "system".into(),
+    }
+}
+
+fn valid_hex_color(value: &str) -> bool {
+    value.len() == 7
+        && value.starts_with('#')
+        && value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+}
+
+fn parse_brand_kit(value: Option<String>) -> BrandKit {
+    value
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(default_brand_kit)
+}
+
+async fn studio_brand(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let brand = parse_brand_kit(
+        state
+            .store
+            .get_setting(&claims.guild_id, "studio.brand_kit")
+            .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?,
+    );
+    Ok(Json(
+        serde_json::json!({"guildId": claims.guild_id, "brand": brand}),
+    ))
+}
+
+async fn update_studio_brand(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(brand): Json<BrandKit>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    if !valid_hex_color(&brand.primary_color)
+        || !valid_hex_color(&brand.secondary_color)
+        || !matches!(
+            brand.font.as_str(),
+            "system" | "inter" | "roboto" | "poppins"
+        )
+        || brand
+            .logo_url
+            .as_deref()
+            .is_some_and(|url| !url.starts_with("https://") || url.len() > 2_048)
+    {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid_brand_kit"));
+    }
+    state
+        .store
+        .set_setting(
+            &claims.guild_id,
+            "studio.brand_kit",
+            &serde_json::to_string(&brand).map_err(|_| {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "serialization_error")
+            })?,
+        )
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    Ok(Json(
+        serde_json::json!({"guildId": claims.guild_id, "brand": brand}),
+    ))
 }
 
 async fn permissions(
@@ -1223,6 +1306,40 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["usage"]["panels"], 1);
         assert_eq!(body["limits"]["panels"], 1);
+
+        let brand = serde_json::json!({
+            "primary_color": "#123ABC",
+            "secondary_color": "#0A0B0C",
+            "logo_url": "https://cdn.example.test/logo.png",
+            "font": "inter"
+        });
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/studio/brand")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(brand.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/studio/brand")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["brand"]["primary_color"], "#123ABC");
 
         let import = serde_json::json!({
             "version": 1,
