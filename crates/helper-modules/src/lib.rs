@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::task::JoinHandle;
 
@@ -139,8 +139,16 @@ impl EntitlementClient {
 pub fn start_scheduler(store: Store) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
+        let mut last_retention = Instant::now() - Duration::from_secs(86_401);
         loop {
             interval.tick().await;
+            if last_retention.elapsed() >= Duration::from_secs(86_400) {
+                match store.prune_retention(chrono::Utc::now().timestamp_millis()) {
+                    Ok(summary) => tracing::info!(?summary, "retention sweep completed"),
+                    Err(error) => tracing::error!(%error, "retention sweep failed"),
+                }
+                last_retention = Instant::now();
+            }
             match store.due_scheduled_actions(chrono::Utc::now().timestamp_millis(), 100) {
                 Ok(actions) => {
                     for (id, guild_id, kind, target_id, _payload) in actions {

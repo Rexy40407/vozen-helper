@@ -1334,11 +1334,22 @@ impl EventHandler for Handler {
         &self,
         _ctx: Context,
         guild_id: serenity::all::GuildId,
-        _user: serenity::all::User,
+        user: serenity::all::User,
         _member_data_if_available: Option<serenity::all::Member>,
     ) {
         let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let _ = self.store.record_leave(&guild_id.to_string(), &day);
+        if let Ok(deleted) = self
+            .store
+            .delete_member_voluntary_data(&guild_id.to_string(), &user.id.to_string())
+        {
+            tracing::debug!(
+                guild_id = %guild_id,
+                user_id = %user.id,
+                ?deleted,
+                "removed member voluntary state"
+            );
+        }
     }
 
     async fn auto_moderation_action_execution(

@@ -1,7 +1,7 @@
 //! SQLite persistence with an intentionally small, auditable surface.
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use helper_contracts::{EntitlementSnapshot, SessionClaims};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
@@ -47,6 +47,11 @@ pub struct AuditEventRecord {
     pub after_json: String,
     pub outcome: String,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RetentionSummary {
+    pub deleted: serde_json::Value,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -505,6 +510,28 @@ impl Store {
             "DELETE FROM afk WHERE guild_id=?1 AND user_id=?2",
             params![guild_id, user_id],
         )? > 0)
+    }
+
+    /// Remove only voluntary member state. Moderation records remain intact so
+    /// that the server's audit history is not silently rewritten when a member
+    /// leaves or requests deletion of personal preferences.
+    pub fn delete_member_voluntary_data(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> Result<serde_json::Value> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let levels = tx.execute(
+            "DELETE FROM levels WHERE guild_id=?1 AND user_id=?2",
+            params![guild_id, user_id],
+        )?;
+        let afk = tx.execute(
+            "DELETE FROM afk WHERE guild_id=?1 AND user_id=?2",
+            params![guild_id, user_id],
+        )?;
+        tx.commit()?;
+        Ok(serde_json::json!({"levels": levels, "afk": afk}))
     }
 
     pub fn upsert_tag(
@@ -1070,6 +1097,137 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Apply bounded retention to operational data. The sweep is idempotent,
+    /// guild-agnostic, and returns counts for an auditable scheduler log.
+    pub fn prune_retention(&self, now_ms: i64) -> Result<RetentionSummary> {
+        let now = DateTime::<Utc>::from_timestamp_millis(now_ms).unwrap_or_else(Utc::now);
+        let cutoff_30d = (now - Duration::days(30)).timestamp_millis();
+        let cutoff_90d = (now - Duration::days(90)).timestamp_millis();
+        let cutoff_1y = (now - Duration::days(365)).timestamp_millis();
+        let cutoff_2y = (now - Duration::days(730)).timestamp_millis();
+        let cutoff_date_1y = (now - Duration::days(365)).format("%Y-%m-%d").to_string();
+        let cutoff_rfc3339 = (now - Duration::hours(24)).to_rfc3339();
+        let cutoff_seconds = (now - Duration::hours(24)).timestamp();
+
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let mut deleted = serde_json::Map::new();
+        let mut remove = |name: &str, count: usize| {
+            if count > 0 {
+                deleted.insert(name.to_string(), serde_json::json!(count));
+            }
+        };
+
+        remove(
+            "audit_events",
+            tx.execute(
+                "DELETE FROM audit_events WHERE created_at < ?1",
+                [cutoff_30d],
+            )?,
+        );
+        remove(
+            "activity_log",
+            tx.execute(
+                "DELETE FROM activity_log WHERE created_at < ?1",
+                [cutoff_90d],
+            )?,
+        );
+        remove(
+            "infractions",
+            tx.execute("DELETE FROM infractions WHERE created_at < ?1", [cutoff_1y])?,
+        );
+        remove(
+            "cases",
+            tx.execute("DELETE FROM cases WHERE created_at < ?1", [cutoff_2y])?,
+        );
+        remove(
+            "quarantine",
+            tx.execute("DELETE FROM quarantine WHERE created_at < ?1", [cutoff_1y])?,
+        );
+        remove(
+            "scheduled_actions",
+            tx.execute(
+                "DELETE FROM scheduled_actions WHERE execute_at < ?1",
+                [cutoff_90d],
+            )?,
+        );
+        remove(
+            "tickets",
+            tx.execute(
+                "DELETE FROM tickets WHERE closed_at IS NOT NULL AND closed_at < ?1",
+                [cutoff_1y],
+            )?,
+        );
+        remove(
+            "suggestion_votes",
+            tx.execute(
+                "DELETE FROM suggestion_votes WHERE suggestion_id IN (SELECT id FROM suggestions WHERE created_at < ?1)",
+                [cutoff_1y],
+            )?,
+        );
+        remove(
+            "suggestions",
+            tx.execute("DELETE FROM suggestions WHERE created_at < ?1", [cutoff_1y])?,
+        );
+        remove(
+            "giveaway_entries",
+            tx.execute(
+                "DELETE FROM giveaway_entries WHERE giveaway_id IN (SELECT id FROM giveaways WHERE ended=1 AND end_at < ?1)",
+                [cutoff_90d],
+            )?,
+        );
+        remove(
+            "giveaways",
+            tx.execute(
+                "DELETE FROM giveaways WHERE ended=1 AND end_at < ?1",
+                [cutoff_90d],
+            )?,
+        );
+        remove(
+            "poll_votes",
+            tx.execute(
+                "DELETE FROM poll_votes WHERE poll_id IN (SELECT id FROM polls WHERE closed=1 AND end_at < ?1)",
+                [cutoff_90d],
+            )?,
+        );
+        remove(
+            "polls",
+            tx.execute(
+                "DELETE FROM polls WHERE closed=1 AND end_at < ?1",
+                [cutoff_90d],
+            )?,
+        );
+        remove(
+            "stats",
+            tx.execute("DELETE FROM stats WHERE date < ?1", [&cutoff_date_1y])?,
+        );
+        remove(
+            "helper_session_guilds",
+            tx.execute(
+                "DELETE FROM helper_session_guilds WHERE session_id IN (SELECT id FROM helper_sessions WHERE expires_at < ?1 OR revoked_at < ?1)",
+                [&cutoff_rfc3339],
+            )?,
+        );
+        remove(
+            "helper_sessions",
+            tx.execute(
+                "DELETE FROM helper_sessions WHERE expires_at < ?1 OR revoked_at < ?1",
+                [&cutoff_rfc3339],
+            )?,
+        );
+        remove(
+            "helper_oauth_states",
+            tx.execute(
+                "DELETE FROM helper_oauth_states WHERE expires_at < ?1 OR used_at < ?1",
+                [cutoff_seconds],
+            )?,
+        );
+        tx.commit()?;
+        Ok(RetentionSummary {
+            deleted: serde_json::Value::Object(deleted),
+        })
     }
 
     pub fn add_xp(&self, guild_id: &str, user_id: &str, amount: i64) -> Result<i64> {
@@ -2223,5 +2381,57 @@ mod tests {
         assert!(store.get_tag("g1", "mine").unwrap().is_none());
         assert!(store.get_afk("g1", "u1").unwrap().is_none());
         assert_eq!(store.suggestion_votes(suggestion).unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn retention_sweep_removes_expired_records_and_keeps_recent_cases() {
+        let store = Store::open(":memory:").unwrap();
+        let now = Utc::now().timestamp_millis();
+        let old_31d = now - Duration::days(31).num_milliseconds();
+        let old_91d = now - Duration::days(91).num_milliseconds();
+        let old_3y = now - Duration::days(1_095).num_milliseconds();
+        store
+            .record_case("g", "warn", "recent", "mod", "keep", None)
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO audit_events(correlation_id,guild_id,actor_id,action,reason,before_json,after_json,outcome,created_at) VALUES('old-correlation','g','mod','old','old','{}','{}','recorded',?1)",
+                [old_31d],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO activity_log(guild_id,type,user_id,actor_id,detail,created_at) VALUES('g','leave','u','mod','{}',?1)",
+                [old_91d],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO cases(guild_id,type,target_id,moderator_id,reason,created_at) VALUES('g','old','u','mod','old',?1)",
+                [old_3y],
+            )
+            .unwrap();
+        }
+        let summary = store.prune_retention(now).unwrap();
+        assert_eq!(summary.deleted["audit_events"], 1);
+        assert_eq!(summary.deleted["activity_log"], 1);
+        assert_eq!(summary.deleted["cases"], 1);
+        assert_eq!(store.recent_cases("g", 10).unwrap().len(), 1);
+        assert_eq!(store.recent_audit_events("g", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn member_departure_deletes_only_voluntary_state() {
+        let store = Store::open(":memory:").unwrap();
+        store.set_afk("g", "u", "away").unwrap();
+        store.add_xp("g", "u", 42).unwrap();
+        store
+            .record_case("g", "warn", "u", "mod", "kept", None)
+            .unwrap();
+        let deleted = store.delete_member_voluntary_data("g", "u").unwrap();
+        assert_eq!(deleted["levels"], 1);
+        assert_eq!(deleted["afk"], 1);
+        assert_eq!(store.level_for("g", "u").unwrap(), 0);
+        assert!(store.get_afk("g", "u").unwrap().is_none());
+        assert_eq!(store.recent_cases("g", 10).unwrap().len(), 1);
     }
 }
