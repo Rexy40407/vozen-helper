@@ -3,7 +3,9 @@ name: Rust Helper release
 on:
   workflow_dispatch:
   push:
-    branches: [migration/helper-rust-public]
+    branches:
+      - migration/helper-rust-public
+      - migration/helper-rust-public-secure
 
 permissions:
   contents: read
