@@ -52,7 +52,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/health", get(health))
         .route("/api/v1/health", get(health))
         .route("/api/session", post(create_session))
-        .route("/api/oauth/start", get(oauth_start))
+        .route("/api/oauth/start", get(oauth_start).post(oauth_start_post))
         .route("/api/oauth/callback", get(oauth_callback))
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
@@ -96,6 +96,13 @@ struct OAuthStartQuery {
     code_verifier: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct OAuthStartRequest {
+    guild_id: String,
+    code_challenge: String,
+    code_verifier: String,
+}
+
 #[derive(Debug, Serialize)]
 struct OAuthStartResponse {
     authorization_url: String,
@@ -106,24 +113,50 @@ async fn oauth_start(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<OAuthStartQuery>,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
-    if query.guild_id.trim().is_empty()
-        || !(43..=128).contains(&query.code_verifier.len())
-        || query.code_challenge.trim().len() < 43
+    oauth_start_inner(
+        &state,
+        &query.guild_id,
+        &query.code_challenge,
+        &query.code_verifier,
+    )
+}
+
+async fn oauth_start_post(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<OAuthStartRequest>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    oauth_start_inner(
+        &state,
+        &request.guild_id,
+        &request.code_challenge,
+        &request.code_verifier,
+    )
+}
+
+fn oauth_start_inner(
+    state: &ApiState,
+    guild_id: &str,
+    code_challenge: &str,
+    code_verifier: &str,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    if guild_id.trim().is_empty()
+        || !(43..=128).contains(&code_verifier.len())
+        || code_challenge.trim().len() < 43
     {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
             "invalid_oauth_request",
         ));
     }
-    let expected_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(query.code_verifier.as_bytes()));
-    if expected_challenge != query.code_challenge {
+    let expected_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
+    if expected_challenge != code_challenge {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
             "pkce_challenge_mismatch",
         ));
     }
     let expires = (Utc::now() + Duration::minutes(10)).timestamp();
-    let payload = format!("{}.{}.{}", query.guild_id, expires, query.code_challenge);
+    let payload = format!("{}.{}.{}", guild_id, expires, code_challenge);
     let state_token = sign_oauth_state(&payload, &state.session_secret);
     let state_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(state_token.as_bytes()));
     state
@@ -137,7 +170,7 @@ async fn oauth_start(
         .append_pair("redirect_uri", &state.oauth_redirect_uri)
         .append_pair("scope", "identify guilds")
         .append_pair("state", &state_token)
-        .append_pair("code_challenge", &query.code_challenge)
+        .append_pair("code_challenge", code_challenge)
         .append_pair("code_challenge_method", "S256");
     let mut response = Json(OAuthStartResponse {
         authorization_url: url.into(),
@@ -148,7 +181,7 @@ async fn oauth_start(
         header::SET_COOKIE,
         format!(
             "{OAUTH_COOKIE}={}; HttpOnly; Secure; SameSite=Lax; Path=/api/oauth; Max-Age=600",
-            query.code_verifier
+            code_verifier
         )
         .parse()
         .unwrap(),
@@ -1920,6 +1953,28 @@ mod tests {
         assert!(cookie.starts_with("vh_oauth_verifier="));
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("SameSite=Lax"));
+
+        let post_verifier = "c".repeat(64);
+        let post_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(post_verifier.as_bytes()));
+        let post_response = router(state(Store::open(":memory:").unwrap()))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "guild_id": "guild-a",
+                            "code_challenge": post_challenge,
+                            "code_verifier": post_verifier
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(post_response.status(), StatusCode::OK);
 
         let mismatch = router(state(Store::open(":memory:").unwrap()))
             .oneshot(
