@@ -728,7 +728,7 @@ async fn create_studio_template(
     headers: HeaderMap,
     Json(input): Json<StudioTemplateInput>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
-    let claims = require_auth(&state, &headers)?;
+    let claims = require_mutation_auth(&state, &headers)?;
     if !validate_template_input(&input) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template"));
     }
@@ -766,7 +766,7 @@ async fn update_studio_template(
     Path(id): Path<String>,
     Json(input): Json<StudioTemplateInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let claims = require_auth(&state, &headers)?;
+    let claims = require_mutation_auth(&state, &headers)?;
     if !valid_template_id(&id) || !validate_template_input(&input) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template"));
     }
@@ -809,7 +809,7 @@ async fn delete_studio_template(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let claims = require_auth(&state, &headers)?;
+    let claims = require_mutation_auth(&state, &headers)?;
     if !valid_template_id(&id) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template_id"));
     }
@@ -844,7 +844,7 @@ async fn update_studio_brand(
     headers: HeaderMap,
     Json(brand): Json<BrandKit>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let claims = require_auth(&state, &headers)?;
+    let claims = require_mutation_auth(&state, &headers)?;
     if !valid_hex_color(&brand.primary_color)
         || !valid_hex_color(&brand.secondary_color)
         || !matches!(
@@ -1154,7 +1154,7 @@ async fn import_config(
     headers: HeaderMap,
     Json(document): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let claims = require_auth(&state, &headers)?;
+    let claims = require_mutation_auth(&state, &headers)?;
     let summary = state
         .store
         .import_guild_config(&claims.guild_id, &document)
@@ -1222,7 +1222,7 @@ async fn create_workflow(
     headers: HeaderMap,
     Json(request): Json<WorkflowRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
-    let claims = require_auth(&state, &headers)?;
+    let claims = require_mutation_auth(&state, &headers)?;
     if !(1..=50).contains(&request.name.trim().len())
         || request.trigger != "message"
         || request.action != "reply"
@@ -1260,7 +1260,7 @@ async fn delete_workflow(
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let claims = require_auth(&state, &headers)?;
+    let claims = require_mutation_auth(&state, &headers)?;
     let deleted = state
         .store
         .delete_workflow(&claims.guild_id, id)
@@ -1277,6 +1277,32 @@ fn require_auth(
 ) -> Result<SessionClaims, (StatusCode, Json<ApiError>)> {
     authenticate(state, headers)
         .ok_or_else(|| client_error(StatusCode::UNAUTHORIZED, "unauthenticated"))
+}
+
+/// State-changing browser requests must prove they came from the configured
+/// panel origin when authentication is carried by the ambient session cookie.
+/// API clients using an explicit Bearer token remain usable without an Origin
+/// header because browsers do not attach that credential automatically.
+fn require_mutation_auth(
+    state: &ApiState,
+    headers: &HeaderMap,
+) -> Result<SessionClaims, (StatusCode, Json<ApiError>)> {
+    let bearer_present = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|value| !value.trim().is_empty());
+    let claims = require_auth(state, headers)?;
+    if bearer_present {
+        return Ok(claims);
+    }
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok());
+    if state.allowed_origin.as_deref() != origin {
+        return Err(client_error(StatusCode::FORBIDDEN, "csrf_origin_invalid"));
+    }
+    Ok(claims)
 }
 fn authenticate(state: &ApiState, headers: &HeaderMap) -> Option<SessionClaims> {
     let raw = headers
@@ -1731,6 +1757,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn cookie_mutations_require_configured_panel_origin() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        store.save_session(&session).unwrap();
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        let mut api_state = state(store);
+        api_state.allowed_origin = Some("http://127.0.0.1:4173".into());
+        let body = serde_json::json!({
+            "primary_color": "#123ABC",
+            "secondary_color": "#0A0B0C",
+            "logo_url": null,
+            "font": "system"
+        })
+        .to_string();
+
+        let response = router(api_state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/studio/brand")
+                    .header(header::COOKIE, format!("{COOKIE}={token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = router(api_state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/studio/brand")
+                    .header(header::COOKIE, format!("{COOKIE}={token}"))
+                    .header(header::ORIGIN, "http://127.0.0.1:4173")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[test]
