@@ -79,7 +79,6 @@ async fn main() -> Result<()> {
                     helper_discord::run(&config).await
                 }
             };
-            let _scheduler = helper_modules::start_scheduler(store.clone());
             select! { result = api => result?, result = discord => result?, _ = signal::ctrl_c() => {} }
         }
     }

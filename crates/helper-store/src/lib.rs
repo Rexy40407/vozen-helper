@@ -27,6 +27,30 @@ pub struct CaseRecord {
     pub created_at: i64,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TagRecord {
+    pub guild_id: String,
+    pub name: String,
+    pub content: String,
+    pub author_id: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LevelRecord {
+    pub guild_id: String,
+    pub user_id: String,
+    pub xp: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AfkRecord {
+    pub guild_id: String,
+    pub user_id: String,
+    pub reason: String,
+    pub since: i64,
+}
+
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
@@ -147,11 +171,11 @@ impl Store {
         &self,
         now_ms: i64,
         limit: u32,
-    ) -> Result<Vec<(i64, String, String, String)>> {
+    ) -> Result<Vec<(i64, String, String, String, String)>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
-        let mut stmt = conn.prepare("SELECT id,guild_id,type,target_id FROM scheduled_actions WHERE execute_at<=?1 ORDER BY execute_at ASC LIMIT ?2")?;
+        let mut stmt = conn.prepare("SELECT id,guild_id,type,target_id,payload FROM scheduled_actions WHERE execute_at<=?1 ORDER BY execute_at ASC LIMIT ?2")?;
         let rows = stmt.query_map(params![now_ms, i64::from(limit.min(100))], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -174,6 +198,160 @@ impl Store {
         value
             .map(|v| serde_json::from_str(&v).context("decode entitlement snapshot"))
             .transpose()
+    }
+
+    pub fn set_afk(&self, guild_id: &str, user_id: &str, reason: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT INTO afk(guild_id,user_id,reason,since) VALUES(?1,?2,?3,?4) ON CONFLICT(guild_id,user_id) DO UPDATE SET reason=excluded.reason,since=excluded.since",
+            params![guild_id, user_id, reason, Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_afk(&self, guild_id: &str, user_id: &str) -> Result<Option<AfkRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT guild_id,user_id,reason,since FROM afk WHERE guild_id=?1 AND user_id=?2",
+                params![guild_id, user_id],
+                |row| {
+                    Ok(AfkRecord {
+                        guild_id: row.get(0)?,
+                        user_id: row.get(1)?,
+                        reason: row.get(2)?,
+                        since: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn clear_afk(&self, guild_id: &str, user_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "DELETE FROM afk WHERE guild_id=?1 AND user_id=?2",
+            params![guild_id, user_id],
+        )? > 0)
+    }
+
+    pub fn upsert_tag(
+        &self,
+        guild_id: &str,
+        name: &str,
+        content: &str,
+        author_id: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT INTO tags(guild_id,name,content,author_id,created_at) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(guild_id,name) DO UPDATE SET content=excluded.content,author_id=excluded.author_id,created_at=excluded.created_at",
+            params![guild_id, name, content, author_id, Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_tag(&self, guild_id: &str, name: &str) -> Result<Option<TagRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT guild_id,name,content,author_id,created_at FROM tags WHERE guild_id=?1 AND name=?2",
+                params![guild_id, name],
+                |row| {
+                    Ok(TagRecord {
+                        guild_id: row.get(0)?,
+                        name: row.get(1)?,
+                        content: row.get(2)?,
+                        author_id: row.get(3)?,
+                        created_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn list_tags(&self, guild_id: &str, limit: u32) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt =
+            conn.prepare("SELECT name FROM tags WHERE guild_id=?1 ORDER BY name LIMIT ?2")?;
+        let rows = stmt.query_map(params![guild_id, i64::from(limit.min(100))], |row| {
+            row.get(0)
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+    }
+
+    pub fn delete_tag(&self, guild_id: &str, name: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "DELETE FROM tags WHERE guild_id=?1 AND name=?2",
+            params![guild_id, name],
+        )? > 0)
+    }
+
+    pub fn add_xp(&self, guild_id: &str, user_id: &str, amount: i64) -> Result<i64> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT INTO levels(guild_id,user_id,xp) VALUES(?1,?2,?3) ON CONFLICT(guild_id,user_id) DO UPDATE SET xp=xp+excluded.xp",
+            params![guild_id, user_id, amount.max(0)],
+        )?;
+        Ok(conn.query_row(
+            "SELECT xp FROM levels WHERE guild_id=?1 AND user_id=?2",
+            params![guild_id, user_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn level_for(&self, guild_id: &str, user_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT xp FROM levels WHERE guild_id=?1 AND user_id=?2",
+                params![guild_id, user_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+    }
+
+    pub fn top_levels(&self, guild_id: &str, limit: u32) -> Result<Vec<LevelRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT guild_id,user_id,xp FROM levels WHERE guild_id=?1 ORDER BY xp DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![guild_id, i64::from(limit.min(25))], |row| {
+            Ok(LevelRecord {
+                guild_id: row.get(0)?,
+                user_id: row.get(1)?,
+                xp: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn record_message(&self, guild_id: &str, day: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("INSERT INTO stats(guild_id,date,messages,joins,leaves) VALUES(?1,?2,1,0,0) ON CONFLICT(guild_id,date) DO UPDATE SET messages=messages+1", params![guild_id, day])?;
+        Ok(())
+    }
+
+    pub fn stats_for(&self, guild_id: &str, limit: u32) -> Result<Vec<(String, i64, i64, i64)>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT date,messages,joins,leaves FROM stats WHERE guild_id=?1 ORDER BY date DESC LIMIT ?2")?;
+        let rows = stmt.query_map(params![guild_id, i64::from(limit.min(365))], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn schedule(
+        &self,
+        guild_id: &str,
+        target_id: &str,
+        execute_at: i64,
+        payload: &str,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("INSERT INTO scheduled_actions(guild_id,type,target_id,execute_at,payload,case_id) VALUES(?1,'reminder',?2,?3,?4,NULL)", params![guild_id, target_id, execute_at, payload])?;
+        Ok(conn.last_insert_rowid())
     }
 }
 
@@ -230,5 +408,26 @@ mod tests {
             store.load_entitlement("u").unwrap().unwrap().plan,
             Plan::Plus
         );
+    }
+
+    #[test]
+    fn community_state_and_due_jobs_round_trip() {
+        let store = Store::open(":memory:").unwrap();
+        store.set_afk("g", "u", "away").unwrap();
+        assert_eq!(store.get_afk("g", "u").unwrap().unwrap().reason, "away");
+        assert!(store.clear_afk("g", "u").unwrap());
+        store.upsert_tag("g", "rules", "be kind", "u").unwrap();
+        assert_eq!(
+            store.get_tag("g", "rules").unwrap().unwrap().content,
+            "be kind"
+        );
+        assert_eq!(store.add_xp("g", "u", 5).unwrap(), 5);
+        assert_eq!(store.level_for("g", "u").unwrap(), 5);
+        let id = store
+            .schedule("g", "u", 1, r#"{"channel_id":"2","text":"hello"}"#)
+            .unwrap();
+        let jobs = store.due_scheduled_actions(1, 10).unwrap();
+        assert_eq!(jobs[0].0, id);
+        assert_eq!(jobs[0].4, r#"{"channel_id":"2","text":"hello"}"#);
     }
 }

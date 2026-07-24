@@ -6,15 +6,18 @@ use helper_modules::EntitlementClient;
 use helper_store::Store;
 use serenity::{
     all::{
-        Client, Command, CommandDataOptionValue, CommandInteraction, Context, CreateCommand,
-        CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseMessage,
-        EventHandler, GatewayIntents, Interaction, Ready,
+        ChannelId, Client, Command, CommandDataOptionValue, CommandInteraction, Context,
+        CreateCommand, CreateCommandOption, CreateInteractionResponse,
+        CreateInteractionResponseMessage, EventHandler, GatewayIntents, Interaction, Ready,
     },
     async_trait,
 };
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tracing::info;
@@ -23,6 +26,8 @@ use tracing::info;
 struct Handler {
     store: Store,
     spam: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+    xp_ticks: Arc<Mutex<HashMap<String, u32>>>,
+    scheduler_started: Arc<AtomicBool>,
     entitlements: Option<EntitlementClient>,
 }
 
@@ -30,6 +35,30 @@ struct Handler {
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!(user = %ready.user.name, "helper gateway ready");
+        if !self.scheduler_started.swap(true, Ordering::AcqRel) {
+            let store = self.store.clone();
+            let http = ctx.http.clone();
+            tokio::spawn(async move {
+                loop {
+                    if let Ok(actions) =
+                        store.due_scheduled_actions(chrono::Utc::now().timestamp_millis(), 100)
+                    {
+                        for (id, _guild_id, action_type, target_id, payload) in actions {
+                            let _ = deliver_scheduled_action(
+                                &http,
+                                &store,
+                                id,
+                                &action_type,
+                                &target_id,
+                                &payload,
+                            )
+                            .await;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            });
+        }
         let commands = vec![
             CreateCommand::new("ping").description("Check Helper latency"),
             CreateCommand::new("help").description("Show Helper modules"),
@@ -116,6 +145,85 @@ impl EventHandler for Handler {
                     )
                     .required(false),
                 ),
+            CreateCommand::new("afk")
+                .description("Set or clear your AFK status")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "reason",
+                        "Leave empty to clear AFK",
+                    )
+                    .required(false),
+                ),
+            CreateCommand::new("remind")
+                .description("Create a durable reminder")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "time",
+                        "Examples: 10m, 2h, 1d",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "text",
+                        "Reminder text",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("tag")
+                .description("Show a saved tag")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "name",
+                        "Tag name",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("tags").description("List saved tags"),
+            CreateCommand::new("tag-set")
+                .description("Create or update a tag")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "name",
+                        "Tag name",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "content",
+                        "Tag response",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("tag-delete")
+                .description("Delete a tag")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "name",
+                        "Tag name",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("rank")
+                .description("Show a member's XP rank")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::User,
+                        "user",
+                        "Member",
+                    )
+                    .required(false),
+                ),
+            CreateCommand::new("leaderboard").description("Show the XP leaderboard"),
+            CreateCommand::new("serverstats").description("Show basic server statistics"),
         ];
         if let Err(error) = Command::set_global_commands(&ctx.http, commands).await {
             tracing::error!(%error, "global command registration failed");
@@ -148,6 +256,35 @@ impl EventHandler for Handler {
         let Some(guild_id) = message.guild_id else {
             return;
         };
+        let guild_text = guild_id.to_string();
+        let user_text = message.author.id.to_string();
+        let _ = self.store.record_message(
+            &guild_text,
+            &chrono::Utc::now().format("%Y-%m-%d").to_string(),
+        );
+        let xp_key = format!("{guild_text}:{user_text}");
+        let should_award = {
+            let mut ticks = self.xp_ticks.lock().expect("xp mutex poisoned");
+            let value = ticks.entry(xp_key).or_default();
+            *value = value.saturating_add(1);
+            *value % 5 == 0
+        };
+        if should_award {
+            let _ = self.store.add_xp(&guild_text, &user_text, 5);
+        }
+        if let Ok(Some(afk)) = self.store.get_afk(&guild_text, &user_text) {
+            let _ = self.store.clear_afk(&guild_text, &user_text);
+            let _ = message
+                .channel_id
+                .say(
+                    &ctx.http,
+                    format!(
+                        "Bem-vindo de volta, <@{}>. O teu AFK foi removido.",
+                        afk.user_id
+                    ),
+                )
+                .await;
+        }
         let key = format!("{}:{}", guild_id, message.author.id);
         let now = Instant::now();
         let count = {
@@ -201,6 +338,8 @@ pub async fn run(config: &Config) -> Result<()> {
         .event_handler(Handler {
             store,
             spam: Arc::new(Mutex::new(HashMap::new())),
+            xp_ticks: Arc::new(Mutex::new(HashMap::new())),
+            scheduler_started: Arc::new(AtomicBool::new(false)),
             entitlements: EntitlementClient::new(
                 config.entitlement_url.clone(),
                 config.entitlement_secret.clone(),
@@ -279,6 +418,103 @@ impl Handler {
                     }
                 }
             }
+            "afk" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let reason = command.data.options.iter().find_map(|option| match &option.value {
+                    CommandDataOptionValue::String(value) => Some(value.as_str()),
+                    _ => None,
+                });
+                if let Some(reason) = reason.filter(|value| !value.trim().is_empty()) {
+                    self.store.set_afk(&guild_id.to_string(), &command.user.id.to_string(), reason)?;
+                    format!("AFK definido: {reason}")
+                } else if self.store.clear_afk(&guild_id.to_string(), &command.user.id.to_string())? {
+                    "AFK removido.".to_string()
+                } else {
+                    "Não tinhas AFK definido.".to_string()
+                }
+            }
+            "remind" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let time = option_string(command, "time").unwrap_or_default();
+                let text = option_string(command, "text").unwrap_or_default();
+                let Some(delay) = parse_duration(&time) else {
+                    return respond(ctx, command, "Duração inválida. Usa formatos como 10m, 2h ou 1d.").await;
+                };
+                if text.len() > 500 {
+                    return respond(ctx, command, "O lembrete não pode exceder 500 caracteres.").await;
+                }
+                let id = self.store.schedule(
+                    &guild_id.to_string(),
+                    &command.user.id.to_string(),
+                    chrono::Utc::now().timestamp_millis() + delay,
+                    &serde_json::json!({"channel_id": command.channel_id.to_string(), "text": text}).to_string(),
+                )?;
+                format!("Lembrete #{id} agendado.")
+            }
+            "tag" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let name = option_string(command, "name").unwrap_or_default().to_lowercase();
+                match self.store.get_tag(&guild_id.to_string(), &name)? {
+                    Some(tag) => tag.content.replace("{user}", &format!("<@{}>", command.user.id)),
+                    None => "Tag não encontrada.".to_string(),
+                }
+            }
+            "tags" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let names = self.store.list_tags(&guild_id.to_string(), 100)?;
+                if names.is_empty() { "Ainda não existem tags.".to_string() } else { names.join(", ") }
+            }
+            "tag-set" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let name = option_string(command, "name").unwrap_or_default().to_lowercase();
+                let content = option_string(command, "content").unwrap_or_default();
+                if !(1..=32).contains(&name.len()) || content.len() > 1_000 {
+                    return respond(ctx, command, "Nome ou conteúdo inválido.").await;
+                }
+                self.store.upsert_tag(&guild_id.to_string(), &name, &content, &command.user.id.to_string())?;
+                format!("Tag `{name}` guardada.")
+            }
+            "tag-delete" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let name = option_string(command, "name").unwrap_or_default().to_lowercase();
+                if self.store.delete_tag(&guild_id.to_string(), &name)? { format!("Tag `{name}` eliminada.") } else { "Tag não encontrada.".to_string() }
+            }
+            "rank" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let user = command.data.options.iter().find_map(|option| match option.value { CommandDataOptionValue::User(user) => Some(user), _ => None }).unwrap_or(command.user.id);
+                let xp = self.store.level_for(&guild_id.to_string(), &user.to_string())?;
+                let level = (xp / 100) + 1;
+                format!("<@{}> está no nível {} com {} XP.", user, level, xp)
+            }
+            "leaderboard" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let rows = self.store.top_levels(&guild_id.to_string(), 10)?;
+                if rows.is_empty() { "Ainda não existem dados de XP.".to_string() } else { rows.into_iter().enumerate().map(|(index, row)| format!("{}. <@{}> — {} XP", index + 1, row.user_id, row.xp)).collect::<Vec<_>>().join("\n") }
+            }
+            "serverstats" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let rows = self.store.stats_for(&guild_id.to_string(), 7)?;
+                let messages: i64 = rows.iter().map(|(_, messages, _, _)| messages).sum();
+                format!("Mensagens registadas nos últimos {} dias: {}.", rows.len(), messages)
+            }
             _ => "Comando desconhecido.".to_string(),
         };
         command
@@ -306,5 +542,72 @@ async fn respond(ctx: &Context, command: &CommandInteraction, content: &str) -> 
             ),
         )
         .await?;
+    Ok(())
+}
+
+fn option_string<'a>(command: &'a CommandInteraction, name: &str) -> Option<&'a str> {
+    command.data.options.iter().find_map(|option| {
+        (option.name == name).then_some(match &option.value {
+            CommandDataOptionValue::String(value) => value.as_str(),
+            _ => return None,
+        })
+    })
+}
+
+fn parse_duration(raw: &str) -> Option<i64> {
+    let value = raw.trim();
+    let (number, unit) = value.split_at(value.len().checked_sub(1)?);
+    let amount = number.parse::<i64>().ok()?.checked_mul(match unit {
+        "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        _ => return None,
+    })?;
+    (amount > 0 && amount <= 365 * 86_400_000).then_some(amount)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_duration;
+
+    #[test]
+    fn duration_parser_is_bounded_and_explicit() {
+        assert_eq!(parse_duration("10m"), Some(600_000));
+        assert_eq!(parse_duration("2h"), Some(7_200_000));
+        assert_eq!(parse_duration("0m"), None);
+        assert_eq!(parse_duration("10weeks"), None);
+    }
+}
+
+async fn deliver_scheduled_action(
+    http: &serenity::http::Http,
+    store: &Store,
+    id: i64,
+    action_type: &str,
+    target_id: &str,
+    payload: &str,
+) -> Result<()> {
+    let value: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+    let channel_id = value
+        .get("channel_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(ChannelId::new);
+    if let Some(channel_id) = channel_id {
+        let text = value
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Tens um lembrete pendente.");
+        let content = if action_type == "reminder" {
+            format!("<@{target_id}> ⏰ {text}")
+        } else {
+            text.to_string()
+        };
+        channel_id
+            .send_message(http, serenity::all::CreateMessage::new().content(content))
+            .await?;
+    }
+    store.delete_scheduled_action(id)?;
     Ok(())
 }

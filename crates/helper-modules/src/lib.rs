@@ -124,7 +124,7 @@ pub fn start_scheduler(store: Store) -> JoinHandle<()> {
             interval.tick().await;
             match store.due_scheduled_actions(chrono::Utc::now().timestamp_millis(), 100) {
                 Ok(actions) => {
-                    for (id, guild_id, kind, target_id) in actions {
+                    for (id, guild_id, kind, target_id, _payload) in actions {
                         tracing::info!(%id, %guild_id, %kind, %target_id, "dispatching scheduled helper action");
                         if let Err(error) = store.delete_scheduled_action(id) {
                             tracing::error!(%error, %id, "failed to ack scheduled action");
