@@ -355,16 +355,17 @@ impl Store {
         limit: u64,
         now: DateTime<Utc>,
     ) -> Result<bool> {
-        let period = now.format("%Y-%m").to_string();
-        let conn = self.conn.lock().expect("store mutex poisoned");
-        let tx = conn.unchecked_transaction()?;
-        let used: u64 = tx.query_row("SELECT used FROM helper_usage WHERE guild_id=?1 AND user_id=?2 AND quota_key=?3 AND period=?4", params![guild_id,user_id,key,period], |r| r.get::<_, i64>(0)).optional()?.unwrap_or(0).try_into().unwrap_or(0);
-        if used >= limit {
+        if limit == 0 {
             return Ok(false);
         }
-        tx.execute("INSERT INTO helper_usage(guild_id,user_id,quota_key,period,used) VALUES(?1,?2,?3,?4,1) ON CONFLICT(guild_id,user_id,quota_key,period) DO UPDATE SET used=used+1", params![guild_id,user_id,key,period])?;
-        tx.commit()?;
-        Ok(true)
+        let period = now.format("%Y-%m").to_string();
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let changed = conn.execute(
+            "INSERT INTO helper_usage(guild_id,user_id,quota_key,period,used) VALUES(?1,?2,?3,?4,1) ON CONFLICT(guild_id,user_id,quota_key,period) DO UPDATE SET used=used+1 WHERE used < ?5",
+            params![guild_id, user_id, key, period, limit],
+        )?;
+        Ok(changed > 0)
     }
 
     pub fn due_scheduled_actions(&self, now_ms: i64, limit: u32) -> Result<Vec<ScheduledAction>> {
