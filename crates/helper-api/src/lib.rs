@@ -57,6 +57,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/quotas", get(quotas))
         .route("/api/modules", get(modules))
         .route("/api/permissions", get(permissions))
+        .route("/api/security/health", get(security_health))
         .route("/api/analytics", get(analytics))
         .route("/api/privacy/export", get(privacy_export))
         .route("/api/privacy/receipt", get(privacy_receipt))
@@ -434,6 +435,79 @@ async fn permissions(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let _ = require_auth(&state, &headers)?;
     Ok(Json(permission_passport_document()))
+}
+
+async fn security_health(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let guild_id = &claims.guild_id;
+    let setting = |key: &str| {
+        state
+            .store
+            .get_setting(guild_id, key)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "false".into())
+    };
+    let mut findings = Vec::new();
+    let mut penalty = 0_u64;
+    for (key, label, severity, points, remediation) in [
+        (
+            "security.anti_raid.enabled",
+            "Anti-raid desativado",
+            "high",
+            25,
+            "Ativa anti-raid com /anti-raid e testa primeiro em shadow mode.",
+        ),
+        (
+            "security.anti_nuke.enabled",
+            "Anti-nuke desativado",
+            "high",
+            25,
+            "Ativa anti-nuke com limiar conservador e mantém revisão humana.",
+        ),
+        (
+            "security.join_gate.enabled",
+            "Join gate desativado",
+            "medium",
+            15,
+            "Configura um cargo de verificação e ativa o join gate.",
+        ),
+    ] {
+        let value = setting(key);
+        if value != "true" {
+            penalty += points;
+            findings.push(serde_json::json!({
+                "id": key,
+                "label": label,
+                "severity": severity,
+                "points": points,
+                "evidence": {"setting": key, "value": value},
+                "remediation": remediation
+            }));
+        }
+    }
+    let shadow_mode = setting("security.shadow_mode") == "true";
+    if shadow_mode {
+        findings.push(serde_json::json!({
+            "id": "security.shadow_mode",
+            "label": "Shadow mode ativo",
+            "severity": "info",
+            "points": 0,
+            "evidence": {"setting": "security.shadow_mode", "value": "true"},
+            "remediation": "Desativa depois de rever falsos positivos e confirmar a política."
+        }));
+    }
+    Ok(Json(serde_json::json!({
+        "version": 1,
+        "guildId": guild_id,
+        "score": 100_u64.saturating_sub(penalty),
+        "findings": findings,
+        "method": "deterministic_settings_v1",
+        "limitations": ["Discord role hierarchy, channel overwrites and backup restore require a live diagnostic check"]
+    })))
 }
 
 fn permission_passport_document() -> serde_json::Value {
@@ -935,6 +1009,29 @@ mod tests {
         let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(body["permissions"].as_array().unwrap().len() >= 8);
+
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/security/health")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["guildId"], "guild-a");
+        assert_eq!(body["score"], 35);
+        assert!(
+            body["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|finding| finding["id"] == "security.anti_nuke.enabled")
+        );
 
         let response = router(state(store.clone()))
             .oneshot(
