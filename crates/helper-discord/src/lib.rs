@@ -622,6 +622,32 @@ impl EventHandler for Handler {
                     )
                     .required(true),
                 ),
+            CreateCommand::new("join-gate")
+                .description("Configure the bounded new-member join gate")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Boolean,
+                        "enabled",
+                        "Enable or disable the gate",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Role,
+                        "role",
+                        "Role applied to new members while they verify",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "min_age_days",
+                        "Flag accounts younger than this many days (0-365)",
+                    )
+                    .required(false),
+                ),
         ];
         if let Err(error) = Command::set_global_commands(&ctx.http, commands).await {
             tracing::error!(%error, "global command registration failed");
@@ -668,6 +694,60 @@ impl EventHandler for Handler {
         let guild_id = new_member.guild_id;
         let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let _ = self.store.record_join(&guild_id.to_string(), &day);
+        let guild_text = guild_id.to_string();
+        let gate_enabled = self
+            .store
+            .get_setting(&guild_text, "security.join_gate.enabled")
+            .ok()
+            .flatten()
+            .is_some_and(|value| value == "true");
+        if gate_enabled {
+            if let Ok(Some(raw_role)) = self
+                .store
+                .get_setting(&guild_text, "security.join_gate.role_id")
+                && let Ok(role_id) = raw_role.parse::<u64>()
+            {
+                let _ = new_member.add_role(&ctx.http, RoleId::new(role_id)).await;
+            }
+            let minimum_age = self
+                .store
+                .get_setting(&guild_text, "security.join_gate.min_age_days")
+                .ok()
+                .flatten()
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or(0)
+                .clamp(0, 365);
+            let account_age_days = account_age_days(
+                chrono::Utc::now().timestamp(),
+                new_member.user.created_at().unix_timestamp(),
+            );
+            if account_age_days < minimum_age {
+                let reason = format!(
+                    "Join gate: conta com {account_age_days} dia(s); mínimo configurado {minimum_age}"
+                );
+                let _ = self.store.record_case(
+                    &guild_text,
+                    "join_gate",
+                    &new_member.user.id.to_string(),
+                    "helper",
+                    &reason,
+                    None,
+                );
+                if let Ok(guild) = guild_id.to_partial_guild(&ctx.http).await
+                    && let Some(channel_id) = guild.system_channel_id
+                {
+                    let _ = channel_id
+                        .say(
+                            &ctx.http,
+                            format!(
+                                "⚠️ <@{}> precisa de verificação: conta demasiado recente.",
+                                new_member.user.id
+                            ),
+                        )
+                        .await;
+                }
+            }
+        }
         if let Ok(guild) = guild_id.to_partial_guild(&ctx.http).await
             && let Some(channel_id) = guild.system_channel_id
         {
@@ -1399,6 +1479,45 @@ impl Handler {
                 self.store.clear_quarantine(&guild_id.to_string(), &target.to_string())?;
                 format!("Quarantine removida de <@{}>; {} cargo(s) restaurado(s).", target, restored)
             }
+            "join-gate" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let enabled = option_bool(command, "enabled").unwrap_or(false);
+                let minimum_age = option_i64(command, "min_age_days").unwrap_or(0).clamp(0, 365);
+                self.store.set_setting(
+                    &guild_id.to_string(),
+                    "security.join_gate.enabled",
+                    if enabled { "true" } else { "false" },
+                )?;
+                self.store.set_setting(
+                    &guild_id.to_string(),
+                    "security.join_gate.min_age_days",
+                    &minimum_age.to_string(),
+                )?;
+                if let Some(role_id) = command.data.options.iter().find_map(|option| {
+                    (option.name == "role").then_some(match option.value {
+                        CommandDataOptionValue::Role(role) => role,
+                        _ => return None,
+                    })
+                }) {
+                    self.store.set_setting(
+                        &guild_id.to_string(),
+                        "security.join_gate.role_id",
+                        &role_id.to_string(),
+                    )?;
+                }
+                if enabled {
+                    let role_note = if option_role(command, "role").is_some() {
+                        "; cargo de verificação atualizado"
+                    } else {
+                        "; configura um cargo para restringir canais"
+                    };
+                    format!("Join gate ativado para contas com menos de {minimum_age} dia(s){role_note}.")
+                } else {
+                    "Join gate desativado; as definições guardadas podem ser reativadas.".to_string()
+                }
+            }
             "workflow-create" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
@@ -1859,12 +1978,34 @@ fn option_i64(command: &CommandInteraction, name: &str) -> Option<i64> {
     })
 }
 
+fn option_bool(command: &CommandInteraction, name: &str) -> Option<bool> {
+    command.data.options.iter().find_map(|option| {
+        (option.name == name).then_some(match option.value {
+            CommandDataOptionValue::Boolean(value) => value,
+            _ => return None,
+        })
+    })
+}
+
+fn option_role(command: &CommandInteraction, name: &str) -> Option<RoleId> {
+    command.data.options.iter().find_map(|option| {
+        (option.name == name).then_some(match option.value {
+            CommandDataOptionValue::Role(role) => role,
+            _ => return None,
+        })
+    })
+}
+
 fn truncate(value: &str, max_chars: usize) -> String {
     let mut output = value.chars().take(max_chars).collect::<String>();
     if value.chars().count() > max_chars {
         output.push('…');
     }
     output
+}
+
+fn account_age_days(now_timestamp: i64, created_timestamp: i64) -> i64 {
+    ((now_timestamp - created_timestamp) / 86_400).max(0)
 }
 
 async fn finish_giveaway(http: &serenity::http::Http, store: &Store, id: i64) -> Result<bool> {
@@ -1977,6 +2118,7 @@ fn required_permission(command: &str) -> Option<Permissions> {
         "ticket-panel" | "ticket-config" => Some(Permissions::MANAGE_CHANNELS),
         "slowmode" => Some(Permissions::MANAGE_CHANNELS),
         "rolepanel" => Some(Permissions::MANAGE_ROLES),
+        "join-gate" => Some(Permissions::MANAGE_ROLES),
         "tag-set" | "tag-delete" | "giveaway-start" | "giveaway-end" | "starboard-set"
         | "workflow-create" | "workflow-delete" => Some(Permissions::MANAGE_GUILD),
         "suggestion" => Some(Permissions::MANAGE_MESSAGES),
@@ -2061,7 +2203,7 @@ async fn deliver_scheduled_action(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_duration;
+    use super::{account_age_days, parse_duration};
 
     #[test]
     fn duration_parser_is_bounded_and_explicit() {
@@ -2069,5 +2211,7 @@ mod tests {
         assert_eq!(parse_duration("2h"), Some(7_200_000));
         assert_eq!(parse_duration("0m"), None);
         assert_eq!(parse_duration("10weeks"), None);
+        assert_eq!(account_age_days(172800, 86400), 1);
+        assert_eq!(account_age_days(86400, 172800), 0);
     }
 }
