@@ -56,6 +56,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/stats", get(stats))
         .route("/api/quotas", get(quotas))
         .route("/api/modules", get(modules))
+        .route("/api/permissions", get(permissions))
         .route("/api/analytics", get(analytics))
         .route("/api/privacy/export", get(privacy_export))
         .route("/api/privacy/delete", post(privacy_delete))
@@ -426,6 +427,101 @@ async fn modules(
     })))
 }
 
+async fn permissions(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let _ = require_auth(&state, &headers)?;
+    Ok(Json(permission_passport_document()))
+}
+
+fn permission_passport_document() -> serde_json::Value {
+    serde_json::json!({
+        "permissions": [
+            {
+                "key": "VIEW_CHANNEL",
+                "scope": "base",
+                "modules": ["Core", "Support", "Events", "Community"],
+                "risk": "low",
+                "data": "channel visibility and metadata",
+                "missingConsequence": "the Helper cannot inspect or respond in that channel"
+            },
+            {
+                "key": "SEND_MESSAGES",
+                "scope": "base",
+                "modules": ["Core", "Support", "Events", "Community"],
+                "risk": "low",
+                "data": "bot responses and operational notices",
+                "missingConsequence": "the Helper can detect a flow but cannot notify members"
+            },
+            {
+                "key": "READ_MESSAGE_HISTORY",
+                "scope": "base",
+                "modules": ["Core", "Support", "Insights"],
+                "risk": "low",
+                "data": "message history needed for transcripts and context",
+                "missingConsequence": "transcripts and historical context are incomplete"
+            },
+            {
+                "key": "EMBED_LINKS",
+                "scope": "base",
+                "modules": ["Studio", "Support", "Events", "Community"],
+                "risk": "low",
+                "data": "formatted embeds and previews",
+                "missingConsequence": "messages fall back to plain text"
+            },
+            {
+                "key": "MANAGE_MESSAGES",
+                "scope": "optional",
+                "modules": ["Security"],
+                "risk": "medium",
+                "data": "message deletion for configured moderation actions",
+                "missingConsequence": "purge and delete-based enforcement remain unavailable"
+            },
+            {
+                "key": "MODERATE_MEMBERS",
+                "scope": "optional",
+                "modules": ["Security"],
+                "risk": "high",
+                "data": "timeouts and moderation cases",
+                "missingConsequence": "timeout enforcement is unavailable; cases remain auditable"
+            },
+            {
+                "key": "MANAGE_ROLES",
+                "scope": "optional",
+                "modules": ["Security", "Community", "Events"],
+                "risk": "high",
+                "data": "join-gate, self-roles and temporary event roles",
+                "missingConsequence": "role assignment and quarantine restoration are unavailable"
+            },
+            {
+                "key": "MANAGE_CHANNELS",
+                "scope": "optional",
+                "modules": ["Support", "Events"],
+                "risk": "high",
+                "data": "private ticket channels and temporary event channels",
+                "missingConsequence": "ticket and temporary-channel workflows are unavailable"
+            },
+            {
+                "key": "MESSAGE_CONTENT_INTENT",
+                "scope": "gateway",
+                "modules": ["Security", "Automate", "Insights"],
+                "risk": "high",
+                "data": "message content for bounded rules and workflows",
+                "missingConsequence": "content-based detection runs in degraded mode"
+            },
+            {
+                "key": "GUILD_MEMBERS_INTENT",
+                "scope": "gateway",
+                "modules": ["Security", "Community"],
+                "risk": "high",
+                "data": "member joins, leaves and account-age checks",
+                "missingConsequence": "join-gate and member lifecycle features are incomplete"
+            }
+        ]
+    })
+}
+
 async fn analytics(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -789,6 +885,21 @@ mod tests {
         assert_eq!(body["cases"].as_array().unwrap().len(), 1);
         assert_eq!(body["cases"][0]["guild_id"], "guild-a");
         assert!(!body.to_string().contains("guild-b"));
+
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/permissions")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(body["permissions"].as_array().unwrap().len() >= 8);
 
         let import = serde_json::json!({
             "version": 1,

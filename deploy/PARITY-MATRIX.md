@@ -4,7 +4,7 @@ This matrix is a release gate, not a claim that the migration is complete.
 
 | Area | Rust status | Evidence / remaining gate |
 | --- | --- | --- |
-| Core gateway and API | Implemented | `cargo test --workspace`, release build, API smoke; authenticated multi-guild isolation and versioned config export/import tests |
+| Core gateway and API | Implemented | `cargo test --workspace`, release build, API smoke; authenticated multi-guild isolation, Permission Passport and versioned config export/import tests |
 | OAuth and sessions | Implemented with PKCE | HMAC state, S256 verifier, guild permission recheck; legacy token route is opt-in |
 | Moderation | Partial but growing | warn, violation, note, reason, timeout, untimeout, kick, ban, unban, purge, quarantine, native AutoMod audit, bounded join-gate, configurable join-burst anti-raid latch, Audit Log anti-nuke containment and explicit shadow mode; role restoration/advanced recovery remains |
 | Support | Functional core | private ticket panel, claim, close, routing, transcripts and durable SLA reminders; richer escalation remains |

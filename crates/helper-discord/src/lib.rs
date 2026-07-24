@@ -69,6 +69,7 @@ impl EventHandler for Handler {
             CreateCommand::new("help").description("Show Helper modules"),
             CreateCommand::new("dashboard").description("Open the Helper dashboard"),
             CreateCommand::new("plan").description("Show the active Vozen plan"),
+            CreateCommand::new("permissions").description("Show the Helper Permission Passport"),
             CreateCommand::new("cases").description("List recent moderation cases"),
             CreateCommand::new("warn")
                 .description("Create a moderation warning")
@@ -1380,6 +1381,7 @@ impl Handler {
                     }
                 } else { "Entitlements central ainda não estão configurados nesta instalação.".to_string() }
             }
+            "permissions" => permission_passport_message(),
             "cases" => {
                 if let Some(guild_id) = command.guild_id {
                     let cases = self.store.recent_cases(&guild_id.to_string(), 10)?;
@@ -2678,6 +2680,10 @@ fn parse_duration(raw: &str) -> Option<i64> {
 
 fn shadow_mode_enabled(raw: Option<&str>) -> bool {
     raw.is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+fn permission_passport_message() -> String {
+    "**Permission Passport**\nBase: `View Channels`, `Send Messages`, `Embed Links`, `Read Message History`, `Use Application Commands`.\nSecurity opcional: `Manage Messages`, `Moderate Members`, `Kick Members`, `Ban Members`, `Manage Roles`.\nSupport/Events opcionais: `Manage Channels`, `Manage Threads`, `Create Private Threads`.\nGateway: `MESSAGE_CONTENT` e `GUILD_MEMBERS` só suportam módulos que precisam deles.\nCada permissão extra tem um módulo e uma consequência explícita; usa o painel para comparar o concedido com o necessário.".to_string()
 }
 
 fn parse_scheduled_event_window(
