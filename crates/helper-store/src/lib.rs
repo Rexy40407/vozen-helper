@@ -1,6 +1,6 @@
 //! SQLite persistence with an intentionally small, auditable surface.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use helper_contracts::{EntitlementSnapshot, SessionClaims};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -122,6 +122,13 @@ pub struct WorkflowRecord {
     pub payload: String,
     pub enabled: bool,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct ConfigImportSummary {
+    pub settings: usize,
+    pub tags: usize,
+    pub workflows: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -465,6 +472,175 @@ impl Store {
             "tags": tags,
             "workflows": workflows,
         }))
+    }
+
+    /// Import only the versioned, guild-scoped configuration produced by
+    /// `export_guild`. The target guild always comes from the authenticated
+    /// caller; the source `guildId` in the document is informational only.
+    /// Secrets and unsupported automation shapes are rejected before any write.
+    pub fn import_guild_config(
+        &self,
+        guild_id: &str,
+        document: &serde_json::Value,
+    ) -> Result<ConfigImportSummary> {
+        if guild_id.trim().is_empty() || guild_id.len() > 64 {
+            bail!("invalid_target_guild");
+        }
+        if document.to_string().len() > 1_000_000 {
+            bail!("config_too_large");
+        }
+        let object = document
+            .as_object()
+            .ok_or_else(|| anyhow!("invalid_config_document"))?;
+        if object.get("version").and_then(serde_json::Value::as_i64) != Some(1) {
+            bail!("unsupported_config_version");
+        }
+        let settings = object
+            .get("settings")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| anyhow!("invalid_settings"))?;
+        let tags = object
+            .get("tags")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| anyhow!("invalid_tags"))?;
+        let workflows = object
+            .get("workflows")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| anyhow!("invalid_workflows"))?;
+        if settings.len() > 200 || tags.len() > 100 || workflows.len() > 100 {
+            bail!("config_limits_exceeded");
+        }
+
+        let secret_needles = ["secret", "token", "webhook", "credential"];
+        let mut parsed_settings = Vec::with_capacity(settings.len());
+        for item in settings {
+            let key = item
+                .get("key")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("invalid_setting_key"))?
+                .trim()
+                .to_string();
+            let value = item
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("invalid_setting_value"))?
+                .to_string();
+            let lower_key = key.to_ascii_lowercase();
+            if !(1..=100).contains(&key.len()) || value.len() > 4_000 {
+                bail!("invalid_setting_bounds");
+            }
+            if secret_needles
+                .iter()
+                .any(|needle| lower_key.contains(needle))
+            {
+                bail!("secret_setting_rejected");
+            }
+            parsed_settings.push((key, value));
+        }
+
+        let mut parsed_tags = Vec::with_capacity(tags.len());
+        for item in tags {
+            let name = item
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("invalid_tag_name"))?
+                .trim()
+                .to_string();
+            let content = item
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("invalid_tag_content"))?
+                .to_string();
+            let author_id = item
+                .get("authorId")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("invalid_tag_author"))?
+                .trim()
+                .to_string();
+            if !(1..=32).contains(&name.len())
+                || !(1..=2_000).contains(&content.len())
+                || !(1..=64).contains(&author_id.len())
+            {
+                bail!("invalid_tag_bounds");
+            }
+            parsed_tags.push((name, content, author_id));
+        }
+
+        let mut parsed_workflows = Vec::with_capacity(workflows.len());
+        for item in workflows {
+            let name = item
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("invalid_workflow_name"))?
+                .trim()
+                .to_string();
+            let trigger = item
+                .get("trigger")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("invalid_workflow_trigger"))?
+                .to_string();
+            let condition = item
+                .get("condition")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let action = item
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("invalid_workflow_action"))?
+                .to_string();
+            let payload = item
+                .get("payload")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("invalid_workflow_payload"))?
+                .trim()
+                .to_string();
+            let enabled = item
+                .get("enabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            if !(1..=50).contains(&name.len())
+                || trigger != "message"
+                || action != "reply"
+                || condition.len() > 200
+                || !(1..=1_000).contains(&payload.len())
+            {
+                bail!("unsupported_workflow");
+            }
+            parsed_workflows.push((name, condition, payload, enabled));
+        }
+
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.unchecked_transaction()?;
+        for (key, value) in &parsed_settings {
+            tx.execute(
+                "INSERT INTO settings(guild_id,key,value,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(guild_id,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                params![guild_id, key, value, Utc::now().timestamp_millis()],
+            )?;
+        }
+        for (name, content, author_id) in &parsed_tags {
+            tx.execute(
+                "INSERT INTO tags(guild_id,name,content,author_id,created_at) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(guild_id,name) DO UPDATE SET content=excluded.content,author_id=excluded.author_id,created_at=excluded.created_at",
+                params![guild_id, name, content, author_id, Utc::now().timestamp_millis()],
+            )?;
+        }
+        for (name, condition, payload, enabled) in &parsed_workflows {
+            tx.execute(
+                "DELETE FROM workflows WHERE guild_id=?1 AND name=?2 AND trigger='message'",
+                params![guild_id, name],
+            )?;
+            tx.execute(
+                "INSERT INTO workflows(guild_id,name,trigger,condition,action,payload,enabled,created_at) VALUES(?1,?2,'message',?3,'reply',?4,?5,?6)",
+                params![guild_id, name, condition, payload, i64::from(*enabled), Utc::now().timestamp_millis()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(ConfigImportSummary {
+            settings: parsed_settings.len(),
+            tags: parsed_tags.len(),
+            workflows: parsed_workflows.len(),
+        })
     }
 
     /// Erase all guild-scoped operational data. User entitlements and login
@@ -1133,5 +1309,50 @@ mod tests {
         );
         assert!(store.get_tag("g1", "rules").unwrap().is_none());
         assert_eq!(store.recent_cases("g2", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn guild_config_import_is_validated_and_scoped() {
+        let store = Store::open(":memory:").unwrap();
+        store
+            .set_setting("source", "welcome.channel", "10")
+            .unwrap();
+        store
+            .upsert_tag("source", "rules", "be kind", "u1")
+            .unwrap();
+        store
+            .create_workflow("source", "hello", "message", "hi", "reply", "Hello")
+            .unwrap();
+        let export = store.export_guild("source").unwrap();
+
+        let imported = store.import_guild_config("target", &export).unwrap();
+        assert_eq!(imported.settings, 1);
+        assert_eq!(imported.tags, 1);
+        assert_eq!(imported.workflows, 1);
+        assert_eq!(
+            store.get_setting("target", "welcome.channel").unwrap(),
+            Some("10".into())
+        );
+        assert_eq!(
+            store.get_tag("target", "rules").unwrap().unwrap().content,
+            "be kind"
+        );
+        assert_eq!(
+            store.active_workflows("target", "message").unwrap().len(),
+            1
+        );
+        assert!(
+            store
+                .get_setting("source", "welcome.channel")
+                .unwrap()
+                .is_some()
+        );
+
+        let mut secret = export;
+        secret["settings"] = serde_json::json!([{
+            "key": "webhook_secret",
+            "value": "must-reject"
+        }]);
+        assert!(store.import_guild_config("target", &secret).is_err());
     }
 }

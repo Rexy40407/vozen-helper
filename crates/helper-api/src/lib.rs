@@ -59,6 +59,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/analytics", get(analytics))
         .route("/api/privacy/export", get(privacy_export))
         .route("/api/privacy/delete", post(privacy_delete))
+        .route("/api/config/import", post(import_config))
         .route("/api/workflows", get(workflows).post(create_workflow))
         .route("/api/workflows/{id}", delete(delete_workflow))
         .with_state(Arc::new(state))
@@ -498,6 +499,53 @@ async fn privacy_delete(
     })))
 }
 
+async fn import_config(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(document): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let summary = state
+        .store
+        .import_guild_config(&claims.guild_id, &document)
+        .map_err(|error| {
+            let code = error.to_string();
+            let invalid = [
+                "invalid_target_guild",
+                "config_too_large",
+                "invalid_config_document",
+                "unsupported_config_version",
+                "invalid_settings",
+                "invalid_tags",
+                "invalid_workflows",
+                "config_limits_exceeded",
+                "invalid_setting_key",
+                "invalid_setting_value",
+                "invalid_setting_bounds",
+                "secret_setting_rejected",
+                "invalid_tag_name",
+                "invalid_tag_content",
+                "invalid_tag_author",
+                "invalid_tag_bounds",
+                "invalid_workflow_name",
+                "invalid_workflow_trigger",
+                "invalid_workflow_action",
+                "invalid_workflow_payload",
+                "unsupported_workflow",
+            ];
+            if invalid.contains(&code.as_str()) {
+                client_error(StatusCode::BAD_REQUEST, "invalid_config_import")
+            } else {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
+            }
+        })?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "guildId": claims.guild_id,
+        "imported": summary,
+    })))
+}
+
 #[derive(Debug, Deserialize)]
 struct WorkflowRequest {
     name: String,
@@ -675,4 +723,122 @@ pub async fn serve(bind_addr: &str, state: ApiState) -> Result<()> {
     tracing::info!(%bind_addr, "helper api listening");
     axum::serve(listener, router(state)).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use helper_store::Store;
+    use tower::ServiceExt;
+
+    fn state(store: Store) -> ApiState {
+        ApiState {
+            store,
+            session_secret: "test-session-secret-with-at-least-32-bytes".into(),
+            oauth_client_id: "client".into(),
+            oauth_client_secret: "secret".into(),
+            oauth_redirect_uri: "https://example.test/callback".into(),
+            allow_legacy_session: false,
+            allowed_origin: None,
+        }
+    }
+
+    fn claims(guild_id: &str) -> SessionClaims {
+        let now = Utc::now();
+        SessionClaims {
+            session_id: Uuid::new_v4(),
+            user_id: "user-1".into(),
+            guild_id: guild_id.into(),
+            issued_at: now,
+            expires_at: now + Duration::hours(1),
+            last_seen_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_api_isolates_guild_data_and_import_target() {
+        let store = Store::open(":memory:").unwrap();
+        store
+            .record_case("guild-a", "warn", "user-a", "mod", "a", None)
+            .unwrap();
+        store
+            .record_case("guild-b", "warn", "user-b", "mod", "b", None)
+            .unwrap();
+        let session = claims("guild-a");
+        store.save_session(&session).unwrap();
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        let app = router(state(store.clone()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/cases")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["cases"].as_array().unwrap().len(), 1);
+        assert_eq!(body["cases"][0]["guild_id"], "guild-a");
+        assert!(!body.to_string().contains("guild-b"));
+
+        let import = serde_json::json!({
+            "version": 1,
+            "guildId": "guild-b",
+            "settings": [{"key": "welcome.channel", "value": "123"}],
+            "tags": [],
+            "workflows": []
+        });
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/config/import")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(import.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            store.get_setting("guild-a", "welcome.channel").unwrap(),
+            Some("123".into())
+        );
+        assert!(
+            store
+                .get_setting("guild-b", "welcome.channel")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn session_signature_binds_guild_claim() {
+        let original = claims("guild-a");
+        let token = sign_session(&original, "test-session-secret-with-at-least-32-bytes");
+        assert_eq!(
+            verify_session(&token, "test-session-secret-with-at-least-32-bytes")
+                .unwrap()
+                .guild_id,
+            "guild-a"
+        );
+        let mut parts = token.split('.');
+        let payload = URL_SAFE_NO_PAD.decode(parts.next().unwrap()).unwrap();
+        let signature = parts.next().unwrap();
+        let tampered = String::from_utf8(payload)
+            .unwrap()
+            .replace("guild-a", "guild-b");
+        let forged = format!("{}.{}", URL_SAFE_NO_PAD.encode(tampered), signature);
+        assert!(verify_session(&forged, "test-session-secret-with-at-least-32-bytes").is_none());
+    }
 }
