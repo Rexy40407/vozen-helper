@@ -498,6 +498,32 @@ impl EventHandler for Handler {
                     .required(true),
                 ),
             CreateCommand::new("ticket-panel").description("Create a support ticket panel"),
+            CreateCommand::new("ticket-config")
+                .description("Configure ticket routing, transcripts and SLA (staff)")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Role,
+                        "staff_role",
+                        "Role that can see tickets",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Channel,
+                        "transcript_channel",
+                        "Transcript channel",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "sla_minutes",
+                        "SLA reminder in minutes",
+                    )
+                    .required(false),
+                ),
             CreateCommand::new("rolepanel")
                 .description("Create a self-role panel")
                 .add_option(
@@ -565,6 +591,34 @@ impl EventHandler for Handler {
                         serenity::all::CommandOptionType::User,
                         "user",
                         "User",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("quarantine")
+                .description("Remove a member's roles and quarantine them")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::User,
+                        "user",
+                        "Member",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "reason",
+                        "Reason",
+                    )
+                    .required(false),
+                ),
+            CreateCommand::new("unquarantine")
+                .description("Restore a quarantined member's roles")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::User,
+                        "user",
+                        "Member",
                     )
                     .required(true),
                 ),
@@ -1300,6 +1354,49 @@ impl Handler {
                 self.store.schedule_typed(&guild_id.to_string(), "poll_end", &command.user.id.to_string(), end_at, &serde_json::json!({"channel_id": command.channel_id.to_string(), "poll_id": id}).to_string())?;
                 format!("Poll #{id} criada.")
             }
+            "quarantine" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let Some(target) = command.data.options.iter().find_map(|option| match option.value {
+                    CommandDataOptionValue::User(user) if option.name == "user" => Some(user),
+                    _ => None,
+                }) else {
+                    return respond(ctx, command, "Indica um membro.").await;
+                };
+                let member = guild_id.member(&ctx.http, target).await?;
+                let role_ids = member.roles.iter().map(|role| role.to_string()).collect::<Vec<_>>();
+                let reason = option_string(command, "reason").unwrap_or("Quarantine manual");
+                self.store.save_quarantine(&guild_id.to_string(), &target.to_string(), &role_ids, reason)?;
+                for role in &member.roles {
+                    let _ = member.remove_role(&ctx.http, *role).await;
+                }
+                let case_id = self.store.record_case(&guild_id.to_string(), "quarantine", &target.to_string(), &command.user.id.to_string(), reason, None)?;
+                format!("<@{}> colocado em quarantine como caso #{case_id}. Os cargos foram guardados para restauro.", target)
+            }
+            "unquarantine" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let Some(target) = command.data.options.iter().find_map(|option| match option.value {
+                    CommandDataOptionValue::User(user) if option.name == "user" => Some(user),
+                    _ => None,
+                }) else {
+                    return respond(ctx, command, "Indica um membro.").await;
+                };
+                let Some(record) = self.store.get_quarantine(&guild_id.to_string(), &target.to_string())? else {
+                    return respond(ctx, command, "Esse membro não está em quarantine.").await;
+                };
+                let member = guild_id.member(&ctx.http, target).await?;
+                let mut restored = 0;
+                for raw_role in record.role_ids {
+                    if let Ok(role_id) = raw_role.parse::<u64>() {
+                        if member.add_role(&ctx.http, RoleId::new(role_id)).await.is_ok() { restored += 1; }
+                    }
+                }
+                self.store.clear_quarantine(&guild_id.to_string(), &target.to_string())?;
+                format!("Quarantine removida de <@{}>; {} cargo(s) restaurado(s).", target, restored)
+            }
             "workflow-create" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
@@ -1328,6 +1425,31 @@ impl Handler {
                 };
                 let id = option_i64(command, "id").unwrap_or(0);
                 if self.store.delete_workflow(&guild_id.to_string(), id)? { format!("Workflow #{id} eliminado.") } else { "Workflow não encontrado neste servidor.".to_string() }
+            }
+            "ticket-config" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if let Some(role_id) = command.data.options.iter().find_map(|option| match option.value {
+                    CommandDataOptionValue::Role(role) if option.name == "staff_role" => Some(role),
+                    _ => None,
+                }) {
+                    self.store.set_setting(&guild_text, "support.ticket.staff_role_id", &role_id.to_string())?;
+                }
+                if let Some(channel_id) = command.data.options.iter().find_map(|option| match option.value {
+                    CommandDataOptionValue::Channel(channel) if option.name == "transcript_channel" => Some(channel),
+                    _ => None,
+                }) {
+                    self.store.set_setting(&guild_text, "support.ticket.transcript_channel_id", &channel_id.to_string())?;
+                }
+                if let Some(minutes) = option_i64(command, "sla_minutes") {
+                    if !(5..=1_440).contains(&minutes) {
+                        return respond(ctx, command, "O SLA deve estar entre 5 e 1440 minutos.").await;
+                    }
+                    self.store.set_setting(&guild_text, "support.ticket.sla_ms", &(minutes * 60_000).to_string())?;
+                }
+                "Configuração de tickets guardada.".to_string()
             }
             "ticket-panel" => {
                 let Some(_guild_id) = command.guild_id else {
@@ -1542,36 +1664,60 @@ impl Handler {
                 let visible = Permissions::VIEW_CHANNEL
                     | Permissions::SEND_MESSAGES
                     | Permissions::READ_MESSAGE_HISTORY;
+                let mut overwrites = vec![
+                    PermissionOverwrite {
+                        allow: Permissions::empty(),
+                        deny: Permissions::VIEW_CHANNEL,
+                        kind: PermissionOverwriteType::Role(serenity::all::RoleId::new(
+                            guild_id.get(),
+                        )),
+                    },
+                    PermissionOverwrite {
+                        allow: visible,
+                        deny: Permissions::empty(),
+                        kind: PermissionOverwriteType::Member(component.user.id),
+                    },
+                    PermissionOverwrite {
+                        allow: visible | Permissions::MANAGE_CHANNELS,
+                        deny: Permissions::empty(),
+                        kind: PermissionOverwriteType::Member(bot_id),
+                    },
+                ];
+                if let Ok(Some(raw_role)) = self
+                    .store
+                    .get_setting(&guild_id.to_string(), "support.ticket.staff_role_id")
+                {
+                    if let Ok(role_id) = raw_role.parse::<u64>() {
+                        overwrites.push(PermissionOverwrite {
+                            allow: visible,
+                            deny: Permissions::empty(),
+                            kind: PermissionOverwriteType::Role(RoleId::new(role_id)),
+                        });
+                    }
+                }
                 let channel = guild_id
                     .create_channel(
                         &ctx.http,
-                        CreateChannel::new(format!("ticket-{}", component.user.name)).permissions(
-                            [
-                                PermissionOverwrite {
-                                    allow: Permissions::empty(),
-                                    deny: Permissions::VIEW_CHANNEL,
-                                    kind: PermissionOverwriteType::Role(
-                                        serenity::all::RoleId::new(guild_id.get()),
-                                    ),
-                                },
-                                PermissionOverwrite {
-                                    allow: visible,
-                                    deny: Permissions::empty(),
-                                    kind: PermissionOverwriteType::Member(component.user.id),
-                                },
-                                PermissionOverwrite {
-                                    allow: visible | Permissions::MANAGE_CHANNELS,
-                                    deny: Permissions::empty(),
-                                    kind: PermissionOverwriteType::Member(bot_id),
-                                },
-                            ],
-                        ),
+                        CreateChannel::new(format!("ticket-{}", component.user.name))
+                            .permissions(overwrites),
                     )
                     .await?;
                 self.store.open_ticket(
                     &guild_id.to_string(),
                     &component.user.id.to_string(),
                     &channel.id.to_string(),
+                )?;
+                let sla_ms = self
+                    .store
+                    .get_setting(&guild_id.to_string(), "support.ticket.sla_ms")?
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or(3_600_000);
+                self.store.schedule_typed(
+                    &guild_id.to_string(),
+                    "ticket_sla",
+                    &component.user.id.to_string(),
+                    chrono::Utc::now().timestamp_millis() + sla_ms,
+                    &serde_json::json!({"channel_id": channel.id.to_string()}).to_string(),
                 )?;
                 channel
                     .id
@@ -1617,7 +1763,39 @@ impl Handler {
                 }
             }
             "ticket:close" => {
+                let ticket = self
+                    .store
+                    .ticket_by_channel(&component.channel_id.to_string())?;
                 if self.store.close_ticket(&component.channel_id.to_string())? {
+                    if let Some(raw_channel) = self.store.get_setting(
+                        &guild_id.to_string(),
+                        "support.ticket.transcript_channel_id",
+                    )? {
+                        if let Ok(transcript_channel) = raw_channel.parse::<u64>() {
+                            let messages = component
+                                .channel_id
+                                .messages(&ctx.http, serenity::all::GetMessages::new().limit(100))
+                                .await
+                                .unwrap_or_default();
+                            let opener = ticket
+                                .as_ref()
+                                .map(|ticket| format!("<@{}>", ticket.user_id))
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let mut transcript = format!("Transcript do ticket de {opener}\n");
+                            for message in messages.iter().rev() {
+                                transcript.push_str(&format!(
+                                    "{}: {}\n",
+                                    message.author.name, message.content
+                                ));
+                            }
+                            for chunk in transcript.as_bytes().chunks(1_800) {
+                                let text = String::from_utf8_lossy(chunk);
+                                let _ = ChannelId::new(transcript_channel)
+                                    .say(&ctx.http, text)
+                                    .await;
+                            }
+                        }
+                    }
                     respond_component(ctx, component, "Ticket fechado. O canal será removido.")
                         .await?;
                     component.channel_id.delete(&ctx.http).await?;
@@ -1795,13 +1973,12 @@ async fn finish_poll(http: &serenity::http::Http, store: &Store, id: i64) -> Res
 
 fn required_permission(command: &str) -> Option<Permissions> {
     match command {
-        "warn" | "violation" | "timeout" | "untimeout" | "note" | "reason" => {
-            Some(Permissions::MODERATE_MEMBERS)
-        }
+        "warn" | "violation" | "timeout" | "untimeout" | "note" | "reason" | "quarantine"
+        | "unquarantine" => Some(Permissions::MODERATE_MEMBERS),
         "kick" => Some(Permissions::KICK_MEMBERS),
         "ban" | "unban" => Some(Permissions::BAN_MEMBERS),
         "purge" => Some(Permissions::MANAGE_MESSAGES),
-        "ticket-panel" => Some(Permissions::MANAGE_CHANNELS),
+        "ticket-panel" | "ticket-config" => Some(Permissions::MANAGE_CHANNELS),
         "slowmode" => Some(Permissions::MANAGE_CHANNELS),
         "rolepanel" => Some(Permissions::MANAGE_ROLES),
         "tag-set" | "tag-delete" | "giveaway-start" | "giveaway-end" | "starboard-set"
@@ -1856,6 +2033,24 @@ async fn deliver_scheduled_action(
     if action_type == "poll_end" {
         if let Some(poll_id) = value.get("poll_id").and_then(serde_json::Value::as_i64) {
             let _ = finish_poll(http, store, poll_id).await?;
+        }
+        store.delete_scheduled_action(id)?;
+        return Ok(());
+    }
+    if action_type == "ticket_sla" {
+        if let Some(raw_channel) = value.get("channel_id").and_then(serde_json::Value::as_str) {
+            if let Ok(Some(ticket)) = store.ticket_by_channel(raw_channel) {
+                if ticket.status == "open" {
+                    if let Ok(channel) = raw_channel.parse::<u64>() {
+                        let _ = ChannelId::new(channel)
+                            .say(
+                                http,
+                                "⏱️ Este ticket aguarda resposta da equipa de suporte.",
+                            )
+                            .await;
+                    }
+                }
+            }
         }
         store.delete_scheduled_action(id)?;
         return Ok(());
