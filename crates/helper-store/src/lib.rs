@@ -500,6 +500,70 @@ impl Store {
         Ok(())
     }
 
+    /// Insert a new namespaced setting while enforcing its quota in the same
+    /// SQLite transaction. Updates to an existing key are deliberately not
+    /// counted as new entries.
+    pub fn insert_setting_bounded(
+        &self,
+        guild_id: &str,
+        key: &str,
+        value: &str,
+        prefix: &str,
+        limit: u64,
+    ) -> Result<bool> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT value FROM settings WHERE guild_id=?1 AND key=?2",
+                params![guild_id, key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing.is_some() {
+            return Ok(false);
+        }
+        let pattern = format!("{prefix}%");
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM settings WHERE guild_id=?1 AND key LIKE ?2",
+            params![guild_id, pattern],
+            |row| row.get(0),
+        )?;
+        if count < 0 || count as u64 >= limit {
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO settings(guild_id,key,value,updated_at) VALUES(?1,?2,?3,?4)",
+            params![guild_id, key, value, Utc::now().timestamp_millis()],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn settings_with_prefix(
+        &self,
+        guild_id: &str,
+        prefix: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let pattern = format!("{prefix}%");
+        let mut stmt = conn.prepare(
+            "SELECT key,value FROM settings WHERE guild_id=?1 AND key LIKE ?2 ORDER BY updated_at DESC, key",
+        )?;
+        let rows = stmt.query_map(params![guild_id, pattern], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn delete_setting(&self, guild_id: &str, key: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "DELETE FROM settings WHERE guild_id=?1 AND key=?2",
+            params![guild_id, key],
+        )? > 0)
+    }
+
     pub fn count_settings_prefix(&self, guild_id: &str, prefix: &str) -> Result<u64> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let pattern = format!("{prefix}%");
@@ -1632,6 +1696,61 @@ mod tests {
         assert_eq!(
             store.ticket_by_channel("20").unwrap().unwrap().status,
             "open"
+        );
+    }
+
+    #[test]
+    fn bounded_settings_are_atomic_and_guild_scoped() {
+        let store = Store::open(":memory:").unwrap();
+        assert!(
+            store
+                .insert_setting_bounded(
+                    "guild-a",
+                    "studio.template.one",
+                    "{}",
+                    "studio.template.",
+                    1
+                )
+                .unwrap()
+        );
+        assert!(
+            !store
+                .insert_setting_bounded(
+                    "guild-a",
+                    "studio.template.two",
+                    "{}",
+                    "studio.template.",
+                    1
+                )
+                .unwrap()
+        );
+        assert!(
+            store
+                .insert_setting_bounded(
+                    "guild-b",
+                    "studio.template.two",
+                    "{}",
+                    "studio.template.",
+                    1
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .settings_with_prefix("guild-a", "studio.template.")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .delete_setting("guild-a", "studio.template.one")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .delete_setting("guild-a", "studio.template.one")
+                .unwrap()
         );
     }
 

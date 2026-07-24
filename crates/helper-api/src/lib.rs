@@ -65,6 +65,16 @@ pub fn router(state: ApiState) -> Router {
             "/api/studio/brand",
             get(studio_brand).put(update_studio_brand),
         )
+        .route(
+            "/api/studio/templates",
+            get(studio_templates).post(create_studio_template),
+        )
+        .route(
+            "/api/studio/templates/{id}",
+            get(studio_template)
+                .put(update_studio_template)
+                .delete(delete_studio_template),
+        )
         .route("/api/permissions", get(permissions))
         .route("/api/security/health", get(security_health))
         .route("/api/analytics", get(analytics))
@@ -497,6 +507,13 @@ async fn quotas(
                 .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
                 .len() as u64,
         ),
+        (
+            "templates",
+            state
+                .store
+                .count_settings_prefix(&claims.guild_id, TEMPLATE_PREFIX)
+                .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?,
+        ),
     ]);
     Ok(Json(serde_json::json!({
         "plan": plan,
@@ -580,6 +597,230 @@ fn parse_brand_kit(value: Option<String>) -> BrandKit {
     value
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_else(default_brand_kit)
+}
+
+const TEMPLATE_PREFIX: &str = "studio.template.";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StudioTemplate {
+    id: String,
+    name: String,
+    description: String,
+    modules: Vec<String>,
+    config: serde_json::Value,
+    version: u64,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct StudioTemplateInput {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    modules: Vec<String>,
+    #[serde(default = "default_template_config")]
+    config: serde_json::Value,
+}
+
+fn default_template_config() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+fn valid_template_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+fn validate_template_input(input: &StudioTemplateInput) -> bool {
+    let valid_modules = [
+        "core",
+        "studio",
+        "security",
+        "support",
+        "events",
+        "community",
+        "automate",
+        "insights",
+    ];
+    let name_len = input.name.trim().chars().count();
+    let description_len = input.description.chars().count();
+    name_len > 0
+        && name_len <= 80
+        && description_len <= 500
+        && input.modules.len() <= valid_modules.len()
+        && input
+            .modules
+            .iter()
+            .all(|module| valid_modules.contains(&module.as_str()))
+        && input.config.is_object()
+        && serde_json::to_vec(&input.config)
+            .map(|bytes| bytes.len() <= 32 * 1024)
+            .unwrap_or(false)
+}
+
+fn template_key(id: &str) -> String {
+    format!("{TEMPLATE_PREFIX}{id}")
+}
+
+fn parse_template(raw: &str) -> Option<StudioTemplate> {
+    serde_json::from_str(raw).ok()
+}
+
+fn template_from_input(id: String, input: StudioTemplateInput, now: String) -> StudioTemplate {
+    StudioTemplate {
+        id,
+        name: input.name.trim().to_string(),
+        description: input.description.trim().to_string(),
+        modules: input.modules,
+        config: input.config,
+        version: 1,
+        created_at: now.clone(),
+        updated_at: now,
+    }
+}
+
+async fn studio_templates(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let templates = state
+        .store
+        .settings_with_prefix(&claims.guild_id, TEMPLATE_PREFIX)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .filter_map(|(_, value)| parse_template(&value))
+        .collect::<Vec<_>>();
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "templates": templates,
+    })))
+}
+
+async fn studio_template(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    if !valid_template_id(&id) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template_id"));
+    }
+    let template = state
+        .store
+        .get_setting(&claims.guild_id, &template_key(&id))
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .and_then(|value| parse_template(&value))
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "template_not_found"))?;
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "template": template,
+    })))
+}
+
+async fn create_studio_template(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(input): Json<StudioTemplateInput>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    if !validate_template_input(&input) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template"));
+    }
+    let plan = effective_plan(&state, &claims).await;
+    let id = Uuid::new_v4().simple().to_string();
+    let now = Utc::now().to_rfc3339();
+    let template = template_from_input(id.clone(), input, now);
+    let value = serde_json::to_string(&template)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "serialization_error"))?;
+    let inserted = state
+        .store
+        .insert_setting_bounded(
+            &claims.guild_id,
+            &template_key(&id),
+            &value,
+            TEMPLATE_PREFIX,
+            quota_limit(&plan, "templates"),
+        )
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    if !inserted {
+        return Err(client_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "template_quota_exceeded",
+        ));
+    }
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({"guildId": claims.guild_id, "template": template})),
+    ))
+}
+
+async fn update_studio_template(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<StudioTemplateInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    if !valid_template_id(&id) || !validate_template_input(&input) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template"));
+    }
+    let key = template_key(&id);
+    let current = state
+        .store
+        .get_setting(&claims.guild_id, &key)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .and_then(|value| parse_template(&value))
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "template_not_found"))?;
+    let now = Utc::now().to_rfc3339();
+    let template = StudioTemplate {
+        id,
+        name: input.name.trim().to_string(),
+        description: input.description.trim().to_string(),
+        modules: input.modules,
+        config: input.config,
+        version: current.version.saturating_add(1),
+        created_at: current.created_at,
+        updated_at: now,
+    };
+    state
+        .store
+        .set_setting(
+            &claims.guild_id,
+            &key,
+            &serde_json::to_string(&template).map_err(|_| {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "serialization_error")
+            })?,
+        )
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "template": template,
+    })))
+}
+
+async fn delete_studio_template(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    if !valid_template_id(&id) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template_id"));
+    }
+    let deleted = state
+        .store
+        .delete_setting(&claims.guild_id, &template_key(&id))
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    if !deleted {
+        return Err(client_error(StatusCode::NOT_FOUND, "template_not_found"));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn studio_brand(
@@ -1340,6 +1581,83 @@ mod tests {
         let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["brand"]["primary_color"], "#123ABC");
+
+        let template_input = serde_json::json!({
+            "name": "Gaming onboarding",
+            "description": "Safe defaults for a gaming community",
+            "modules": ["core", "security", "community"],
+            "config": {"welcome": {"enabled": true}, "security": {"shadow": true}}
+        });
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/studio/templates")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(template_input.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let template_id = body["template"]["id"].as_str().unwrap().to_string();
+        assert_eq!(body["template"]["version"], 1);
+
+        let updated = serde_json::json!({
+            "name": "Gaming onboarding v2",
+            "description": "Updated safe defaults",
+            "modules": ["core", "security"],
+            "config": {"welcome": {"enabled": false}}
+        });
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/studio/templates/{template_id}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(updated.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["template"]["version"], 2);
+
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/studio/templates")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["guildId"], "guild-a");
+        assert_eq!(body["templates"].as_array().unwrap().len(), 1);
+        assert!(!body.to_string().contains("guild-b"));
+
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/studio/templates/{template_id}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         let import = serde_json::json!({
             "version": 1,
