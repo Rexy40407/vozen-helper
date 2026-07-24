@@ -58,7 +58,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/modules", get(modules))
         .route("/api/analytics", get(analytics))
         .route("/api/workflows", get(workflows).post(create_workflow))
-        .route("/api/workflows/:id", delete(delete_workflow))
+        .route("/api/workflows/{id}", delete(delete_workflow))
         .with_state(Arc::new(state))
 }
 
