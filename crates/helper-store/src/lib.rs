@@ -158,6 +158,14 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    pub fn update_case_reason(&self, guild_id: &str, case_id: i64, reason: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "UPDATE cases SET reason=?3 WHERE id=?1 AND guild_id=?2",
+            params![case_id, guild_id, reason],
+        )? > 0)
+    }
+
     pub fn consume_quota(
         &self,
         guild_id: &str,

@@ -84,6 +84,68 @@ impl EventHandler for Handler {
                     )
                     .required(false),
                 ),
+            CreateCommand::new("violation")
+                .description("Record a policy violation")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::User,
+                        "user",
+                        "Member",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "rule",
+                        "Rule or policy",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "details",
+                        "Evidence or details",
+                    )
+                    .required(false),
+                ),
+            CreateCommand::new("note")
+                .description("Add a moderation note")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::User,
+                        "user",
+                        "Member",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "content",
+                        "Note",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("reason")
+                .description("Update a case reason")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "case",
+                        "Case number",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "reason",
+                        "New reason",
+                    )
+                    .required(true),
+                ),
             CreateCommand::new("kick")
                 .description("Kick a member")
                 .add_option(
@@ -495,6 +557,44 @@ impl Handler {
                         format!("Aviso criado como caso #{case_id} para <@{}>.", target)
                     } else { "Indica um membro.".to_string() }
                 } else { "Este comando só pode ser usado num servidor.".to_string() }
+            }
+            "violation" | "note" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let Some(target) = command.data.options.iter().find_map(|option| match option.value {
+                    CommandDataOptionValue::User(user) => Some(user),
+                    _ => None,
+                }) else {
+                    return respond(ctx, command, "Indica um membro.").await;
+                };
+                let reason = if command.data.name == "violation" {
+                    let rule = option_string(command, "rule").unwrap_or("unspecified");
+                    let details = option_string(command, "details").unwrap_or("Sem detalhes");
+                    format!("{rule}: {details}")
+                } else {
+                    option_string(command, "content").unwrap_or("Sem conteúdo").to_string()
+                };
+                if reason.len() > 500 {
+                    return respond(ctx, command, "O conteúdo não pode exceder 500 caracteres.").await;
+                }
+                let case_id = self.store.record_case(&guild_id.to_string(), &command.data.name, &target.to_string(), &command.user.id.to_string(), &reason, None)?;
+                format!("Registo #{case_id} criado para <@{}>.", target)
+            }
+            "reason" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let case_id = command.data.options.iter().find_map(|option| match option.value {
+                    CommandDataOptionValue::Integer(value) if option.name == "case" => Some(value),
+                    _ => None,
+                }).unwrap_or(0);
+                let reason = option_string(command, "reason").unwrap_or("Sem motivo");
+                if self.store.update_case_reason(&guild_id.to_string(), case_id, reason)? {
+                    format!("Motivo do caso #{case_id} atualizado.")
+                } else {
+                    "Caso não encontrado neste servidor.".to_string()
+                }
             }
             "untimeout" => {
                 let Some(guild_id) = command.guild_id else {
@@ -923,7 +1023,9 @@ fn option_string<'a>(command: &'a CommandInteraction, name: &str) -> Option<&'a 
 
 fn required_permission(command: &str) -> Option<Permissions> {
     match command {
-        "warn" | "timeout" | "untimeout" => Some(Permissions::MODERATE_MEMBERS),
+        "warn" | "violation" | "timeout" | "untimeout" | "note" | "reason" => {
+            Some(Permissions::MODERATE_MEMBERS)
+        }
         "kick" => Some(Permissions::KICK_MEMBERS),
         "ban" | "unban" => Some(Permissions::BAN_MEMBERS),
         "purge" => Some(Permissions::MANAGE_MESSAGES),
