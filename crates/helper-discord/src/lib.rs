@@ -54,6 +54,42 @@ impl EventHandler for Handler {
                     )
                     .required(false),
                 ),
+            CreateCommand::new("kick")
+                .description("Kick a member")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::User,
+                        "user",
+                        "Member to kick",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "reason",
+                        "Reason",
+                    )
+                    .required(false),
+                ),
+            CreateCommand::new("ban")
+                .description("Ban a member")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::User,
+                        "user",
+                        "Member to ban",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "reason",
+                        "Reason",
+                    )
+                    .required(false),
+                ),
         ];
         if let Err(error) = Command::set_global_commands(&ctx.http, commands).await {
             tracing::error!(%error, "global command registration failed");
@@ -180,6 +216,36 @@ impl Handler {
                     } else { "Indica um membro.".to_string() }
                 } else { "Este comando só pode ser usado num servidor.".to_string() }
             }
+            "kick" | "ban" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let Some(target) = command.data.options.iter().find_map(|option| match &option.value {
+                    CommandDataOptionValue::User(user) => Some(*user),
+                    _ => None,
+                }) else {
+                    return respond(ctx, command, "Indica um membro.").await;
+                };
+                let reason = command.data.options.iter().find_map(|option| match &option.value {
+                    CommandDataOptionValue::String(value) => Some(value.as_str()),
+                    _ => None,
+                }).unwrap_or("Sem motivo");
+                let action = if command.data.name == "kick" {
+                    guild_id.kick_with_reason(&ctx.http, target, reason).await
+                } else {
+                    guild_id.ban_with_reason(&ctx.http, target, 0, reason).await
+                };
+                match action {
+                    Ok(()) => {
+                        let case_id = self.store.record_case(&guild_id.to_string(), &command.data.name, &target.to_string(), &command.user.id.to_string(), reason, None)?;
+                        format!("Ação {} concluída como caso #{case_id} para <@{}>.", command.data.name, target)
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, action = %command.data.name, "discord moderation action failed");
+                        "Não foi possível executar a ação; confirma as permissões e a hierarquia de cargos.".to_string()
+                    }
+                }
+            }
             _ => "Comando desconhecido.".to_string(),
         };
         command
@@ -194,4 +260,18 @@ impl Handler {
             .await?;
         Ok(())
     }
+}
+
+async fn respond(ctx: &Context, command: &CommandInteraction, content: &str) -> Result<()> {
+    command
+        .create_response(
+            ctx,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(content)
+                    .ephemeral(true),
+            ),
+        )
+        .await?;
+    Ok(())
 }
