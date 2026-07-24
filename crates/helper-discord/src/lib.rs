@@ -846,6 +846,36 @@ impl EventHandler for Handler {
                     )
                     .required(false),
                 ),
+            CreateCommand::new("event-register")
+                .description("Register yourself for a native Discord scheduled event")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "event_id",
+                        "Discord scheduled event ID",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("event-checkin")
+                .description("Check yourself in to a registered scheduled event")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "event_id",
+                        "Discord scheduled event ID",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("event-attendees")
+                .description("List registrations for a scheduled event")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "event_id",
+                        "Discord scheduled event ID",
+                    )
+                    .required(true),
+                ),
             CreateCommand::new("event-cancel")
                 .description("Cancel a native Discord scheduled event")
                 .add_option(
@@ -2188,6 +2218,112 @@ impl Handler {
                 let edited = guild_id.edit_scheduled_event(&ctx.http, event_id, builder).await?;
                 format!("Evento nativo #{} atualizado: **{}**.", edited.id, edited.name)
             }
+            "event-register" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let raw_event_id = option_i64(command, "event_id").unwrap_or(0);
+                if raw_event_id <= 0 {
+                    return respond(ctx, command, "Indica um ID de evento válido.").await;
+                }
+                let event_id = serenity::all::ScheduledEventId::new(raw_event_id as u64);
+                let events = guild_id.scheduled_events(&ctx.http, false).await?;
+                let Some(event) = events.into_iter().find(|event| event.id == event_id) else {
+                    return respond(ctx, command, "Não encontrei esse evento neste servidor.").await;
+                };
+                if matches!(
+                    event.status,
+                    serenity::all::ScheduledEventStatus::Completed
+                        | serenity::all::ScheduledEventStatus::Canceled
+                ) {
+                    return respond(ctx, command, "Este evento já terminou ou foi cancelado.").await;
+                }
+                if self.store.register_event(
+                    &guild_id.to_string(),
+                    &event_id.to_string(),
+                    &command.user.id.to_string(),
+                )? {
+                    format!("Inscrição confirmada para **{}**.", event.name)
+                } else {
+                    "Já estás inscrito neste evento.".to_string()
+                }
+            }
+            "event-checkin" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let raw_event_id = option_i64(command, "event_id").unwrap_or(0);
+                if raw_event_id <= 0 {
+                    return respond(ctx, command, "Indica um ID de evento válido.").await;
+                }
+                let event_id = serenity::all::ScheduledEventId::new(raw_event_id as u64);
+                let events = guild_id.scheduled_events(&ctx.http, false).await?;
+                let Some(event) = events.into_iter().find(|event| event.id == event_id) else {
+                    return respond(ctx, command, "Não encontrei esse evento neste servidor.").await;
+                };
+                if matches!(
+                    event.status,
+                    serenity::all::ScheduledEventStatus::Completed
+                        | serenity::all::ScheduledEventStatus::Canceled
+                ) {
+                    return respond(ctx, command, "Este evento já terminou ou foi cancelado.").await;
+                }
+                let user_id = command.user.id.to_string();
+                let Some(registration) = self.store.event_registration(
+                    &guild_id.to_string(),
+                    &event_id.to_string(),
+                    &user_id,
+                )? else {
+                    return respond(ctx, command, "Inscreve-te primeiro com `/event-register`.").await;
+                };
+                if registration.status == "checked_in" {
+                    return respond(ctx, command, "O teu check-in já está registado.").await;
+                }
+                if self.store.check_in_event(&guild_id.to_string(), &event_id.to_string(), &user_id)? {
+                    format!("Check-in registado para **{}**.", event.name)
+                } else {
+                    "Não foi possível registar o check-in.".to_string()
+                }
+            }
+            "event-attendees" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let raw_event_id = option_i64(command, "event_id").unwrap_or(0);
+                if raw_event_id <= 0 {
+                    return respond(ctx, command, "Indica um ID de evento válido.").await;
+                }
+                let event_id = serenity::all::ScheduledEventId::new(raw_event_id as u64);
+                let events = guild_id.scheduled_events(&ctx.http, false).await?;
+                let Some(event) = events.into_iter().find(|event| event.id == event_id) else {
+                    return respond(ctx, command, "Não encontrei esse evento neste servidor.").await;
+                };
+                let registrations = self.store.event_registrations(
+                    &guild_id.to_string(),
+                    &event_id.to_string(),
+                    100,
+                )?;
+                if registrations.is_empty() {
+                    format!("**{}** ainda não tem inscrições.", event.name)
+                } else {
+                    let lines = registrations
+                        .into_iter()
+                        .take(25)
+                        .map(|registration| {
+                            format!(
+                                "<@{}> · {}",
+                                registration.user_id,
+                                if registration.status == "checked_in" {
+                                    "check-in"
+                                } else {
+                                    "inscrito"
+                                }
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    format!("**{}** — {} inscrição(ões)\n{}", event.name, lines.len(), lines.join("\n"))
+                }
+            }
             "event-cancel" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
@@ -3025,7 +3161,9 @@ fn required_permission(command: &str) -> Option<Permissions> {
         "anti-raid" => Some(Permissions::MANAGE_GUILD),
         "security-mode" => Some(Permissions::MANAGE_GUILD),
         "anti-nuke" => Some(Permissions::MANAGE_GUILD),
-        "event-create" | "event-edit" | "event-cancel" => Some(Permissions::CREATE_EVENTS),
+        "event-create" | "event-edit" | "event-cancel" | "event-attendees" => {
+            Some(Permissions::CREATE_EVENTS)
+        }
         "tag-set" | "tag-delete" | "giveaway-start" | "giveaway-end" | "starboard-set"
         | "workflow-create" | "workflow-delete" => Some(Permissions::MANAGE_GUILD),
         "suggestion" => Some(Permissions::MANAGE_MESSAGES),

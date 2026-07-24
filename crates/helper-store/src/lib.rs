@@ -72,6 +72,16 @@ pub struct TicketRecord {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct EventRegistrationRecord {
+    pub guild_id: String,
+    pub event_id: String,
+    pub user_id: String,
+    pub status: String,
+    pub created_at: i64,
+    pub checked_in_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SuggestionRecord {
     pub id: i64,
     pub guild_id: String,
@@ -186,6 +196,7 @@ impl Store {
                 )?;
             }
         }
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS event_registrations (guild_id TEXT NOT NULL, event_id TEXT NOT NULL, user_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'registered', created_at INTEGER NOT NULL, checked_in_at INTEGER, PRIMARY KEY(guild_id,event_id,user_id)); CREATE INDEX IF NOT EXISTS idx_event_registrations_event ON event_registrations(guild_id,event_id,status);")?;
         Ok(())
     }
 
@@ -878,6 +889,71 @@ impl Store {
         )? > 0)
     }
 
+    pub fn register_event(&self, guild_id: &str, event_id: &str, user_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "INSERT OR IGNORE INTO event_registrations(guild_id,event_id,user_id,status,created_at,checked_in_at) VALUES(?1,?2,?3,'registered',?4,NULL)",
+            params![guild_id, event_id, user_id, Utc::now().timestamp_millis()],
+        )? > 0)
+    }
+
+    pub fn event_registration(
+        &self,
+        guild_id: &str,
+        event_id: &str,
+        user_id: &str,
+    ) -> Result<Option<EventRegistrationRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT guild_id,event_id,user_id,status,created_at,checked_in_at FROM event_registrations WHERE guild_id=?1 AND event_id=?2 AND user_id=?3",
+                params![guild_id, event_id, user_id],
+                |row| {
+                    Ok(EventRegistrationRecord {
+                        guild_id: row.get(0)?,
+                        event_id: row.get(1)?,
+                        user_id: row.get(2)?,
+                        status: row.get(3)?,
+                        created_at: row.get(4)?,
+                        checked_in_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn check_in_event(&self, guild_id: &str, event_id: &str, user_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "UPDATE event_registrations SET status='checked_in',checked_in_at=?4 WHERE guild_id=?1 AND event_id=?2 AND user_id=?3 AND status='registered'",
+            params![guild_id, event_id, user_id, Utc::now().timestamp_millis()],
+        )? > 0)
+    }
+
+    pub fn event_registrations(
+        &self,
+        guild_id: &str,
+        event_id: &str,
+        limit: u32,
+    ) -> Result<Vec<EventRegistrationRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT guild_id,event_id,user_id,status,created_at,checked_in_at FROM event_registrations WHERE guild_id=?1 AND event_id=?2 ORDER BY created_at ASC LIMIT ?3")?;
+        let rows = stmt.query_map(
+            params![guild_id, event_id, i64::from(limit.min(100))],
+            |row| {
+                Ok(EventRegistrationRecord {
+                    guild_id: row.get(0)?,
+                    event_id: row.get(1)?,
+                    user_id: row.get(2)?,
+                    status: row.get(3)?,
+                    created_at: row.get(4)?,
+                    checked_in_at: row.get(5)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn create_suggestion(&self, guild_id: &str, author_id: &str, content: &str) -> Result<i64> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
@@ -1302,6 +1378,17 @@ mod tests {
     #[test]
     fn events_and_suggestions_round_trip() {
         let store = Store::open(":memory:").unwrap();
+        assert!(store.register_event("g", "event-1", "u").unwrap());
+        assert!(!store.register_event("g", "event-1", "u").unwrap());
+        assert!(store.check_in_event("g", "event-1", "u").unwrap());
+        assert_eq!(
+            store
+                .event_registration("g", "event-1", "u")
+                .unwrap()
+                .unwrap()
+                .status,
+            "checked_in"
+        );
         let suggestion = store
             .create_suggestion("g", "u", "Add a weekly event")
             .unwrap();
