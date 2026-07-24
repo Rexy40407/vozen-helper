@@ -59,6 +59,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/permissions", get(permissions))
         .route("/api/analytics", get(analytics))
         .route("/api/privacy/export", get(privacy_export))
+        .route("/api/privacy/receipt", get(privacy_receipt))
         .route("/api/privacy/delete", post(privacy_delete))
         .route("/api/config/import", post(import_config))
         .route("/api/workflows", get(workflows).post(create_workflow))
@@ -556,6 +557,40 @@ async fn privacy_export(
     Ok(Json(export))
 }
 
+async fn privacy_receipt(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    Ok(Json(serde_json::json!({
+        "version": 1,
+        "source": "helper_runtime_metadata_v1",
+        "guildId": claims.guild_id,
+        "intents": [
+            {"key": "GUILDS", "purpose": "guild and channel metadata"},
+            {"key": "GUILD_MEMBERS", "purpose": "joins, leaves, join-gate and anti-raid"},
+            {"key": "MESSAGE_CONTENT", "purpose": "bounded moderation and message workflows"},
+            {"key": "AUTO_MODERATION_EXECUTION", "purpose": "audit Discord AutoMod outcomes"},
+            {"key": "GUILD_MODERATION", "purpose": "destructive-action Audit Log guard"}
+        ],
+        "persistedFields": [
+            "guild-scoped settings", "moderation cases", "aggregate daily stats",
+            "ticket metadata", "workflow definitions and run metadata", "quota counters"
+        ],
+        "notPersistedByDefault": ["message bodies", "Discord tokens", "OAuth client secrets", "session cookies"],
+        "retention": {
+            "analyticsDays": 30,
+            "auditDays": 30,
+            "transcriptDays": 30,
+            "configuration": "until changed or guild purge"
+        },
+        "subprocessors": [],
+        "lastPurgeAt": null,
+        "exportEndpoint": "/api/privacy/export",
+        "deleteEndpoint": "/api/privacy/delete"
+    })))
+}
+
 #[derive(Debug, Deserialize)]
 struct PrivacyDeleteRequest {
     confirmation: String,
@@ -900,6 +935,28 @@ mod tests {
         let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(body["permissions"].as_array().unwrap().len() >= 8);
+
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/privacy/receipt")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["guildId"], "guild-a");
+        assert!(
+            body["notPersistedByDefault"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "Discord tokens")
+        );
 
         let import = serde_json::json!({
             "version": 1,
