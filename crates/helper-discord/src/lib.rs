@@ -67,6 +67,58 @@ impl EventHandler for Handler {
         let commands = vec![
             CreateCommand::new("ping").description("Check Helper latency"),
             CreateCommand::new("help").description("Show Helper modules"),
+            CreateCommand::new("setup")
+                .description("Run the guided Helper setup for this server")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Boolean,
+                        "security",
+                        "Enable Security module",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Boolean,
+                        "support",
+                        "Enable Support module",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Boolean,
+                        "events",
+                        "Enable Events module",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Boolean,
+                        "community",
+                        "Enable Community module",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Boolean,
+                        "automate",
+                        "Enable Automate module",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Boolean,
+                        "insights",
+                        "Enable Insights module",
+                    )
+                    .required(false),
+                ),
+            CreateCommand::new("modules").description("Show enabled Helper modules"),
+            CreateCommand::new("status").description("Show Helper setup and health status"),
             CreateCommand::new("dashboard").description("Open the Helper dashboard"),
             CreateCommand::new("plan").description("Show the active Vozen plan"),
             CreateCommand::new("permissions").description("Show the Helper Permission Passport"),
@@ -1530,6 +1582,78 @@ impl Handler {
         let content = match command.data.name.as_str() {
             "ping" => "Pong — Vozen Helper está online.".to_string(),
             "help" => "Vozen Helper público: Core, Studio, Security, Support, Events, Community, Automate e Insights. Usa /dashboard para configurar o servidor.".to_string(),
+            "setup" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let modules = ["security", "support", "events", "community", "automate", "insights"];
+                let selected = modules
+                    .iter()
+                    .filter_map(|module| {
+                        option_bool(command, module)
+                            .filter(|enabled| *enabled)
+                            .map(|_| *module)
+                    })
+                    .collect::<Vec<_>>();
+                for module in &selected {
+                    self.store.set_setting(
+                        &guild_id.to_string(),
+                        &format!("core.module.{module}.enabled"),
+                        "true",
+                    )?;
+                }
+                self.store.set_setting(
+                    &guild_id.to_string(),
+                    "core.setup.completed",
+                    if selected.is_empty() { "false" } else { "true" },
+                )?;
+                if selected.is_empty() {
+                    "Setup guiado: escolhe pelo menos um módulo (Security, Support, Events, Community, Automate ou Insights) e executa novamente. Depois confirma as permissões com `/permissions`.".to_string()
+                } else {
+                    format!("Setup guardado para: **{}**. Próximo passo: `/permissions` e depois configura cada módulo.", selected.join(", "))
+                }
+            }
+            "modules" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let modules = ["core", "studio", "security", "support", "events", "community", "automate", "insights"];
+                modules
+                    .iter()
+                    .map(|module| {
+                        let enabled = self
+                            .store
+                            .get_setting(&guild_id.to_string(), &format!("core.module.{module}.enabled"))
+                            .ok()
+                            .flatten()
+                            .is_some_and(|value| value == "true")
+                            || *module == "core";
+                        format!("{} **{}**", if enabled { "✅" } else { "◻️" }, module)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            }
+            "status" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let setup = self
+                    .store
+                    .get_setting(&guild_id.to_string(), "core.setup.completed")?
+                    .is_some_and(|value| value == "true");
+                let configured = ["security", "support", "events", "community", "automate", "insights"]
+                    .iter()
+                    .filter(|module| {
+                        self.store
+                            .get_setting(&guild_id.to_string(), &format!("core.module.{module}.enabled"))
+                            .ok()
+                            .flatten()
+                            .is_some_and(|value| value == "true")
+                    })
+                    .copied()
+                    .collect::<Vec<_>>();
+                format!("Setup: **{}** · Módulos: **{}** · Isolamento por guild ativo · Privacy export/delete disponível", if setup { "concluído" } else { "pendente" }, if configured.is_empty() { "nenhum".to_string() } else { configured.join(", ") })
+            }
             "dashboard" => "Painel: https://helper.vozen.org (o endpoint permanece desligado até o rollout aprovado).".to_string(),
             "plan" => {
                 if let Some(client) = &self.entitlements {
@@ -3235,6 +3359,7 @@ fn required_permission(command: &str) -> Option<Permissions> {
         "purge" => Some(Permissions::MANAGE_MESSAGES),
         "ticket-panel" | "ticket-config" | "ticket-update" => Some(Permissions::MANAGE_CHANNELS),
         "slowmode" => Some(Permissions::MANAGE_CHANNELS),
+        "setup" => Some(Permissions::MANAGE_GUILD),
         "rolepanel" => Some(Permissions::MANAGE_ROLES),
         "join-gate" => Some(Permissions::MANAGE_ROLES),
         "anti-raid" => Some(Permissions::MANAGE_GUILD),
