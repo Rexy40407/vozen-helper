@@ -10,7 +10,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
-use helper_contracts::{ApiError, EntitlementSnapshot, SessionClaims};
+use helper_contracts::{ApiError, SessionClaims};
 use helper_store::Store;
 use hmac::{Hmac, Mac};
 use reqwest::Client;
@@ -48,7 +48,6 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/me", get(me))
         .route("/api/cases", get(cases))
         .route("/api/stats", get(stats))
-        .route("/api/v1/entitlements", post(entitlements))
         .with_state(Arc::new(state))
 }
 
@@ -227,27 +226,6 @@ async fn stats(
     Ok(Json(
         serde_json::json!({"totalCases":cases.len(),"guildId":claims.guild_id}),
     ))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct EntitlementRequest {
-    pub subject_id: String,
-}
-async fn entitlements(
-    State(state): State<Arc<ApiState>>,
-    Json(req): Json<EntitlementRequest>,
-) -> Result<Json<EntitlementSnapshot>, (StatusCode, Json<ApiError>)> {
-    match state.store.load_entitlement(&req.subject_id) {
-        Ok(Some(snapshot)) => Ok(Json(snapshot)),
-        Ok(None) => Ok(Json(EntitlementSnapshot::free(req.subject_id))),
-        Err(error) => {
-            tracing::error!(%error, "entitlement lookup failed");
-            Err(client_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store_error",
-            ))
-        }
-    }
 }
 
 fn require_auth(

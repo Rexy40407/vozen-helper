@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use helper_core::Config;
+use helper_modules::EntitlementClient;
 use helper_store::Store;
 use serenity::{
     all::{
@@ -22,6 +23,7 @@ use tracing::info;
 struct Handler {
     store: Store,
     spam: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+    entitlements: Option<EntitlementClient>,
 }
 
 #[async_trait]
@@ -32,6 +34,7 @@ impl EventHandler for Handler {
             CreateCommand::new("ping").description("Check Helper latency"),
             CreateCommand::new("help").description("Show Helper modules"),
             CreateCommand::new("dashboard").description("Open the Helper dashboard"),
+            CreateCommand::new("plan").description("Show the active Vozen plan"),
             CreateCommand::new("cases").description("List recent moderation cases"),
             CreateCommand::new("warn")
                 .description("Create a moderation warning")
@@ -136,6 +139,10 @@ pub async fn run(config: &Config) -> Result<()> {
         .event_handler(Handler {
             store,
             spam: Arc::new(Mutex::new(HashMap::new())),
+            entitlements: EntitlementClient::new(
+                config.entitlement_url.clone(),
+                config.entitlement_secret.clone(),
+            ),
         })
         .application_id(config.discord_application_id.into())
         .await?;
@@ -149,6 +156,14 @@ impl Handler {
             "ping" => "Pong — Vozen Helper está online.".to_string(),
             "help" => "Vozen Helper público: Core, Studio, Security, Support, Events, Community, Automate e Insights. Usa /dashboard para configurar o servidor.".to_string(),
             "dashboard" => "Painel: https://helper.vozen.org (o endpoint permanece desligado até o rollout aprovado).".to_string(),
+            "plan" => {
+                if let Some(client) = &self.entitlements {
+                    match client.resolve(&command.user.id.to_string(), command.guild_id.map(|id| id.to_string()).as_deref()).await {
+                        Ok(snapshot) => { let label = match &snapshot.plan { helper_contracts::Plan::Free => "Free", helper_contracts::Plan::Plus => "Plus", helper_contracts::Plan::Premium { .. } => "Premium" }; format!("Plano {label} · {} guild(s) · entitlements v{}.", snapshot.plan.guild_limit(), snapshot.version) },
+                        Err(error) => { tracing::warn!(%error, "central entitlement lookup failed"); "Não foi possível consultar o plano agora; o Helper mantém o último snapshot seguro.".to_string() }
+                    }
+                } else { "Entitlements central ainda não estão configurados nesta instalação.".to_string() }
+            }
             "cases" => {
                 if let Some(guild_id) = command.guild_id {
                     let cases = self.store.recent_cases(&guild_id.to_string(), 10)?;
