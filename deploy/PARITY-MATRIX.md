@@ -12,8 +12,8 @@ This matrix is a release gate, not a claim that the migration is complete.
 | Events | Functional lifecycle | native Discord Scheduled Events create/list/cancel plus durable polls and giveaways with votes/entries, scheduled close and anti-abuse bounds; richer event templates remain |
 | Automate | Functional bounded MVP | message trigger, optional contains condition, reply action, durable workflows/runs and dashboard endpoints; broader trigger/action catalog remains |
 | Insights | Functional API | cases/stats/quotas, analytics and workflow endpoints; privacy receipt, scoped export/delete and versioned config export/import now available |
-| Entitlements | Source integrated | signed central resolver exists and is tested; production service activation remains |
-| VPS rollout | Staged only | migration/doctor/API smoke passed; privileged systemd cutover and 7-day soak remain |
+| Entitlements | Source integrated and live | signed central resolver is active as `vozen-entitlementd.service` on loopback; HMAC, replay rejection, Free/Plus/Premium and seat isolation smoke checks passed against an isolated DB copy; real billing/webhook purchase remains an external gate |
+| VPS rollout | Rust live, soak pending | `vozen-helper.service` runs the Rust release under systemd; health, Discord gateway sockets, command registration, rollback backup and memory checks passed; the seven-day soak and full interactive parity gate remain |
 
 The goal cannot be marked complete while any required row is partial/not complete or while the
 production memory, security, parity and rollback gates lack live evidence.
