@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 helper-core = { path = "../helper-core" }
 helper-contracts = { path = "../helper-contracts" }
 helper-modules = { path = "../helper-modules" }

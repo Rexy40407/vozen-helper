@@ -90,6 +90,32 @@ impl EventHandler for Handler {
                     )
                     .required(false),
                 ),
+            CreateCommand::new("timeout")
+                .description("Timeout a member")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::User,
+                        "user",
+                        "Member to timeout",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "seconds",
+                        "Duration in seconds (max 28 days)",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "reason",
+                        "Reason",
+                    )
+                    .required(false),
+                ),
         ];
         if let Err(error) = Command::set_global_commands(&ctx.http, commands).await {
             tracing::error!(%error, "global command registration failed");
@@ -216,7 +242,7 @@ impl Handler {
                     } else { "Indica um membro.".to_string() }
                 } else { "Este comando só pode ser usado num servidor.".to_string() }
             }
-            "kick" | "ban" => {
+            "kick" | "ban" | "timeout" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
@@ -232,8 +258,15 @@ impl Handler {
                 }).unwrap_or("Sem motivo");
                 let action = if command.data.name == "kick" {
                     guild_id.kick_with_reason(&ctx.http, target, reason).await
-                } else {
+                } else if command.data.name == "ban" {
                     guild_id.ban_with_reason(&ctx.http, target, 0, reason).await
+                } else {
+                    let seconds = command.data.options.iter().find_map(|option| match option.value {
+                        CommandDataOptionValue::Integer(value) => Some(value),
+                        _ => None,
+                    }).unwrap_or(600).clamp(1, 28 * 24 * 60 * 60);
+                    let until = (chrono::Utc::now() + chrono::Duration::seconds(seconds)).to_rfc3339();
+                    guild_id.edit_member(&ctx.http, target, serenity::all::EditMember::new().disable_communication_until(until)).await.map(|_| ())
                 };
                 match action {
                     Ok(()) => {
