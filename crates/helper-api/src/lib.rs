@@ -57,6 +57,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/me", get(me))
         .route("/api/guilds", get(guilds))
         .route("/api/cases", get(cases))
+        .route("/api/audit", get(audit))
         .route("/api/tickets", get(tickets))
         .route("/api/stats", get(stats))
         .route("/api/quotas", get(quotas))
@@ -429,6 +430,22 @@ async fn cases(
         .recent_cases(&claims.guild_id, query.limit.unwrap_or(50).min(200))
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     Ok(Json(serde_json::json!({"cases":list})))
+}
+
+async fn audit(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Query(query): Query<LimitQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let list = state
+        .store
+        .recent_audit_events(&claims.guild_id, query.limit.unwrap_or(50).min(200))
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "events": list,
+    })))
 }
 async fn stats(
     State(state): State<Arc<ApiState>>,
@@ -1476,6 +1493,30 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["cases"].as_array().unwrap().len(), 1);
         assert_eq!(body["cases"][0]["guild_id"], "guild-a");
+        assert!(!body.to_string().contains("guild-b"));
+
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/audit")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["guildId"], "guild-a");
+        assert_eq!(body["events"].as_array().unwrap().len(), 1);
+        assert!(
+            !body["events"][0]["correlation_id"]
+                .as_str()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(body["events"][0]["actor_id"], "mod");
         assert!(!body.to_string().contains("guild-b"));
 
         let response = router(state(store.clone()))

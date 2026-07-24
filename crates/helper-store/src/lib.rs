@@ -32,6 +32,23 @@ pub struct CaseRecord {
     pub created_at: i64,
 }
 
+/// Structured evidence for a sensitive operation. The record is append-only
+/// during normal operation and binds the actor, tenant, reason and outcome to
+/// one correlation id so support can trace a moderation action end to end.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuditEventRecord {
+    pub id: i64,
+    pub correlation_id: String,
+    pub guild_id: String,
+    pub actor_id: String,
+    pub action: String,
+    pub reason: String,
+    pub before_json: String,
+    pub after_json: String,
+    pub outcome: String,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TagRecord {
     pub guild_id: String,
@@ -184,6 +201,7 @@ impl Store {
         // The owner column is named `opener_id` there; changing it to `user_id`
         // would make an in-place Rust cutover fail on the live database.
         conn.execute_batch("CREATE TABLE IF NOT EXISTS tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, opener_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', claimed_by TEXT, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_tickets_owner ON tickets(guild_id,opener_id,status); CREATE TABLE IF NOT EXISTS suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, author_id TEXT NOT NULL, content TEXT NOT NULL, message_id TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS suggestion_votes (suggestion_id INTEGER NOT NULL, user_id TEXT NOT NULL, vote INTEGER NOT NULL, PRIMARY KEY(suggestion_id,user_id)); CREATE TABLE IF NOT EXISTS giveaways (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, prize TEXT NOT NULL, winners INTEGER NOT NULL DEFAULT 1, end_at INTEGER NOT NULL, ended INTEGER NOT NULL DEFAULT 0, required_role_id TEXT, host_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS giveaway_entries (giveaway_id INTEGER NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY(giveaway_id,user_id)); CREATE TABLE IF NOT EXISTS polls (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, question TEXT NOT NULL, options TEXT NOT NULL, end_at INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS poll_votes (poll_id INTEGER NOT NULL, user_id TEXT NOT NULL, choice INTEGER NOT NULL, PRIMARY KEY(poll_id,user_id)); CREATE TABLE IF NOT EXISTS workflows (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, name TEXT NOT NULL, trigger TEXT NOT NULL, condition TEXT NOT NULL DEFAULT '', action TEXT NOT NULL, payload TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS workflow_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id INTEGER NOT NULL, guild_id TEXT NOT NULL, source_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_workflows_trigger ON workflows(guild_id,trigger,enabled); CREATE TABLE IF NOT EXISTS quarantine (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, role_ids TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE TABLE IF NOT EXISTS starboard (guild_id TEXT NOT NULL, original_message_id TEXT NOT NULL, starboard_message_id TEXT NOT NULL, star_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,original_message_id));")?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, correlation_id TEXT NOT NULL UNIQUE, guild_id TEXT NOT NULL, actor_id TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', before_json TEXT NOT NULL DEFAULT '{}', after_json TEXT NOT NULL DEFAULT '{}', outcome TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_audit_events_guild_time ON audit_events(guild_id, created_at DESC);")?;
         for (column, definition) in [
             ("category", "TEXT NOT NULL DEFAULT 'general'"),
             ("priority", "TEXT NOT NULL DEFAULT 'normal'"),
@@ -316,9 +334,40 @@ impl Store {
         reason: &str,
         duration_ms: Option<i64>,
     ) -> Result<i64> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let created_at = Utc::now().timestamp_millis();
+        tx.execute("INSERT INTO cases(guild_id,type,target_id,moderator_id,reason,duration_ms,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![guild_id, kind, target_id, moderator_id, reason, duration_ms, created_at])?;
+        let case_id = tx.last_insert_rowid();
+        let correlation_id = Uuid::new_v4().to_string();
+        let before_json = serde_json::json!({"targetId": target_id}).to_string();
+        let after_json = serde_json::json!({"caseId": case_id, "targetId": target_id, "durationMs": duration_ms}).to_string();
+        tx.execute(
+            "INSERT INTO audit_events(correlation_id,guild_id,actor_id,action,reason,before_json,after_json,outcome,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![correlation_id, guild_id, moderator_id, kind, reason, before_json, after_json, "recorded", created_at],
+        )?;
+        tx.commit()?;
+        Ok(case_id)
+    }
+
+    pub fn recent_audit_events(&self, guild_id: &str, limit: u32) -> Result<Vec<AuditEventRecord>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
-        conn.execute("INSERT INTO cases(guild_id,type,target_id,moderator_id,reason,duration_ms,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![guild_id, kind, target_id, moderator_id, reason, duration_ms, Utc::now().timestamp_millis()])?;
-        Ok(conn.last_insert_rowid())
+        let mut stmt = conn.prepare("SELECT id,correlation_id,guild_id,actor_id,action,reason,before_json,after_json,outcome,created_at FROM audit_events WHERE guild_id=?1 ORDER BY id DESC LIMIT ?2")?;
+        let rows = stmt.query_map(params![guild_id, i64::from(limit.min(200))], |row| {
+            Ok(AuditEventRecord {
+                id: row.get(0)?,
+                correlation_id: row.get(1)?,
+                guild_id: row.get(2)?,
+                actor_id: row.get(3)?,
+                action: row.get(4)?,
+                reason: row.get(5)?,
+                before_json: row.get(6)?,
+                after_json: row.get(7)?,
+                outcome: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn recent_cases(&self, guild_id: &str, limit: u32) -> Result<Vec<CaseRecord>> {
@@ -1003,6 +1052,7 @@ impl Store {
             "DELETE FROM workflow_runs WHERE guild_id=?1",
             "DELETE FROM workflows WHERE guild_id=?1",
             "DELETE FROM cases WHERE guild_id=?1",
+            "DELETE FROM audit_events WHERE guild_id=?1",
             "DELETE FROM activity_log WHERE guild_id=?1",
             "DELETE FROM scheduled_actions WHERE guild_id=?1",
             "DELETE FROM infractions WHERE guild_id=?1",
@@ -1790,6 +1840,14 @@ mod tests {
             store.cases_for_target("guild", "user", 10).unwrap().len(),
             1
         );
+        let audit = store.recent_audit_events("guild", 10).unwrap();
+        assert_eq!(audit.len(), 1);
+        assert!(!audit[0].correlation_id.is_empty());
+        assert_eq!(audit[0].actor_id, "mod");
+        assert_eq!(audit[0].reason, "reason");
+        assert_eq!(audit[0].outcome, "recorded");
+        assert!(serde_json::from_str::<serde_json::Value>(&audit[0].before_json).is_ok());
+        assert!(serde_json::from_str::<serde_json::Value>(&audit[0].after_json).is_ok());
         assert!(
             store
                 .consume_quota("guild", "user", "workflow_runs", 1, Utc::now())
