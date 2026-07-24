@@ -16,7 +16,7 @@ TimeoutStopSec=30
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome=read-only
 ReadWritePaths=/home/vozen/vozen-helper-rust/shared/data /home/vozen/vozen-helper
 LimitNOFILE=65536
 

@@ -530,18 +530,18 @@ impl EventHandler for Handler {
                 .add_option(
                     CreateCommandOption::new(
                         serenity::all::CommandOptionType::String,
-                        "contains",
-                        "Only run when message contains this text",
-                    )
-                    .required(false),
-                )
-                .add_option(
-                    CreateCommandOption::new(
-                        serenity::all::CommandOptionType::String,
                         "reply",
                         "Reply text; use {user} and {message}",
                     )
                     .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "contains",
+                        "Only run when message contains this text",
+                    )
+                    .required(false),
                 ),
             CreateCommand::new("workflow-list").description("List message automations"),
             CreateCommand::new("workflow-dry-run")
