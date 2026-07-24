@@ -1,64 +1,69 @@
 # Vozen Helper
 
-Bot de moderação de Discord **privado** e **self-hosted**, desenhado para correr em
-**um único servidor** (o servidor do Diogo). Irmão do Vozen (bot TTS), mas projeto
-independente.
+Bot público de Discord para moderação, automação e comunidade, multi-guild e
+self-hosted. É um produto independente do Vozen TTS, Music e RPG: partilha apenas
+o contrato central de entitlements, sem copiar código AGPL entre repositórios.
 
-> ⚠️ **Proprietário / não open source.** Repositório privado, sem licença OSS
-> (`"license": "UNLICENSED"`). Não distribuir nem publicar o código.
+> **Código proprietário / não open source.** O acesso público é feito através da
+> instalação OAuth do bot; o código continua privado e sem licença OSS.
 
-## O que faz (visão)
+## Módulos
 
-Cobertura completa de moderação para um servidor: ações de mod com casos e
-escalação, anti-spam, filtros de conteúdo (delegando ao AutoMod nativo o bloqueio
-pré-publicação de slurs/keywords), anti-raid com join gate, anti-nuke via audit
-log, anti-scam, sticky roles e logging total. Tudo config-as-code, sem dashboard.
+O Helper organiza-se por guild e por módulo: Core, Studio, Security, Support,
+Events, Community, Automate e Insights. Inclui casos de moderação, anti-raid,
+quarantine com restauro de cargos, tickets, polls, giveaways, leveling, tags,
+workflows bounded e endpoints de auditoria/privacidade.
 
-O plano de desenvolvimento completo está em [`docs/PLAN.md`](docs/PLAN.md); a
-research que o fundamenta em [`docs/RESEARCH-FEATURES-MODERACAO.md`](docs/RESEARCH-FEATURES-MODERACAO.md)
-e [`docs/RESEARCH-DISCORD-API.md`](docs/RESEARCH-DISCORD-API.md).
+O runtime de produção é Rust (Serenity + Axum + SQLite WAL). O painel React/Vite
+é local e usa OAuth Discord com PKCE, estado de uso único e sessões HttpOnly.
+Node permanece apenas como rollback durante o soak, não como gateway concorrente.
 
-A correspondência entre as regras públicas, deteção e punições está em
+O plano e a evidência de rollout estão em [`docs/PLAN.md`](docs/PLAN.md),
+[`deploy/PARITY-MATRIX.md`](deploy/PARITY-MATRIX.md) e
+[`deploy/ROLLBACK.md`](deploy/ROLLBACK.md). A política de moderação está em
 [`docs/MODERATION-POLICY.md`](docs/MODERATION-POLICY.md).
 
-## Stack
+## Stack e gates locais
 
-TypeScript (NodeNext, strict) · discord.js v14 · better-sqlite3 (WAL) · vitest.
-Mesmas convenções do Vozen: TDD obrigatório, comentários de código em português.
-
-## Arranque (dev)
+Rust 1.97 · Serenity 0.12 · Axum · SQLite WAL · React/Vite local. O legado
+TypeScript/discord.js continua no repositório apenas para rollback controlado.
 
 ```sh
-npm install
-cp .env.example .env   # preencher DISCORD_TOKEN, CLIENT_ID, GUILD_ID
-npm run register        # regista os slash commands no guild
-npm run dev             # arranca em watch mode
+cargo fmt --all -- --check
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-Antes de commitar: `npm run build` + `npm run typecheck` + `npm test` verdes.
+## Arranque Rust
 
-## Segurança / privilégios
+```sh
+cargo run -p vozen-helper
+```
 
-- Liga os **privileged intents** (`Server Members`, `Message Content`) no Developer
-  Portal → Bot. Para um bot em <100 servidores não é preciso review.
-- Dá ao bot um **role acima de todos os moderadores** (mas abaixo do owner): o
-  anti-nuke silencia contas comprometidas removendo-lhes os roles, e o timeout não
-  funciona em admins.
+Configura o `.env` a partir de [`.env.example`](.env.example). O painel local é
+descrito em [`docs/PLAN-PAINEL.md`](docs/PLAN-PAINEL.md); não é publicado pelo
+workflow do Helper.
 
-## Runtime público Rust
+## Segurança e permissões
 
-O runtime público está a ser migrado para Rust (Serenity + Axum + SQLite WAL),
-mantendo o Node como rollback até os gates de memória, segurança, paridade e
-soak serem aprovados. A instalação pública é multi-guild e separa os módulos
-Core, Studio, Security, Support, Events, Community, Automate e Insights por
-guild.
+- Ativa `Server Members Intent` e `Message Content Intent` no Developer Portal.
+- Dá ao bot um role acima dos moderadores, mas abaixo do owner, para que
+  quarantine, restauro e timeouts respeitem a hierarquia do Discord.
+- Usa OAuth2 com `bot` e `applications.commands`; o painel não aceita tokens do
+  Discord no browser.
+- Nunca executar Node e Rust com o mesmo token ao mesmo tempo. O procedimento de
+  rollback está em [`deploy/ROLLBACK.md`](deploy/ROLLBACK.md).
 
-O painel local usa OAuth Discord com PKCE, estado de OAuth de uso único e
-sessões HttpOnly. O Studio expõe Brand Kit e templates versionados por guild;
-templates e painéis são limitados por quotas. O plano Plus (€1,99) é pessoal;
-Premium é de servidor (€3,99 para 3 guilds ou €7,99 para 8 guilds), resolvido
-através do serviço central de entitlements quando configurado.
+## Planos e entitlements
 
-Para staging, publicar primeiro o artefacto Linux e manter o symlink `current`
-no release anterior. Nunca executar dois gateways com o mesmo token; o
-procedimento de rollback está em [`deploy/ROLLBACK.md`](deploy/ROLLBACK.md).
+O serviço central resolve o acesso dos quatro produtos Vozen. Para o Helper:
+Plus custa €1,99; Premium custa €3,99 para 3 guilds ou €7,99 para 8 guilds.
+O Free continua disponível com quotas menores. A atribuição é validada por guild
+e por utilizador, com replay rejection e isolamento entre tenants.
+
+## Estado de rollout
+
+O branch de migração mantém uma matriz de paridade explícita em
+[`deploy/PARITY-MATRIX.md`](deploy/PARITY-MATRIX.md). O goal só pode ser fechado
+depois de o release Rust estar funcional na VPS e passarem os gates de memória,
+segurança, paridade, rollback e soak de sete dias.

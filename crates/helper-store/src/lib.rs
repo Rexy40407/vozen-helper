@@ -522,16 +522,49 @@ impl Store {
     ) -> Result<serde_json::Value> {
         let mut conn = self.conn.lock().expect("store mutex poisoned");
         let tx = conn.transaction()?;
-        let levels = tx.execute(
-            "DELETE FROM levels WHERE guild_id=?1 AND user_id=?2",
-            params![guild_id, user_id],
-        )?;
-        let afk = tx.execute(
-            "DELETE FROM afk WHERE guild_id=?1 AND user_id=?2",
-            params![guild_id, user_id],
-        )?;
+        let mut deleted = serde_json::Map::new();
+        for (name, statement) in [
+            (
+                "suggestion_votes",
+                "DELETE FROM suggestion_votes WHERE suggestion_id IN (SELECT id FROM suggestions WHERE guild_id=?2 AND author_id=?1) OR (user_id=?1 AND suggestion_id IN (SELECT id FROM suggestions WHERE guild_id=?2))",
+            ),
+            (
+                "giveaway_entries",
+                "DELETE FROM giveaway_entries WHERE user_id=?1 AND giveaway_id IN (SELECT id FROM giveaways WHERE guild_id=?2)",
+            ),
+            (
+                "poll_votes",
+                "DELETE FROM poll_votes WHERE user_id=?1 AND poll_id IN (SELECT id FROM polls WHERE guild_id=?2)",
+            ),
+            (
+                "scheduled_reminders",
+                "DELETE FROM scheduled_actions WHERE guild_id=?2 AND type='reminder' AND target_id=?1",
+            ),
+            (
+                "event_registrations",
+                "DELETE FROM event_registrations WHERE guild_id=?2 AND user_id=?1",
+            ),
+            ("afk", "DELETE FROM afk WHERE guild_id=?2 AND user_id=?1"),
+            (
+                "levels",
+                "DELETE FROM levels WHERE guild_id=?2 AND user_id=?1",
+            ),
+            (
+                "tags",
+                "DELETE FROM tags WHERE guild_id=?2 AND author_id=?1",
+            ),
+            (
+                "suggestions",
+                "DELETE FROM suggestions WHERE guild_id=?2 AND author_id=?1",
+            ),
+        ] {
+            let count = tx.execute(statement, params![user_id, guild_id])?;
+            if count > 0 {
+                deleted.insert(name.to_string(), serde_json::json!(count));
+            }
+        }
         tx.commit()?;
-        Ok(serde_json::json!({"levels": levels, "afk": afk}))
+        Ok(serde_json::Value::Object(deleted))
     }
 
     pub fn upsert_tag(
@@ -2424,14 +2457,23 @@ mod tests {
         let store = Store::open(":memory:").unwrap();
         store.set_afk("g", "u", "away").unwrap();
         store.add_xp("g", "u", 42).unwrap();
+        store.upsert_tag("g", "mine", "hello", "u").unwrap();
+        let suggestion = store.create_suggestion("g", "u", "remove me").unwrap();
+        store.vote_suggestion(suggestion, "u", 1).unwrap();
+        store.register_event("g", "event-1", "u").unwrap();
         store
             .record_case("g", "warn", "u", "mod", "kept", None)
             .unwrap();
         let deleted = store.delete_member_voluntary_data("g", "u").unwrap();
         assert_eq!(deleted["levels"], 1);
         assert_eq!(deleted["afk"], 1);
+        assert_eq!(deleted["tags"], 1);
+        assert_eq!(deleted["suggestions"], 1);
+        assert_eq!(deleted["event_registrations"], 1);
         assert_eq!(store.level_for("g", "u").unwrap(), 0);
         assert!(store.get_afk("g", "u").unwrap().is_none());
+        assert!(store.get_tag("g", "mine").unwrap().is_none());
+        assert_eq!(store.suggestion_votes(suggestion).unwrap(), (0, 0));
         assert_eq!(store.recent_cases("g", 10).unwrap().len(), 1);
     }
 }
