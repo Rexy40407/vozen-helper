@@ -61,6 +61,64 @@ pub struct TicketRecord {
     pub created_at: i64,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SuggestionRecord {
+    pub id: i64,
+    pub guild_id: String,
+    pub author_id: String,
+    pub content: String,
+    pub message_id: Option<String>,
+    pub status: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GiveawayRecord {
+    pub id: i64,
+    pub guild_id: String,
+    pub channel_id: String,
+    pub message_id: Option<String>,
+    pub prize: String,
+    pub winners: i64,
+    pub end_at: i64,
+    pub ended: bool,
+    pub required_role_id: Option<String>,
+    pub host_id: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StarEntry {
+    pub starboard_message_id: String,
+    pub star_count: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PollRecord {
+    pub id: i64,
+    pub guild_id: String,
+    pub channel_id: String,
+    pub message_id: Option<String>,
+    pub question: String,
+    pub options: Vec<String>,
+    pub end_at: i64,
+    pub closed: bool,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkflowRecord {
+    pub id: i64,
+    pub guild_id: String,
+    pub name: String,
+    pub trigger: String,
+    pub condition: String,
+    pub action: String,
+    pub payload: String,
+    pub enabled: bool,
+    pub created_at: i64,
+}
+
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
@@ -82,7 +140,7 @@ impl Store {
         // Keep the ticket schema compatible with the existing Node Helper DB.
         // The owner column is named `opener_id` there; changing it to `user_id`
         // would make an in-place Rust cutover fail on the live database.
-        conn.execute_batch("CREATE TABLE IF NOT EXISTS tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, opener_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', claimed_by TEXT, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_tickets_owner ON tickets(guild_id,opener_id,status);")?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, opener_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', claimed_by TEXT, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_tickets_owner ON tickets(guild_id,opener_id,status); CREATE TABLE IF NOT EXISTS suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, author_id TEXT NOT NULL, content TEXT NOT NULL, message_id TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS suggestion_votes (suggestion_id INTEGER NOT NULL, user_id TEXT NOT NULL, vote INTEGER NOT NULL, PRIMARY KEY(suggestion_id,user_id)); CREATE TABLE IF NOT EXISTS giveaways (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, prize TEXT NOT NULL, winners INTEGER NOT NULL DEFAULT 1, end_at INTEGER NOT NULL, ended INTEGER NOT NULL DEFAULT 0, required_role_id TEXT, host_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS giveaway_entries (giveaway_id INTEGER NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY(giveaway_id,user_id)); CREATE TABLE IF NOT EXISTS polls (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, question TEXT NOT NULL, options TEXT NOT NULL, end_at INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS poll_votes (poll_id INTEGER NOT NULL, user_id TEXT NOT NULL, choice INTEGER NOT NULL, PRIMARY KEY(poll_id,user_id)); CREATE TABLE IF NOT EXISTS workflows (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, name TEXT NOT NULL, trigger TEXT NOT NULL, condition TEXT NOT NULL DEFAULT '', action TEXT NOT NULL, payload TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS workflow_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id INTEGER NOT NULL, guild_id TEXT NOT NULL, source_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_workflows_trigger ON workflows(guild_id,trigger,enabled); CREATE TABLE IF NOT EXISTS starboard (guild_id TEXT NOT NULL, original_message_id TEXT NOT NULL, starboard_message_id TEXT NOT NULL, star_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,original_message_id));")?;
         Ok(())
     }
 
@@ -309,6 +367,23 @@ impl Store {
         )? > 0)
     }
 
+    pub fn get_setting(&self, guild_id: &str, key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT value FROM settings WHERE guild_id=?1 AND key=?2",
+                params![guild_id, key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set_setting(&self, guild_id: &str, key: &str, value: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("INSERT INTO settings(guild_id,key,value,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(guild_id,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params![guild_id, key, value, Utc::now().timestamp_millis()])?;
+        Ok(())
+    }
+
     pub fn add_xp(&self, guild_id: &str, user_id: &str, amount: i64) -> Result<i64> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
@@ -355,6 +430,18 @@ impl Store {
         Ok(())
     }
 
+    pub fn record_join(&self, guild_id: &str, day: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("INSERT INTO stats(guild_id,date,messages,joins,leaves) VALUES(?1,?2,0,1,0) ON CONFLICT(guild_id,date) DO UPDATE SET joins=joins+1", params![guild_id, day])?;
+        Ok(())
+    }
+
+    pub fn record_leave(&self, guild_id: &str, day: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("INSERT INTO stats(guild_id,date,messages,joins,leaves) VALUES(?1,?2,0,0,1) ON CONFLICT(guild_id,date) DO UPDATE SET leaves=leaves+1", params![guild_id, day])?;
+        Ok(())
+    }
+
     pub fn stats_for(&self, guild_id: &str, limit: u32) -> Result<Vec<(String, i64, i64, i64)>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut stmt = conn.prepare("SELECT date,messages,joins,leaves FROM stats WHERE guild_id=?1 ORDER BY date DESC LIMIT ?2")?;
@@ -371,8 +458,19 @@ impl Store {
         execute_at: i64,
         payload: &str,
     ) -> Result<i64> {
+        self.schedule_typed(guild_id, "reminder", target_id, execute_at, payload)
+    }
+
+    pub fn schedule_typed(
+        &self,
+        guild_id: &str,
+        action_type: &str,
+        target_id: &str,
+        execute_at: i64,
+        payload: &str,
+    ) -> Result<i64> {
         let conn = self.conn.lock().expect("store mutex poisoned");
-        conn.execute("INSERT INTO scheduled_actions(guild_id,type,target_id,execute_at,payload,case_id) VALUES(?1,'reminder',?2,?3,?4,NULL)", params![guild_id, target_id, execute_at, payload])?;
+        conn.execute("INSERT INTO scheduled_actions(guild_id,type,target_id,execute_at,payload,case_id) VALUES(?1,?2,?3,?4,?5,NULL)", params![guild_id, action_type, target_id, execute_at, payload])?;
         Ok(conn.last_insert_rowid())
     }
 
@@ -421,6 +519,306 @@ impl Store {
             "UPDATE tickets SET status='closed' WHERE channel_id=?1 AND status='open'",
             [channel_id],
         )? > 0)
+    }
+
+    pub fn create_suggestion(&self, guild_id: &str, author_id: &str, content: &str) -> Result<i64> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT INTO suggestions(guild_id,author_id,content,status,created_at) VALUES(?1,?2,?3,'pending',?4)",
+            params![guild_id, author_id, content, Utc::now().timestamp_millis()],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn set_suggestion_message(&self, id: i64, message_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "UPDATE suggestions SET message_id=?2 WHERE id=?1",
+            params![id, message_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn suggestion(&self, id: i64) -> Result<Option<SuggestionRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.query_row(
+            "SELECT id,guild_id,author_id,content,message_id,status,created_at FROM suggestions WHERE id=?1",
+            [id],
+            |row| Ok(SuggestionRecord {
+                id: row.get(0)?, guild_id: row.get(1)?, author_id: row.get(2)?,
+                content: row.get(3)?, message_id: row.get(4)?, status: row.get(5)?, created_at: row.get(6)?,
+            }),
+        ).optional()?)
+    }
+
+    pub fn set_suggestion_status(&self, guild_id: &str, id: i64, status: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "UPDATE suggestions SET status=?3 WHERE id=?1 AND guild_id=?2",
+            params![id, guild_id, status],
+        )? > 0)
+    }
+
+    pub fn vote_suggestion(&self, id: i64, user_id: &str, vote: i32) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT INTO suggestion_votes(suggestion_id,user_id,vote) VALUES(?1,?2,?3) ON CONFLICT(suggestion_id,user_id) DO UPDATE SET vote=excluded.vote",
+            params![id, user_id, vote.clamp(-1, 1)],
+        )?;
+        Ok(())
+    }
+
+    pub fn suggestion_votes(&self, id: i64) -> Result<(i64, i64)> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT COALESCE(SUM(vote=1),0),COALESCE(SUM(vote=-1),0) FROM suggestion_votes WHERE suggestion_id=?1")?;
+        Ok(stmt.query_row([id], |row| Ok((row.get(0)?, row.get(1)?)))?)
+    }
+
+    pub fn create_giveaway(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        prize: &str,
+        winners: i64,
+        end_at: i64,
+        required_role_id: Option<&str>,
+        host_id: &str,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT INTO giveaways(guild_id,channel_id,prize,winners,end_at,required_role_id,host_id,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![guild_id, channel_id, prize, winners.clamp(1, 20), end_at, required_role_id, host_id, Utc::now().timestamp_millis()],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn set_giveaway_message(&self, id: i64, message_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "UPDATE giveaways SET message_id=?2 WHERE id=?1",
+            params![id, message_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn giveaway(&self, id: i64) -> Result<Option<GiveawayRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.query_row(
+            "SELECT id,guild_id,channel_id,message_id,prize,winners,end_at,ended,required_role_id,host_id,created_at FROM giveaways WHERE id=?1",
+            [id],
+            |row| Ok(GiveawayRecord {
+                id: row.get(0)?, guild_id: row.get(1)?, channel_id: row.get(2)?, message_id: row.get(3)?,
+                prize: row.get(4)?, winners: row.get(5)?, end_at: row.get(6)?, ended: row.get::<_, i64>(7)? != 0,
+                required_role_id: row.get(8)?, host_id: row.get(9)?, created_at: row.get(10)?,
+            }),
+        ).optional()?)
+    }
+
+    pub fn active_giveaways(&self, guild_id: &str, limit: u32) -> Result<Vec<GiveawayRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id,guild_id,channel_id,message_id,prize,winners,end_at,ended,required_role_id,host_id,created_at FROM giveaways WHERE guild_id=?1 AND ended=0 ORDER BY end_at LIMIT ?2")?;
+        let rows = stmt.query_map(params![guild_id, i64::from(limit.min(50))], |row| {
+            Ok(GiveawayRecord {
+                id: row.get(0)?,
+                guild_id: row.get(1)?,
+                channel_id: row.get(2)?,
+                message_id: row.get(3)?,
+                prize: row.get(4)?,
+                winners: row.get(5)?,
+                end_at: row.get(6)?,
+                ended: row.get::<_, i64>(7)? != 0,
+                required_role_id: row.get(8)?,
+                host_id: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn end_giveaway(&self, id: i64) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute("UPDATE giveaways SET ended=1 WHERE id=?1 AND ended=0", [id])? > 0)
+    }
+
+    pub fn add_giveaway_entry(&self, id: i64, user_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "INSERT OR IGNORE INTO giveaway_entries(giveaway_id,user_id) VALUES(?1,?2)",
+            params![id, user_id],
+        )? > 0)
+    }
+
+    pub fn remove_giveaway_entry(&self, id: i64, user_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "DELETE FROM giveaway_entries WHERE giveaway_id=?1 AND user_id=?2",
+            params![id, user_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn giveaway_entries(&self, id: i64) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT user_id FROM giveaway_entries WHERE giveaway_id=?1 ORDER BY user_id",
+        )?;
+        let rows = stmt.query_map([id], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn star_entry(&self, guild_id: &str, original_id: &str) -> Result<Option<StarEntry>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.query_row("SELECT starboard_message_id,star_count FROM starboard WHERE guild_id=?1 AND original_message_id=?2", params![guild_id, original_id], |row| Ok(StarEntry { starboard_message_id: row.get(0)?, star_count: row.get(1)? })).optional()?)
+    }
+
+    pub fn upsert_star_entry(
+        &self,
+        guild_id: &str,
+        original_id: &str,
+        board_message_id: &str,
+        count: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("INSERT INTO starboard(guild_id,original_message_id,starboard_message_id,star_count) VALUES(?1,?2,?3,?4) ON CONFLICT(guild_id,original_message_id) DO UPDATE SET starboard_message_id=excluded.starboard_message_id,star_count=excluded.star_count", params![guild_id, original_id, board_message_id, count])?;
+        Ok(())
+    }
+
+    pub fn delete_star_entry(&self, guild_id: &str, original_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "DELETE FROM starboard WHERE guild_id=?1 AND original_message_id=?2",
+            params![guild_id, original_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn create_poll(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        question: &str,
+        options: &[String],
+        end_at: i64,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("INSERT INTO polls(guild_id,channel_id,question,options,end_at,created_at) VALUES(?1,?2,?3,?4,?5,?6)", params![guild_id, channel_id, question, serde_json::to_string(options)?, end_at, Utc::now().timestamp_millis()])?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn set_poll_message(&self, id: i64, message_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "UPDATE polls SET message_id=?2 WHERE id=?1",
+            params![id, message_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn poll(&self, id: i64) -> Result<Option<PollRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.query_row("SELECT id,guild_id,channel_id,message_id,question,options,end_at,closed,created_at FROM polls WHERE id=?1", [id], |row| {
+            let options: String = row.get(5)?;
+            Ok(PollRecord { id: row.get(0)?, guild_id: row.get(1)?, channel_id: row.get(2)?, message_id: row.get(3)?, question: row.get(4)?, options: serde_json::from_str(&options).unwrap_or_default(), end_at: row.get(6)?, closed: row.get::<_, i64>(7)? != 0, created_at: row.get(8)? })
+        }).optional()?)
+    }
+
+    pub fn vote_poll(&self, id: i64, user_id: &str, choice: usize) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("INSERT INTO poll_votes(poll_id,user_id,choice) VALUES(?1,?2,?3) ON CONFLICT(poll_id,user_id) DO UPDATE SET choice=excluded.choice", params![id, user_id, choice as i64])?;
+        Ok(())
+    }
+
+    pub fn poll_counts(&self, id: i64, choices: usize) -> Result<Vec<i64>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut counts = vec![0_i64; choices];
+        let mut stmt = conn
+            .prepare("SELECT choice,COUNT(*) FROM poll_votes WHERE poll_id=?1 GROUP BY choice")?;
+        let rows = stmt.query_map([id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (choice, count) = row?;
+            if let Some(slot) = counts.get_mut(choice.max(0) as usize) {
+                *slot = count;
+            }
+        }
+        Ok(counts)
+    }
+
+    pub fn close_poll(&self, id: i64) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute("UPDATE polls SET closed=1 WHERE id=?1 AND closed=0", [id])? > 0)
+    }
+
+    pub fn create_workflow(
+        &self,
+        guild_id: &str,
+        name: &str,
+        trigger: &str,
+        condition: &str,
+        action: &str,
+        payload: &str,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("INSERT INTO workflows(guild_id,name,trigger,condition,action,payload,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![guild_id, name, trigger, condition, action, payload, Utc::now().timestamp_millis()])?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn workflows(&self, guild_id: &str, limit: u32) -> Result<Vec<WorkflowRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id,guild_id,name,trigger,condition,action,payload,enabled,created_at FROM workflows WHERE guild_id=?1 ORDER BY id DESC LIMIT ?2")?;
+        let rows = stmt.query_map(params![guild_id, i64::from(limit.min(100))], |row| {
+            Ok(WorkflowRecord {
+                id: row.get(0)?,
+                guild_id: row.get(1)?,
+                name: row.get(2)?,
+                trigger: row.get(3)?,
+                condition: row.get(4)?,
+                action: row.get(5)?,
+                payload: row.get(6)?,
+                enabled: row.get::<_, i64>(7)? != 0,
+                created_at: row.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn active_workflows(&self, guild_id: &str, trigger: &str) -> Result<Vec<WorkflowRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id,guild_id,name,trigger,condition,action,payload,enabled,created_at FROM workflows WHERE guild_id=?1 AND trigger=?2 AND enabled=1 ORDER BY id LIMIT 25")?;
+        let rows = stmt.query_map(params![guild_id, trigger], |row| {
+            Ok(WorkflowRecord {
+                id: row.get(0)?,
+                guild_id: row.get(1)?,
+                name: row.get(2)?,
+                trigger: row.get(3)?,
+                condition: row.get(4)?,
+                action: row.get(5)?,
+                payload: row.get(6)?,
+                enabled: row.get::<_, i64>(7)? != 0,
+                created_at: row.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn delete_workflow(&self, guild_id: &str, id: i64) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "DELETE FROM workflows WHERE guild_id=?1 AND id=?2",
+            params![guild_id, id],
+        )? > 0)
+    }
+
+    pub fn record_workflow_run(
+        &self,
+        workflow_id: i64,
+        guild_id: &str,
+        source_id: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("INSERT INTO workflow_runs(workflow_id,guild_id,source_id,created_at) VALUES(?1,?2,?3,?4)", params![workflow_id, guild_id, source_id, Utc::now().timestamp_millis()])?;
+        Ok(())
     }
 }
 
@@ -498,5 +896,47 @@ mod tests {
         let jobs = store.due_scheduled_actions(1, 10).unwrap();
         assert_eq!(jobs[0].0, id);
         assert_eq!(jobs[0].4, r#"{"channel_id":"2","text":"hello"}"#);
+    }
+
+    #[test]
+    fn events_and_suggestions_round_trip() {
+        let store = Store::open(":memory:").unwrap();
+        let suggestion = store
+            .create_suggestion("g", "u", "Add a weekly event")
+            .unwrap();
+        store.vote_suggestion(suggestion, "voter", 1).unwrap();
+        assert_eq!(store.suggestion_votes(suggestion).unwrap(), (1, 0));
+        assert!(
+            store
+                .set_suggestion_status("g", suggestion, "approved")
+                .unwrap()
+        );
+
+        let giveaway = store
+            .create_giveaway("g", "10", "Prize", 2, 100, None, "u")
+            .unwrap();
+        assert!(store.add_giveaway_entry(giveaway, "winner").unwrap());
+        assert!(!store.add_giveaway_entry(giveaway, "winner").unwrap());
+        assert_eq!(store.giveaway_entries(giveaway).unwrap(), vec!["winner"]);
+        assert!(store.end_giveaway(giveaway).unwrap());
+
+        let poll = store
+            .create_poll("g", "10", "Choose", &["A".into(), "B".into()], 100)
+            .unwrap();
+        store.vote_poll(poll, "voter", 1).unwrap();
+        assert_eq!(store.poll_counts(poll, 2).unwrap(), vec![0, 1]);
+        assert!(store.close_poll(poll).unwrap());
+
+        let workflow = store
+            .create_workflow("g", "welcome", "message", "hello", "reply", "Hi {user}")
+            .unwrap();
+        assert_eq!(
+            store.active_workflows("g", "message").unwrap()[0].id,
+            workflow
+        );
+        store
+            .record_workflow_run(workflow, "g", "message-1")
+            .unwrap();
+        assert!(store.delete_workflow("g", workflow).unwrap());
     }
 }

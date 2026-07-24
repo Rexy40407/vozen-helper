@@ -4,6 +4,7 @@ use anyhow::Result;
 use helper_core::Config;
 use helper_modules::EntitlementClient;
 use helper_store::Store;
+use rand::seq::SliceRandom;
 use serenity::{
     all::{
         ButtonStyle, ChannelId, Client, Command, CommandDataOptionValue, CommandInteraction,
@@ -318,6 +319,184 @@ impl EventHandler for Handler {
                 ),
             CreateCommand::new("leaderboard").description("Show the XP leaderboard"),
             CreateCommand::new("serverstats").description("Show basic server statistics"),
+            CreateCommand::new("starboard-set")
+                .description("Configure the starboard channel (staff)")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Channel,
+                        "channel",
+                        "Starboard channel",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("suggest")
+                .description("Submit a community suggestion")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "text",
+                        "Suggestion text",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("suggestion")
+                .description("Review a community suggestion (staff)")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "id",
+                        "Suggestion ID",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "status",
+                        "pending, approved, denied or considered",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("giveaway-start")
+                .description("Start a durable giveaway (staff)")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "prize",
+                        "Prize",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "duration",
+                        "Examples: 10m, 2h, 1d",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "winners",
+                        "Number of winners",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Role,
+                        "required_role",
+                        "Optional required role",
+                    )
+                    .required(false),
+                ),
+            CreateCommand::new("giveaway-end")
+                .description("End a giveaway now (staff)")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "id",
+                        "Giveaway ID",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("giveaway-list").description("List active giveaways"),
+            CreateCommand::new("poll")
+                .description("Create a multi-choice poll")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "question",
+                        "Question",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "option1",
+                        "Option 1",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "option2",
+                        "Option 2",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "option3",
+                        "Option 3",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "option4",
+                        "Option 4",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "option5",
+                        "Option 5",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "duration",
+                        "Examples: 10m, 2h, 1d",
+                    )
+                    .required(false),
+                ),
+            CreateCommand::new("workflow-create")
+                .description("Create a bounded message automation (staff)")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "name",
+                        "Workflow name",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "contains",
+                        "Only run when message contains this text",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "reply",
+                        "Reply text; use {user} and {message}",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("workflow-list").description("List message automations"),
+            CreateCommand::new("workflow-delete")
+                .description("Delete a message automation (staff)")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "id",
+                        "Workflow ID",
+                    )
+                    .required(true),
+                ),
             CreateCommand::new("ticket-panel").description("Create a support ticket panel"),
             CreateCommand::new("rolepanel")
                 .description("Create a self-role panel")
@@ -431,6 +610,161 @@ impl EventHandler for Handler {
         }
     }
 
+    async fn guild_member_addition(&self, ctx: Context, new_member: serenity::all::Member) {
+        let guild_id = new_member.guild_id;
+        let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let _ = self.store.record_join(&guild_id.to_string(), &day);
+        if let Ok(guild) = guild_id.to_partial_guild(&ctx.http).await {
+            if let Some(channel_id) = guild.system_channel_id {
+                let _ = channel_id
+                    .say(
+                        &ctx.http,
+                        format!("👋 Bem-vindo ao servidor, <@{}>!", new_member.user.id),
+                    )
+                    .await;
+            }
+        }
+    }
+
+    async fn guild_member_removal(
+        &self,
+        _ctx: Context,
+        guild_id: serenity::all::GuildId,
+        _user: serenity::all::User,
+        _member_data_if_available: Option<serenity::all::Member>,
+    ) {
+        let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let _ = self.store.record_leave(&guild_id.to_string(), &day);
+    }
+
+    async fn auto_moderation_action_execution(
+        &self,
+        _ctx: Context,
+        execution: serenity::all::ActionExecution,
+    ) {
+        let reason = format!(
+            "Discord AutoMod rule {} ({:?}){}",
+            execution.rule_id,
+            execution.trigger_type,
+            execution
+                .matched_keyword
+                .as_deref()
+                .map(|keyword| format!("; matched keyword: {keyword}"))
+                .unwrap_or_default()
+        );
+        let _ = self.store.record_case(
+            &execution.guild_id.to_string(),
+            "automod",
+            &execution.user_id.to_string(),
+            "discord-automod",
+            &reason,
+            None,
+        );
+    }
+
+    async fn reaction_add(&self, ctx: Context, reaction: serenity::all::Reaction) {
+        let Some(guild_id) = reaction.guild_id else {
+            return;
+        };
+        if reaction.user_id == ctx.http.get_current_user().await.ok().map(|user| user.id) {
+            return;
+        }
+        let serenity::all::ReactionType::Unicode(emoji) = &reaction.emoji else {
+            return;
+        };
+        if emoji != "⭐" && emoji != "🌟" {
+            return;
+        }
+        let Ok(Some(raw_board_id)) = self
+            .store
+            .get_setting(&guild_id.to_string(), "community.starboard.channel_id")
+        else {
+            return;
+        };
+        let Ok(board_id) = raw_board_id.parse::<u64>() else {
+            return;
+        };
+        if board_id == reaction.channel_id.get() {
+            return;
+        }
+        let Ok(users) = reaction
+            .channel_id
+            .reaction_users(
+                &ctx.http,
+                reaction.message_id,
+                reaction.emoji.clone(),
+                Some(100),
+                None,
+            )
+            .await
+        else {
+            return;
+        };
+        let count = users.len() as i64;
+        let original = match reaction
+            .channel_id
+            .message(&ctx.http, reaction.message_id)
+            .await
+        {
+            Ok(message) => message,
+            Err(_) => return,
+        };
+        let link = format!(
+            "https://discord.com/channels/{}/{}/{}",
+            guild_id, reaction.channel_id, reaction.message_id
+        );
+        if count < 3 {
+            if let Ok(Some(entry)) = self
+                .store
+                .star_entry(&guild_id.to_string(), &reaction.message_id.to_string())
+            {
+                if let Ok(message_id) = entry.starboard_message_id.parse::<u64>() {
+                    let _ = serenity::all::ChannelId::new(board_id)
+                        .delete_message(&ctx.http, serenity::all::MessageId::new(message_id))
+                        .await;
+                }
+                let _ = self
+                    .store
+                    .delete_star_entry(&guild_id.to_string(), &reaction.message_id.to_string());
+            }
+            return;
+        }
+        let content = format!(
+            "⭐ **{} estrelas** em <@{}>\n{}\n{}",
+            count, original.author.id, original.content, link
+        );
+        if let Ok(Some(entry)) = self
+            .store
+            .star_entry(&guild_id.to_string(), &reaction.message_id.to_string())
+        {
+            if let Ok(message_id) = entry.starboard_message_id.parse::<u64>() {
+                let _ = serenity::all::ChannelId::new(board_id)
+                    .edit_message(
+                        &ctx.http,
+                        serenity::all::MessageId::new(message_id),
+                        serenity::all::EditMessage::new().content(content),
+                    )
+                    .await;
+                let _ = self.store.upsert_star_entry(
+                    &guild_id.to_string(),
+                    &reaction.message_id.to_string(),
+                    &entry.starboard_message_id,
+                    count,
+                );
+            }
+        } else if let Ok(message) = serenity::all::ChannelId::new(board_id)
+            .say(&ctx.http, content)
+            .await
+        {
+            let _ = self.store.upsert_star_entry(
+                &guild_id.to_string(),
+                &reaction.message_id.to_string(),
+                &message.id.to_string(),
+                count,
+            );
+        }
+    }
+
     async fn message(&self, ctx: Context, message: serenity::all::Message) {
         if message.author.bot {
             return;
@@ -500,6 +834,32 @@ impl EventHandler for Handler {
                     ),
                 )
                 .await;
+        }
+        if let Ok(workflows) = self.store.active_workflows(&guild_text, "message") {
+            let lower = message.content.to_lowercase();
+            for workflow in workflows {
+                if !workflow.condition.is_empty()
+                    && !lower.contains(&workflow.condition.to_lowercase())
+                {
+                    continue;
+                }
+                if workflow.action != "reply" {
+                    continue;
+                }
+                let reply = workflow
+                    .payload
+                    .replace("{user}", &format!("<@{}>", message.author.id))
+                    .replace("{message}", &truncate(&message.content, 500));
+                let _ = message
+                    .channel_id
+                    .say(&ctx.http, truncate(&reply, 1_500))
+                    .await;
+                let _ = self.store.record_workflow_run(
+                    workflow.id,
+                    &guild_text,
+                    &message.id.to_string(),
+                );
+            }
         }
     }
 }
@@ -827,6 +1187,148 @@ impl Handler {
                 let messages: i64 = rows.iter().map(|(_, messages, _, _)| messages).sum();
                 format!("Mensagens registadas nos últimos {} dias: {}.", rows.len(), messages)
             }
+            "starboard-set" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let Some(channel_id) = command.data.options.iter().find_map(|option| match option.value {
+                    CommandDataOptionValue::Channel(channel) if option.name == "channel" => Some(channel),
+                    _ => None,
+                }) else {
+                    return respond(ctx, command, "Indica um canal válido.").await;
+                };
+                self.store.set_setting(&guild_id.to_string(), "community.starboard.channel_id", &channel_id.to_string())?;
+                format!("Starboard configurado no canal <#{}>. Requer 3 ⭐ para publicar.", channel_id)
+            }
+            "suggest" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let text = option_string(command, "text").unwrap_or_default().trim();
+                if !(3..=1_000).contains(&text.len()) {
+                    return respond(ctx, command, "A sugestão deve ter entre 3 e 1000 caracteres.").await;
+                }
+                let id = self.store.create_suggestion(&guild_id.to_string(), &command.user.id.to_string(), text)?;
+                let message = command.channel_id.send_message(&ctx.http, serenity::all::CreateMessage::new()
+                    .content(format!("**Sugestão #{id}** por <@{}>\n{text}\n\nVota nesta sugestão:", command.user.id))
+                    .components(vec![CreateActionRow::Buttons(vec![
+                        CreateButton::new(format!("suggest:up:{id}")).label("Apoio").style(ButtonStyle::Success),
+                        CreateButton::new(format!("suggest:down:{id}")).label("Contra").style(ButtonStyle::Danger),
+                    ])])).await?;
+                self.store.set_suggestion_message(id, &message.id.to_string())?;
+                format!("Sugestão #{id} publicada.")
+            }
+            "suggestion" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let id = option_i64(command, "id").unwrap_or(0);
+                let status = option_string(command, "status").unwrap_or_default().to_ascii_lowercase();
+                if !matches!(status.as_str(), "pending" | "approved" | "denied" | "considered") {
+                    return respond(ctx, command, "Estado inválido: pending, approved, denied ou considered.").await;
+                }
+                if self.store.set_suggestion_status(&guild_id.to_string(), id, &status)? {
+                    format!("Sugestão #{id} marcada como {status}.")
+                } else {
+                    "Sugestão não encontrada neste servidor.".to_string()
+                }
+            }
+            "giveaway-start" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let prize = option_string(command, "prize").unwrap_or_default().trim();
+                let Some(delay) = parse_duration(option_string(command, "duration").unwrap_or_default()) else {
+                    return respond(ctx, command, "Duração inválida. Usa 10m, 2h ou 1d.").await;
+                };
+                if prize.is_empty() || prize.len() > 200 {
+                    return respond(ctx, command, "O prémio deve ter entre 1 e 200 caracteres.").await;
+                }
+                let winners = option_i64(command, "winners").unwrap_or(1).clamp(1, 20);
+                let required_role = command.data.options.iter().find_map(|option| match option.value {
+                    CommandDataOptionValue::Role(role) if option.name == "required_role" => Some(role.to_string()),
+                    _ => None,
+                });
+                let end_at = chrono::Utc::now().timestamp_millis() + delay;
+                let id = self.store.create_giveaway(&guild_id.to_string(), &command.channel_id.to_string(), prize, winners, end_at, required_role.as_deref(), &command.user.id.to_string())?;
+                let message = command.channel_id.send_message(&ctx.http, serenity::all::CreateMessage::new()
+                    .content(format!("🎉 **Giveaway #{id}**\nPrémio: **{prize}**\nVencedores: **{winners}**\nTermina <t:{}:R>\nCarrega no botão para participar.", end_at / 1_000))
+                    .components(vec![CreateActionRow::Buttons(vec![CreateButton::new(format!("giveaway:join:{id}")).label("Participar").style(ButtonStyle::Primary)])])).await?;
+                self.store.set_giveaway_message(id, &message.id.to_string())?;
+                self.store.schedule_typed(&guild_id.to_string(), "giveaway_end", &command.user.id.to_string(), end_at, &serde_json::json!({"channel_id": command.channel_id.to_string(), "giveaway_id": id}).to_string())?;
+                format!("Giveaway #{id} criado.")
+            }
+            "giveaway-end" => {
+                let id = option_i64(command, "id").unwrap_or(0);
+                if finish_giveaway(&ctx.http, &self.store, id).await? {
+                    format!("Giveaway #{id} terminado.")
+                } else {
+                    "Giveaway não encontrado ou já terminado.".to_string()
+                }
+            }
+            "giveaway-list" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let rows = self.store.active_giveaways(&guild_id.to_string(), 20)?;
+                if rows.is_empty() { "Não existem giveaways ativos.".to_string() } else {
+                    rows.into_iter().map(|row| format!("#{} — {} — termina <t:{}:R>", row.id, row.prize, row.end_at / 1_000)).collect::<Vec<_>>().join("\n")
+                }
+            }
+            "poll" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let question = option_string(command, "question").unwrap_or_default().trim();
+                let mut options = Vec::new();
+                for name in ["option1", "option2", "option3", "option4", "option5"] {
+                    if let Some(value) = option_string(command, name).map(str::trim).filter(|value| !value.is_empty()) {
+                        options.push(value.to_string());
+                    }
+                }
+                if question.is_empty() || options.len() < 2 {
+                    return respond(ctx, command, "Indica uma pergunta e pelo menos duas opções.").await;
+                }
+                let delay = parse_duration(option_string(command, "duration").unwrap_or("1d")).unwrap_or(86_400_000);
+                let end_at = chrono::Utc::now().timestamp_millis() + delay;
+                let id = self.store.create_poll(&guild_id.to_string(), &command.channel_id.to_string(), question, &options, end_at)?;
+                let labels = options.iter().enumerate().map(|(index, value)| CreateButton::new(format!("poll:{id}:{index}")).label(format!("{}: {}", index + 1, truncate(value, 70))).style(ButtonStyle::Secondary)).collect::<Vec<_>>();
+                let message = command.channel_id.send_message(&ctx.http, serenity::all::CreateMessage::new()
+                    .content(format!("🗳️ **Poll #{id}: {question}**\n{}\nTermina <t:{}:R>", options.iter().enumerate().map(|(i, v)| format!("{}️⃣ {}", i + 1, v)).collect::<Vec<_>>().join("\n"), end_at / 1_000))
+                    .components(vec![CreateActionRow::Buttons(labels)])).await?;
+                self.store.set_poll_message(id, &message.id.to_string())?;
+                self.store.schedule_typed(&guild_id.to_string(), "poll_end", &command.user.id.to_string(), end_at, &serde_json::json!({"channel_id": command.channel_id.to_string(), "poll_id": id}).to_string())?;
+                format!("Poll #{id} criada.")
+            }
+            "workflow-create" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let name = option_string(command, "name").unwrap_or_default().trim();
+                let condition = option_string(command, "contains").unwrap_or_default().trim();
+                let reply = option_string(command, "reply").unwrap_or_default().trim();
+                if !(1..=50).contains(&name.len()) || !(1..=1_000).contains(&reply.len()) || condition.len() > 200 {
+                    return respond(ctx, command, "Nome, condição ou resposta inválidos.").await;
+                }
+                let id = self.store.create_workflow(&guild_id.to_string(), name, "message", condition, "reply", reply)?;
+                format!("Workflow #{id} criado. É executado quando uma mensagem corresponde à condição.")
+            }
+            "workflow-list" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let workflows = self.store.workflows(&guild_id.to_string(), 25)?;
+                if workflows.is_empty() { "Não existem workflows configurados.".to_string() } else {
+                    workflows.into_iter().map(|workflow| format!("#{} **{}** · {} · {}", workflow.id, workflow.name, workflow.trigger, if workflow.enabled { "ativo" } else { "desligado" })).collect::<Vec<_>>().join("\n")
+                }
+            }
+            "workflow-delete" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                let id = option_i64(command, "id").unwrap_or(0);
+                if self.store.delete_workflow(&guild_id.to_string(), id)? { format!("Workflow #{id} eliminado.") } else { "Workflow não encontrado neste servidor.".to_string() }
+            }
             "ticket-panel" => {
                 let Some(_guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
@@ -903,6 +1405,112 @@ impl Handler {
         let Some(guild_id) = component.guild_id else {
             return respond_component(ctx, component, "Este botão só funciona num servidor.").await;
         };
+        if let Some((kind, raw_id)) =
+            component
+                .data
+                .custom_id
+                .split_once(':')
+                .and_then(|(prefix, rest)| {
+                    let (action, id) = rest.split_once(':')?;
+                    (prefix == "suggest" && (action == "up" || action == "down"))
+                        .then_some((action, id))
+                })
+        {
+            let id = raw_id
+                .parse::<i64>()
+                .map_err(|_| anyhow::anyhow!("invalid suggestion button"))?;
+            let vote = if kind == "up" { 1 } else { -1 };
+            self.store
+                .vote_suggestion(id, &component.user.id.to_string(), vote)?;
+            let Some(suggestion) = self.store.suggestion(id)? else {
+                return respond_component(ctx, component, "Sugestão não encontrada.").await;
+            };
+            let (up, down) = self.store.suggestion_votes(id)?;
+            let content = format!(
+                "**Sugestão #{}** por <@{}>\n{}\n\nEstado: **{}** · Apoio: {} · Contra: {}",
+                suggestion.id,
+                suggestion.author_id,
+                suggestion.content,
+                suggestion.status,
+                up,
+                down
+            );
+            let _ = ctx
+                .http
+                .edit_message(
+                    component.channel_id,
+                    component.message.id,
+                    &serde_json::json!({"content": content}),
+                    Vec::new(),
+                )
+                .await;
+            return respond_component(ctx, component, "Voto registado.").await;
+        }
+        if let Some(raw_id) = component.data.custom_id.strip_prefix("giveaway:join:") {
+            let id = raw_id
+                .parse::<i64>()
+                .map_err(|_| anyhow::anyhow!("invalid giveaway button"))?;
+            let Some(giveaway) = self.store.giveaway(id)? else {
+                return respond_component(ctx, component, "Giveaway não encontrado.").await;
+            };
+            if giveaway.ended {
+                return respond_component(ctx, component, "Este giveaway já terminou.").await;
+            }
+            if let Some(role_id) = giveaway
+                .required_role_id
+                .as_deref()
+                .and_then(|raw| raw.parse::<u64>().ok())
+            {
+                let member = guild_id.member(&ctx.http, component.user.id).await?;
+                if !member.roles.iter().any(|role| role.get() == role_id) {
+                    return respond_component(
+                        ctx,
+                        component,
+                        "Não tens o cargo necessário para participar.",
+                    )
+                    .await;
+                }
+            }
+            if self
+                .store
+                .add_giveaway_entry(id, &component.user.id.to_string())?
+            {
+                return respond_component(ctx, component, "Entrada registada. Boa sorte!").await;
+            }
+            self.store
+                .remove_giveaway_entry(id, &component.user.id.to_string())?;
+            return respond_component(ctx, component, "Saíste do giveaway.").await;
+        }
+        if let Some(raw) = component.data.custom_id.strip_prefix("poll:") {
+            let mut parts = raw.split(':');
+            let id = parts
+                .next()
+                .and_then(|value| value.parse::<i64>().ok())
+                .ok_or_else(|| anyhow::anyhow!("invalid poll button"))?;
+            let choice = parts
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .ok_or_else(|| anyhow::anyhow!("invalid poll choice"))?;
+            let Some(poll) = self.store.poll(id)? else {
+                return respond_component(ctx, component, "Poll não encontrada.").await;
+            };
+            if poll.closed || choice >= poll.options.len() {
+                return respond_component(
+                    ctx,
+                    component,
+                    "Esta poll já terminou ou a opção é inválida.",
+                )
+                .await;
+            }
+            self.store
+                .vote_poll(id, &component.user.id.to_string(), choice)?;
+            return respond_component(
+                ctx,
+                component,
+                "Voto registado; podes votar novamente para alterar.",
+            )
+            .await;
+        }
         if let Some(raw_role_id) = component.data.custom_id.strip_prefix("role:toggle:") {
             let role_id = raw_role_id
                 .parse::<u64>()
@@ -1064,6 +1672,127 @@ fn option_string<'a>(command: &'a CommandInteraction, name: &str) -> Option<&'a 
     })
 }
 
+fn option_i64(command: &CommandInteraction, name: &str) -> Option<i64> {
+    command.data.options.iter().find_map(|option| {
+        (option.name == name).then_some(match option.value {
+            CommandDataOptionValue::Integer(value) => value,
+            _ => return None,
+        })
+    })
+}
+
+fn truncate(value: &str, max_chars: usize) -> String {
+    let mut output = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        output.push('…');
+    }
+    output
+}
+
+async fn finish_giveaway(http: &serenity::http::Http, store: &Store, id: i64) -> Result<bool> {
+    let Some(giveaway) = store.giveaway(id)? else {
+        return Ok(false);
+    };
+    if giveaway.ended || !store.end_giveaway(id)? {
+        return Ok(false);
+    }
+    let winners = {
+        let mut entries = store.giveaway_entries(id)?;
+        let mut rng = rand::rng();
+        entries.shuffle(&mut rng);
+        entries
+            .into_iter()
+            .take(giveaway.winners as usize)
+            .collect::<Vec<_>>()
+    };
+    let result = if winners.is_empty() {
+        format!("🎁 Giveaway #{} terminou sem participantes.", giveaway.id)
+    } else {
+        format!(
+            "🎁 Giveaway #{} terminou! Prémio: **{}**\nVencedores: {}",
+            giveaway.id,
+            giveaway.prize,
+            winners
+                .iter()
+                .map(|id| format!("<@{id}>"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let mut edited = false;
+    if let Some(message_id) = giveaway
+        .message_id
+        .as_deref()
+        .and_then(|raw| raw.parse::<u64>().ok())
+    {
+        if let Ok(channel) = giveaway.channel_id.parse::<u64>() {
+            let channel_id = ChannelId::new(channel);
+            edited = channel_id
+                .edit_message(
+                    http,
+                    serenity::all::MessageId::new(message_id),
+                    serenity::all::EditMessage::new()
+                        .content(result.clone())
+                        .components(Vec::new()),
+                )
+                .await
+                .is_ok();
+        }
+    }
+    if !edited {
+        if let Ok(channel) = giveaway.channel_id.parse::<u64>() {
+            let _ = ChannelId::new(channel).say(http, result).await;
+        }
+    }
+    Ok(true)
+}
+
+async fn finish_poll(http: &serenity::http::Http, store: &Store, id: i64) -> Result<bool> {
+    let Some(poll) = store.poll(id)? else {
+        return Ok(false);
+    };
+    if poll.closed || !store.close_poll(id)? {
+        return Ok(false);
+    }
+    let counts = store.poll_counts(id, poll.options.len())?;
+    let results = poll
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            format!(
+                "{}️⃣ {} — {} voto(s)",
+                index + 1,
+                option,
+                counts.get(index).copied().unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let content = format!(
+        "🗳️ **Poll #{} encerrada: {}**\n{}",
+        poll.id, poll.question, results
+    );
+    if let Some(message_id) = poll
+        .message_id
+        .as_deref()
+        .and_then(|raw| raw.parse::<u64>().ok())
+    {
+        if let Ok(channel) = poll.channel_id.parse::<u64>() {
+            let _ = ChannelId::new(channel)
+                .edit_message(
+                    http,
+                    serenity::all::MessageId::new(message_id),
+                    serenity::all::EditMessage::new()
+                        .content(content)
+                        .components(Vec::new()),
+                )
+                .await;
+        }
+    }
+    Ok(true)
+}
+
 fn required_permission(command: &str) -> Option<Permissions> {
     match command {
         "warn" | "violation" | "timeout" | "untimeout" | "note" | "reason" => {
@@ -1075,7 +1804,9 @@ fn required_permission(command: &str) -> Option<Permissions> {
         "ticket-panel" => Some(Permissions::MANAGE_CHANNELS),
         "slowmode" => Some(Permissions::MANAGE_CHANNELS),
         "rolepanel" => Some(Permissions::MANAGE_ROLES),
-        "tag-set" | "tag-delete" => Some(Permissions::MANAGE_GUILD),
+        "tag-set" | "tag-delete" | "giveaway-start" | "giveaway-end" | "starboard-set"
+        | "workflow-create" | "workflow-delete" => Some(Permissions::MANAGE_GUILD),
+        "suggestion" => Some(Permissions::MANAGE_MESSAGES),
         _ => None,
     }
 }
@@ -1115,6 +1846,20 @@ async fn deliver_scheduled_action(
     payload: &str,
 ) -> Result<()> {
     let value: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+    if action_type == "giveaway_end" {
+        if let Some(giveaway_id) = value.get("giveaway_id").and_then(serde_json::Value::as_i64) {
+            let _ = finish_giveaway(http, store, giveaway_id).await?;
+        }
+        store.delete_scheduled_action(id)?;
+        return Ok(());
+    }
+    if action_type == "poll_end" {
+        if let Some(poll_id) = value.get("poll_id").and_then(serde_json::Value::as_i64) {
+            let _ = finish_poll(http, store, poll_id).await?;
+        }
+        store.delete_scheduled_action(id)?;
+        return Ok(());
+    }
     let channel_id = value
         .get("channel_id")
         .and_then(serde_json::Value::as_str)

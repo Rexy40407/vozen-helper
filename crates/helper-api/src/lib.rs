@@ -3,10 +3,10 @@
 use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
@@ -56,6 +56,9 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/stats", get(stats))
         .route("/api/quotas", get(quotas))
         .route("/api/modules", get(modules))
+        .route("/api/analytics", get(analytics))
+        .route("/api/workflows", get(workflows).post(create_workflow))
+        .route("/api/workflows/:id", delete(delete_workflow))
         .with_state(Arc::new(state))
 }
 
@@ -419,6 +422,94 @@ async fn modules(
     Ok(Json(serde_json::json!({
         "modules": modules.into_iter().map(|(name, _)| name).collect::<Vec<_>>()
     })))
+}
+
+async fn analytics(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Query(query): Query<LimitQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let days = query.limit.unwrap_or(30).clamp(1, 365);
+    let rows = state
+        .store
+        .stats_for(&claims.guild_id, days)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let cases = state
+        .store
+        .recent_cases(&claims.guild_id, 200)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "days": rows,
+        "totalCases": cases.len(),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowRequest {
+    name: String,
+    trigger: String,
+    condition: Option<String>,
+    action: String,
+    payload: String,
+}
+
+async fn workflows(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let rows = state
+        .store
+        .workflows(&claims.guild_id, 100)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    Ok(Json(serde_json::json!({"workflows": rows})))
+}
+
+async fn create_workflow(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(request): Json<WorkflowRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    if !(1..=50).contains(&request.name.trim().len())
+        || request.trigger != "message"
+        || request.action != "reply"
+        || request.payload.trim().is_empty()
+        || request.payload.len() > 1_000
+        || request.condition.as_deref().unwrap_or_default().len() > 200
+    {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid_workflow"));
+    }
+    let id = state
+        .store
+        .create_workflow(
+            &claims.guild_id,
+            request.name.trim(),
+            &request.trigger,
+            request.condition.as_deref().unwrap_or_default(),
+            &request.action,
+            request.payload.trim(),
+        )
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    Ok((StatusCode::CREATED, Json(serde_json::json!({"id": id}))))
+}
+
+async fn delete_workflow(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let deleted = state
+        .store
+        .delete_workflow(&claims.guild_id, id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    if !deleted {
+        return Err(client_error(StatusCode::NOT_FOUND, "workflow_not_found"));
+    }
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 fn require_auth(
