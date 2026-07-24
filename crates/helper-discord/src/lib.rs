@@ -2247,7 +2247,7 @@ impl Handler {
             "greroll" => {
                 let id = option_i64(command, "id").unwrap_or(0);
                 match reroll_giveaway(&ctx.http, &self.store, id).await? {
-                    Some(winner) => format!("Giveaway #{id} rerolled: <@{winner}>.")
+                    Some(winner) => format!("Giveaway #{id} rerolled: <@{winner}>."),
                     None => "Giveaway nÃ£o encontrado, ainda ativo ou sem participantes.".to_string(),
                 }
             }

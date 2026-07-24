@@ -1642,7 +1642,10 @@ mod tests {
         assert_eq!(id, 1);
         let cases = store.recent_cases("guild", 10).unwrap();
         assert_eq!(cases[0].target_id, "user");
-        assert_eq!(store.cases_for_target("guild", "user", 10).unwrap().len(), 1);
+        assert_eq!(
+            store.cases_for_target("guild", "user", 10).unwrap().len(),
+            1
+        );
         assert!(
             store
                 .consume_quota("guild", "user", "workflow_runs", 1, Utc::now())
