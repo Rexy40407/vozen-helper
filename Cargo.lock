@@ -648,6 +648,7 @@ dependencies = [
  "anyhow",
  "helper-contracts",
  "helper-core",
+ "helper-modules",
  "helper-store",
  "serenity",
  "tokio",
@@ -659,12 +660,19 @@ name = "helper-modules"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "helper-contracts",
  "helper-core",
  "helper-store",
+ "hmac",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
