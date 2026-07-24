@@ -2638,10 +2638,26 @@ impl Handler {
                 "Configuração de tickets guardada.".to_string()
             }
             "ticket-panel" => {
-                let Some(_guild_id) = command.guild_id else {
+                let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
-                command
+                let guild_text = guild_id.to_string();
+                let plan = self
+                    .effective_plan(&command.user.id.to_string(), Some(&guild_text))
+                    .await;
+                let limit = quota_limit(&plan, "panels");
+                let used = self
+                    .store
+                    .count_settings_prefix(&guild_text, "support.panel.")?;
+                if used >= limit {
+                    return respond(
+                        ctx,
+                        command,
+                        "A quota de painéis de tickets deste servidor foi atingida.",
+                    )
+                    .await;
+                }
+                let message = command
                     .channel_id
                     .send_message(
                         &ctx.http,
@@ -2654,6 +2670,15 @@ impl Handler {
                             ])]),
                     )
                     .await?;
+                self.store.set_setting(
+                    &guild_text,
+                    &format!("support.panel.{}", message.id),
+                    &serde_json::json!({
+                        "channel_id": command.channel_id,
+                        "message_id": message.id
+                    })
+                    .to_string(),
+                )?;
                 format!("Painel de tickets criado em <#{}>.", command.channel_id)
             }
             "ticket-update" => {
@@ -2719,9 +2744,25 @@ impl Handler {
                 format!("Obrigado pela avaliação: **{score}/5**.")
             }
             "rolepanel" => {
-                let Some(_guild_id) = command.guild_id else {
+                let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
+                let guild_text = guild_id.to_string();
+                let plan = self
+                    .effective_plan(&command.user.id.to_string(), Some(&guild_text))
+                    .await;
+                let limit = quota_limit(&plan, "role_panels");
+                let used = self
+                    .store
+                    .count_settings_prefix(&guild_text, "community.role_panel.")?;
+                if used >= limit {
+                    return respond(
+                        ctx,
+                        command,
+                        "A quota de painéis de cargos deste servidor foi atingida.",
+                    )
+                    .await;
+                }
                 let title = option_string(command, "title").unwrap_or("Escolhe os teus cargos");
                 let mut buttons = Vec::new();
                 for name in ["role1", "role2", "role3", "role4", "role5"] {
@@ -2741,7 +2782,7 @@ impl Handler {
                 if buttons.is_empty() {
                     return respond(ctx, command, "Indica pelo menos um cargo válido.").await;
                 }
-                command
+                let message = command
                     .channel_id
                     .send_message(
                         &ctx.http,
@@ -2750,6 +2791,16 @@ impl Handler {
                             .components(vec![CreateActionRow::Buttons(buttons)]),
                     )
                     .await?;
+                self.store.set_setting(
+                    &guild_text,
+                    &format!("community.role_panel.{}", message.id),
+                    &serde_json::json!({
+                        "channel_id": command.channel_id,
+                        "message_id": message.id,
+                        "title": title
+                    })
+                    .to_string(),
+                )?;
                 "Painel de cargos criado.".to_string()
             }
             _ => "Comando desconhecido.".to_string(),

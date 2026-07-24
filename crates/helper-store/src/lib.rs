@@ -500,6 +500,17 @@ impl Store {
         Ok(())
     }
 
+    pub fn count_settings_prefix(&self, guild_id: &str, prefix: &str) -> Result<u64> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let pattern = format!("{prefix}%");
+        let count = conn.query_row(
+            "SELECT COUNT(*) FROM settings WHERE guild_id=?1 AND key LIKE ?2",
+            params![guild_id, pattern],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count.try_into().unwrap_or(u64::MAX))
+    }
+
     /// Export the guild-scoped configuration and durable module state without
     /// including Discord message bodies or session/entitlement secrets.
     pub fn export_guild(&self, guild_id: &str) -> Result<serde_json::Value> {
@@ -1535,6 +1546,31 @@ mod tests {
         assert_eq!(
             store.ticket_by_channel("20").unwrap().unwrap().status,
             "open"
+        );
+    }
+
+    #[test]
+    fn settings_prefix_counts_are_guild_scoped() {
+        let store = Store::open(":memory:").unwrap();
+        store.set_setting("g1", "support.panel.1", "{}").unwrap();
+        store.set_setting("g1", "support.panel.2", "{}").unwrap();
+        store
+            .set_setting("g1", "community.role_panel.1", "{}")
+            .unwrap();
+        store.set_setting("g2", "support.panel.3", "{}").unwrap();
+        assert_eq!(
+            store.count_settings_prefix("g1", "support.panel.").unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .count_settings_prefix("g1", "community.role_panel.")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store.count_settings_prefix("g2", "support.panel.").unwrap(),
+            1
         );
     }
 
