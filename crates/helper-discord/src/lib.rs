@@ -10,10 +10,10 @@ use rand::seq::SliceRandom;
 use serenity::{
     all::{
         ButtonStyle, ChannelId, ChannelType, Client, Command, CommandDataOptionValue,
-        CommandInteraction, Context, CreateActionRow, CreateButton, CreateChannel, CreateCommand,
-        CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseMessage,
-        EditChannel, EventHandler, GatewayIntents, Interaction, PermissionOverwrite,
-        PermissionOverwriteType, Permissions, Ready, RoleId,
+        CommandInteraction, Context, CreateActionRow, CreateAttachment, CreateButton,
+        CreateChannel, CreateCommand, CreateCommandOption, CreateInteractionResponse,
+        CreateInteractionResponseMessage, CreateMessage, EditChannel, EventHandler, GatewayIntents,
+        Interaction, PermissionOverwrite, PermissionOverwriteType, Permissions, Ready, RoleId,
     },
     async_trait,
 };
@@ -1838,10 +1838,32 @@ impl Handler {
                 } else { "Entitlements central ainda não estão configurados nesta instalação.".to_string() }
             }
             "privacy" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando sÃ³ pode ser usado num servidor.").await;
+                };
                 let subcommand = command.data.options.first().map(|option| option.name.as_str());
                 match subcommand {
-                    Some("erase") => "Para apagar os teus dados voluntÃ¡rios, abre o painel autenticado e confirma em `/api/privacy/delete`. O Helper nÃ£o apaga dados de moderaÃ§Ã£o exigidos para auditoria.".to_string(),
-                    _ => "Para exportar os teus dados, abre o painel autenticado e solicita `/api/privacy/export`. O resultado Ã© entregue apenas Ã  tua sessÃ£o autenticada.".to_string(),
+                    Some("erase") => {
+                        let result = self.store.purge_user(&guild_id.to_string(), &command.user.id.to_string())?;
+                        format!("Dados voluntÃ¡rios apagados. Registos de moderaÃ§Ã£o, infraÃ§Ãµes e quarantine foram mantidos por auditoria. Resultado: {result}")
+                    }
+                    _ => {
+                        let export = self.store.export_user(&guild_id.to_string(), &command.user.id.to_string())?;
+                        let bytes = serde_json::to_vec_pretty(&export)?;
+                        let dm = command.user.create_dm_channel(&ctx.http).await;
+                        match dm {
+                            Ok(channel) => {
+                                channel.send_message(
+                                    &ctx.http,
+                                    CreateMessage::new()
+                                        .content("Aqui estÃ¡ o export dos teus dados do Vozen Helper.")
+                                        .add_file(CreateAttachment::bytes(bytes, "my-vozen-data.json")),
+                                ).await?;
+                                "Enviei os teus dados por mensagem privada.".to_string()
+                            }
+                            Err(_) => "NÃ£o consegui enviar mensagem privada. Ativa as DMs e tenta novamente.".to_string(),
+                        }
+                    }
                 }
             }
             "permissions" => permission_passport_message(),

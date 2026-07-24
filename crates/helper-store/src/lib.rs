@@ -675,6 +675,150 @@ impl Store {
         }))
     }
 
+    /// Export user-associated data for the Discord privacy command. The query is
+    /// always bounded to the authenticated guild and omits moderator identities
+    /// from moderation cases.
+    pub fn export_user(&self, guild_id: &str, user_id: &str) -> Result<serde_json::Value> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut cases = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT id,type,target_id,reason,duration_ms,created_at FROM cases WHERE guild_id=?1 AND target_id=?2 ORDER BY id",
+        )?;
+        for row in stmt.query_map(params![guild_id, user_id], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, i64>(0)?,
+                "type": row.get::<_, String>(1)?,
+                "targetId": row.get::<_, String>(2)?,
+                "reason": row.get::<_, String>(3)?,
+                "durationMs": row.get::<_, Option<i64>>(4)?,
+                "createdAt": row.get::<_, i64>(5)?,
+            }))
+        })? {
+            cases.push(row?);
+        }
+        let mut voluntary = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT 'afk' AS kind, reason, since FROM afk WHERE guild_id=?1 AND user_id=?2
+             UNION ALL SELECT 'level' AS kind, CAST(xp AS TEXT), 0 FROM levels WHERE guild_id=?1 AND user_id=?2
+             UNION ALL SELECT 'tag' AS kind, name, created_at FROM tags WHERE guild_id=?1 AND author_id=?2
+             ORDER BY kind",
+        )?;
+        for row in stmt.query_map(params![guild_id, user_id], |row| {
+            Ok(serde_json::json!({
+                "kind": row.get::<_, String>(0)?,
+                "value": row.get::<_, String>(1)?,
+                "createdAt": row.get::<_, i64>(2)?,
+            }))
+        })? {
+            voluntary.push(row?);
+        }
+        let mut suggestions = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT id,content,status,created_at FROM suggestions WHERE guild_id=?1 AND author_id=?2 ORDER BY id",
+        )?;
+        for row in stmt.query_map(params![guild_id, user_id], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, i64>(0)?,
+                "content": row.get::<_, String>(1)?,
+                "status": row.get::<_, String>(2)?,
+                "createdAt": row.get::<_, i64>(3)?,
+            }))
+        })? {
+            suggestions.push(row?);
+        }
+        let mut tickets = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT id,channel_id,status,created_at FROM tickets WHERE guild_id=?1 AND opener_id=?2 ORDER BY id",
+        )?;
+        for row in stmt.query_map(params![guild_id, user_id], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, i64>(0)?,
+                "channelId": row.get::<_, String>(1)?,
+                "status": row.get::<_, String>(2)?,
+                "createdAt": row.get::<_, i64>(3)?,
+            }))
+        })? {
+            tickets.push(row?);
+        }
+        let mut events = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT event_id,status,created_at,checked_in_at FROM event_registrations WHERE guild_id=?1 AND user_id=?2 ORDER BY event_id",
+        )?;
+        for row in stmt.query_map(params![guild_id, user_id], |row| {
+            Ok(serde_json::json!({
+                "eventId": row.get::<_, String>(0)?,
+                "status": row.get::<_, String>(1)?,
+                "createdAt": row.get::<_, i64>(2)?,
+                "checkedInAt": row.get::<_, Option<i64>>(3)?,
+            }))
+        })? {
+            events.push(row?);
+        }
+        Ok(serde_json::json!({
+            "version": 1,
+            "guildId": guild_id,
+            "userId": user_id,
+            "exportedAt": Utc::now().to_rfc3339(),
+            "moderationCases": cases,
+            "voluntary": voluntary,
+            "suggestions": suggestions,
+            "tickets": tickets,
+            "eventRegistrations": events,
+        }))
+    }
+
+    /// Erase voluntary user data while retaining moderation evidence.
+    pub fn purge_user(&self, guild_id: &str, user_id: &str) -> Result<serde_json::Value> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let mut deleted = serde_json::Map::new();
+        for (name, statement) in [
+            (
+                "suggestion_votes",
+                "DELETE FROM suggestion_votes WHERE user_id=?1 AND suggestion_id IN (SELECT id FROM suggestions WHERE guild_id=?2)",
+            ),
+            (
+                "giveaway_entries",
+                "DELETE FROM giveaway_entries WHERE user_id=?1 AND giveaway_id IN (SELECT id FROM giveaways WHERE guild_id=?2)",
+            ),
+            (
+                "poll_votes",
+                "DELETE FROM poll_votes WHERE user_id=?1 AND poll_id IN (SELECT id FROM polls WHERE guild_id=?2)",
+            ),
+            (
+                "scheduled_reminders",
+                "DELETE FROM scheduled_actions WHERE guild_id=?2 AND type='reminder' AND target_id=?1",
+            ),
+            (
+                "event_registrations",
+                "DELETE FROM event_registrations WHERE guild_id=?2 AND user_id=?1",
+            ),
+            ("afk", "DELETE FROM afk WHERE guild_id=?2 AND user_id=?1"),
+            (
+                "levels",
+                "DELETE FROM levels WHERE guild_id=?2 AND user_id=?1",
+            ),
+            (
+                "tags",
+                "DELETE FROM tags WHERE guild_id=?2 AND author_id=?1",
+            ),
+            (
+                "suggestions",
+                "DELETE FROM suggestions WHERE guild_id=?2 AND author_id=?1",
+            ),
+        ] {
+            let count = tx.execute(statement, params![user_id, guild_id])?;
+            if count > 0 {
+                deleted.insert(name.to_string(), serde_json::json!(count));
+            }
+        }
+        tx.commit()?;
+        Ok(serde_json::json!({
+            "deleted": deleted,
+            "retained": ["moderationCases", "infractions", "quarantine"],
+        }))
+    }
+
     /// Import only the versioned, guild-scoped configuration produced by
     /// `export_guild`. The target guild always comes from the authenticated
     /// caller; the source `guildId` in the document is informational only.
@@ -1986,5 +2130,38 @@ mod tests {
             "value": "must-reject"
         }]);
         assert!(store.import_guild_config("target", &secret).is_err());
+    }
+
+    #[test]
+    fn user_privacy_export_and_purge_keep_moderation_records() {
+        let store = Store::open(":memory:").unwrap();
+        store.set_afk("g1", "u1", "away").unwrap();
+        store.add_xp("g1", "u1", 42).unwrap();
+        store.upsert_tag("g1", "mine", "hello", "u1").unwrap();
+        store.create_suggestion("g1", "u1", "feature").unwrap();
+        store
+            .schedule_typed("g1", "reminder", "u1", 10, "{}")
+            .unwrap();
+        store.register_event("g1", "event-1", "u1").unwrap();
+        store
+            .record_case("g1", "warn", "u1", "mod", "kept", None)
+            .unwrap();
+
+        let export = store.export_user("g1", "u1").unwrap();
+        assert_eq!(export["userId"], "u1");
+        assert_eq!(export["moderationCases"].as_array().unwrap().len(), 1);
+        assert!(export["voluntary"].as_array().unwrap().len() >= 3);
+        assert_eq!(export["suggestions"].as_array().unwrap().len(), 1);
+
+        let result = store.purge_user("g1", "u1").unwrap();
+        assert!(
+            result["deleted"]
+                .as_object()
+                .unwrap()
+                .contains_key("levels")
+        );
+        assert!(store.recent_cases("g1", 10).unwrap().len() == 1);
+        assert!(store.get_tag("g1", "mine").unwrap().is_none());
+        assert!(store.get_afk("g1", "u1").unwrap().is_none());
     }
 }
