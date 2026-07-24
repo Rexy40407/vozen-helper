@@ -6,9 +6,10 @@ use helper_modules::EntitlementClient;
 use helper_store::Store;
 use serenity::{
     all::{
-        ChannelId, Client, Command, CommandDataOptionValue, CommandInteraction, Context,
-        CreateCommand, CreateCommandOption, CreateInteractionResponse,
-        CreateInteractionResponseMessage, EventHandler, GatewayIntents, Interaction, Ready,
+        ButtonStyle, ChannelId, Client, Command, CommandDataOptionValue, CommandInteraction,
+        Context, CreateActionRow, CreateButton, CreateChannel, CreateCommand, CreateCommandOption,
+        CreateInteractionResponse, CreateInteractionResponseMessage, EventHandler, GatewayIntents,
+        Interaction, PermissionOverwrite, PermissionOverwriteType, Permissions, Ready,
     },
     async_trait,
 };
@@ -224,6 +225,7 @@ impl EventHandler for Handler {
                 ),
             CreateCommand::new("leaderboard").description("Show the XP leaderboard"),
             CreateCommand::new("serverstats").description("Show basic server statistics"),
+            CreateCommand::new("ticket-panel").description("Create a support ticket panel"),
         ];
         if let Err(error) = Command::set_global_commands(&ctx.http, commands).await {
             tracing::error!(%error, "global command registration failed");
@@ -231,21 +233,38 @@ impl EventHandler for Handler {
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        let Interaction::Command(command) = interaction else {
-            return;
-        };
-        if let Err(error) = self.handle_command(&ctx, &command).await {
-            tracing::error!(%error, command = %command.data.name, "command failed");
-            let _ = command
-                .create_response(
-                    &ctx,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content("Something went wrong while running that command.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
+        match interaction {
+            Interaction::Command(command) => {
+                if let Err(error) = self.handle_command(&ctx, &command).await {
+                    tracing::error!(%error, command = %command.data.name, "command failed");
+                    let _ = command
+                        .create_response(
+                            &ctx,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content("Something went wrong while running that command.")
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await;
+                }
+            }
+            Interaction::Component(component) => {
+                if let Err(error) = self.handle_component(&ctx, &component).await {
+                    tracing::error!(%error, "component failed");
+                    let _ = component
+                        .create_response(
+                            &ctx,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content("Não foi possível concluir esta ação.")
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -515,6 +534,25 @@ impl Handler {
                 let messages: i64 = rows.iter().map(|(_, messages, _, _)| messages).sum();
                 format!("Mensagens registadas nos últimos {} dias: {}.", rows.len(), messages)
             }
+            "ticket-panel" => {
+                let Some(_guild_id) = command.guild_id else {
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                };
+                command
+                    .channel_id
+                    .send_message(
+                        &ctx.http,
+                        serenity::all::CreateMessage::new()
+                            .content("Precisas de ajuda? Abre um ticket privado.")
+                            .components(vec![CreateActionRow::Buttons(vec![
+                                CreateButton::new("ticket:open")
+                                    .label("Abrir ticket")
+                                    .style(ButtonStyle::Primary),
+                            ])]),
+                    )
+                    .await?;
+                format!("Painel de tickets criado em <#{}>.", command.channel_id)
+            }
             _ => "Comando desconhecido.".to_string(),
         };
         command
@@ -529,10 +567,141 @@ impl Handler {
             .await?;
         Ok(())
     }
+
+    async fn handle_component(
+        &self,
+        ctx: &Context,
+        component: &serenity::all::ComponentInteraction,
+    ) -> Result<()> {
+        let Some(guild_id) = component.guild_id else {
+            return respond_component(ctx, component, "Este botão só funciona num servidor.").await;
+        };
+        match component.data.custom_id.as_str() {
+            "ticket:open" => {
+                if let Some(ticket) = self
+                    .store
+                    .active_ticket_for_user(&guild_id.to_string(), &component.user.id.to_string())?
+                {
+                    return respond_component(
+                        ctx,
+                        component,
+                        &format!("Já tens um ticket aberto: <#{}>.", ticket.channel_id),
+                    )
+                    .await;
+                }
+                let bot_id = ctx.http.get_current_user().await?.id;
+                let visible = Permissions::VIEW_CHANNEL
+                    | Permissions::SEND_MESSAGES
+                    | Permissions::READ_MESSAGE_HISTORY;
+                let channel = guild_id
+                    .create_channel(
+                        &ctx.http,
+                        CreateChannel::new(format!("ticket-{}", component.user.name)).permissions(
+                            [
+                                PermissionOverwrite {
+                                    allow: Permissions::empty(),
+                                    deny: Permissions::VIEW_CHANNEL,
+                                    kind: PermissionOverwriteType::Role(
+                                        serenity::all::RoleId::new(guild_id.get()),
+                                    ),
+                                },
+                                PermissionOverwrite {
+                                    allow: visible,
+                                    deny: Permissions::empty(),
+                                    kind: PermissionOverwriteType::Member(component.user.id),
+                                },
+                                PermissionOverwrite {
+                                    allow: visible | Permissions::MANAGE_CHANNELS,
+                                    deny: Permissions::empty(),
+                                    kind: PermissionOverwriteType::Member(bot_id),
+                                },
+                            ],
+                        ),
+                    )
+                    .await?;
+                self.store.open_ticket(
+                    &guild_id.to_string(),
+                    &component.user.id.to_string(),
+                    &channel.id.to_string(),
+                )?;
+                channel
+                    .id
+                    .send_message(
+                        &ctx.http,
+                        serenity::all::CreateMessage::new()
+                            .content(format!(
+                                "Olá <@{}>. Explica aqui o que precisas.",
+                                component.user.id
+                            ))
+                            .components(vec![CreateActionRow::Buttons(vec![
+                                CreateButton::new("ticket:claim")
+                                    .label("Assumir")
+                                    .style(ButtonStyle::Secondary),
+                                CreateButton::new("ticket:close")
+                                    .label("Fechar")
+                                    .style(ButtonStyle::Danger),
+                            ])]),
+                    )
+                    .await?;
+                respond_component(
+                    ctx,
+                    component,
+                    &format!("Ticket criado: <#{}>.", channel.id),
+                )
+                .await
+            }
+            "ticket:claim" => {
+                if self.store.claim_ticket(
+                    &component.channel_id.to_string(),
+                    &component.user.id.to_string(),
+                )? {
+                    component
+                        .channel_id
+                        .say(
+                            &ctx.http,
+                            format!("Ticket assumido por <@{}>.", component.user.id),
+                        )
+                        .await?;
+                    respond_component(ctx, component, "Ticket assumido.").await
+                } else {
+                    respond_component(ctx, component, "Este ticket já foi fechado.").await
+                }
+            }
+            "ticket:close" => {
+                if self.store.close_ticket(&component.channel_id.to_string())? {
+                    respond_component(ctx, component, "Ticket fechado. O canal será removido.")
+                        .await?;
+                    component.channel_id.delete(&ctx.http).await?;
+                } else {
+                    respond_component(ctx, component, "Este ticket já está fechado.").await?;
+                }
+                Ok(())
+            }
+            _ => respond_component(ctx, component, "Botão desconhecido.").await,
+        }
+    }
 }
 
 async fn respond(ctx: &Context, command: &CommandInteraction, content: &str) -> Result<()> {
     command
+        .create_response(
+            ctx,
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(content)
+                    .ephemeral(true),
+            ),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn respond_component(
+    ctx: &Context,
+    component: &serenity::all::ComponentInteraction,
+    content: &str,
+) -> Result<()> {
+    component
         .create_response(
             ctx,
             CreateInteractionResponse::Message(

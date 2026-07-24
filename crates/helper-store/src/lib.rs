@@ -51,6 +51,16 @@ pub struct AfkRecord {
     pub since: i64,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TicketRecord {
+    pub guild_id: String,
+    pub user_id: String,
+    pub channel_id: String,
+    pub status: String,
+    pub claimed_by: Option<String>,
+    pub created_at: i64,
+}
+
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
@@ -69,6 +79,7 @@ impl Store {
     pub fn migrate(&self) -> Result<()> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute_batch("CREATE TABLE IF NOT EXISTS helper_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS helper_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, guild_id TEXT NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, revoked_at TEXT); CREATE TABLE IF NOT EXISTS helper_entitlements (subject_id TEXT PRIMARY KEY, payload TEXT NOT NULL, fetched_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS helper_usage (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, quota_key TEXT NOT NULL, period TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,user_id,quota_key,period)); CREATE TABLE IF NOT EXISTS cases (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, type TEXT NOT NULL, target_id TEXT NOT NULL, moderator_id TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', duration_ms INTEGER, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_cases_guild_time ON cases(guild_id, created_at DESC); CREATE TABLE IF NOT EXISTS settings (guild_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(guild_id,key)); CREATE TABLE IF NOT EXISTS activity_log (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, type TEXT NOT NULL, user_id TEXT NOT NULL, user_tag TEXT, actor_id TEXT, detail TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_activity_guild_time ON activity_log(guild_id, created_at DESC); CREATE TABLE IF NOT EXISTS scheduled_actions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, type TEXT NOT NULL, target_id TEXT NOT NULL, execute_at INTEGER NOT NULL, payload TEXT NOT NULL DEFAULT '', case_id INTEGER); CREATE INDEX IF NOT EXISTS idx_scheduled_due ON scheduled_actions(execute_at); CREATE TABLE IF NOT EXISTS infractions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, target_id TEXT NOT NULL, weight INTEGER NOT NULL DEFAULT 1, source TEXT NOT NULL DEFAULT 'manual', created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS afk (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', since INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE TABLE IF NOT EXISTS tags (guild_id TEXT NOT NULL, name TEXT NOT NULL, content TEXT NOT NULL, author_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(guild_id,name)); CREATE TABLE IF NOT EXISTS levels (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, xp INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,user_id)); CREATE TABLE IF NOT EXISTS stats (guild_id TEXT NOT NULL, date TEXT NOT NULL, messages INTEGER NOT NULL DEFAULT 0, joins INTEGER NOT NULL DEFAULT 0, leaves INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,date));")?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS tickets (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, channel_id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'open', claimed_by TEXT, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_tickets_owner ON tickets(guild_id,user_id,status);")?;
         Ok(())
     }
 
@@ -352,6 +363,53 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute("INSERT INTO scheduled_actions(guild_id,type,target_id,execute_at,payload,case_id) VALUES(?1,'reminder',?2,?3,?4,NULL)", params![guild_id, target_id, execute_at, payload])?;
         Ok(conn.last_insert_rowid())
+    }
+
+    pub fn open_ticket(&self, guild_id: &str, user_id: &str, channel_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT INTO tickets(guild_id,user_id,channel_id,status,claimed_by,created_at) VALUES(?1,?2,?3,'open',NULL,?4)",
+            params![guild_id, user_id, channel_id, Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn active_ticket_for_user(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> Result<Option<TicketRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.query_row(
+            "SELECT guild_id,user_id,channel_id,status,claimed_by,created_at FROM tickets WHERE guild_id=?1 AND user_id=?2 AND status='open' ORDER BY created_at DESC LIMIT 1",
+            params![guild_id, user_id],
+            |row| Ok(TicketRecord { guild_id: row.get(0)?, user_id: row.get(1)?, channel_id: row.get(2)?, status: row.get(3)?, claimed_by: row.get(4)?, created_at: row.get(5)? }),
+        ).optional()?)
+    }
+
+    pub fn ticket_by_channel(&self, channel_id: &str) -> Result<Option<TicketRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.query_row(
+            "SELECT guild_id,user_id,channel_id,status,claimed_by,created_at FROM tickets WHERE channel_id=?1",
+            [channel_id],
+            |row| Ok(TicketRecord { guild_id: row.get(0)?, user_id: row.get(1)?, channel_id: row.get(2)?, status: row.get(3)?, claimed_by: row.get(4)?, created_at: row.get(5)? }),
+        ).optional()?)
+    }
+
+    pub fn claim_ticket(&self, channel_id: &str, user_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "UPDATE tickets SET claimed_by=?2 WHERE channel_id=?1 AND status='open'",
+            params![channel_id, user_id],
+        )? > 0)
+    }
+
+    pub fn close_ticket(&self, channel_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "UPDATE tickets SET status='closed' WHERE channel_id=?1 AND status='open'",
+            [channel_id],
+        )? > 0)
     }
 }
 
