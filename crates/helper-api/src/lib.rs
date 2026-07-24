@@ -54,7 +54,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/health", get(health))
         .route("/api/v1/health", get(health))
         .route("/api/session", post(create_session))
-        .route("/api/oauth/start", get(oauth_start).post(oauth_start_post))
+        .route("/api/oauth/start", post(oauth_start_post))
         .route("/api/oauth/callback", get(oauth_callback))
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
@@ -115,13 +115,6 @@ pub fn router(state: ApiState) -> Router {
 }
 
 #[derive(Debug, Deserialize)]
-struct OAuthStartQuery {
-    guild_id: String,
-    code_challenge: String,
-    code_verifier: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct OAuthStartRequest {
     guild_id: String,
     code_challenge: String,
@@ -132,18 +125,6 @@ struct OAuthStartRequest {
 struct OAuthStartResponse {
     authorization_url: String,
     state: String,
-}
-
-async fn oauth_start(
-    State(state): State<Arc<ApiState>>,
-    Query(query): Query<OAuthStartQuery>,
-) -> Result<Response, (StatusCode, Json<ApiError>)> {
-    oauth_start_inner(
-        &state,
-        &query.guild_id,
-        &query.code_challenge,
-        &query.code_verifier,
-    )
 }
 
 async fn oauth_start_post(
@@ -1986,10 +1967,17 @@ mod tests {
         let response = router(state(store))
             .oneshot(
                 Request::builder()
-                    .uri(format!(
-                        "/api/oauth/start?guild_id=guild-a&code_challenge={challenge}&code_verifier={verifier}"
+                    .method("POST")
+                    .uri("/api/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "guild_id": "guild-a",
+                            "code_challenge": challenge,
+                            "code_verifier": verifier
+                        })
+                        .to_string(),
                     ))
-                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -2005,9 +1993,7 @@ mod tests {
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("SameSite=Lax"));
 
-        let post_verifier = "c".repeat(64);
-        let post_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(post_verifier.as_bytes()));
-        let post_response = router(state(Store::open(":memory:").unwrap()))
+        let mismatch = router(state(Store::open(":memory:").unwrap()))
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -2016,8 +2002,8 @@ mod tests {
                     .body(Body::from(
                         serde_json::json!({
                             "guild_id": "guild-a",
-                            "code_challenge": post_challenge,
-                            "code_verifier": post_verifier
+                            "code_challenge": challenge,
+                            "code_verifier": "b".repeat(64)
                         })
                         .to_string(),
                     ))
@@ -2025,21 +2011,20 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(post_response.status(), StatusCode::OK);
+        assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
 
-        let mismatch = router(state(Store::open(":memory:").unwrap()))
+        let get_response = router(state(Store::open(":memory:").unwrap()))
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/api/oauth/start?guild_id=guild-a&code_challenge={challenge}&code_verifier={}"
-                        , "b".repeat(64)
+                        "/api/oauth/start?guild_id=guild-a&code_challenge={challenge}&code_verifier={verifier}"
                     ))
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(get_response.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[test]
