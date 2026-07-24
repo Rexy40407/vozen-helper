@@ -1840,7 +1840,7 @@ impl Handler {
             "privacy" => {
                 let subcommand = command.data.options.first().map(|option| option.name.as_str());
                 match subcommand {
-                    Some("erase") => "Para apagar os teus dados voluntÃ¡rios, abre o painel autenticado e confirma em `/api/privacy/erase`. O Helper nÃ£o apaga dados de moderaÃ§Ã£o exigidos para auditoria.".to_string(),
+                    Some("erase") => "Para apagar os teus dados voluntÃ¡rios, abre o painel autenticado e confirma em `/api/privacy/delete`. O Helper nÃ£o apaga dados de moderaÃ§Ã£o exigidos para auditoria.".to_string(),
                     _ => "Para exportar os teus dados, abre o painel autenticado e solicita `/api/privacy/export`. O resultado Ã© entregue apenas Ã  tua sessÃ£o autenticada.".to_string(),
                 }
             }
