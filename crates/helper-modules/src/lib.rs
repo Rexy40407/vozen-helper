@@ -53,7 +53,10 @@ impl EntitlementClient {
         Some(Self {
             endpoint: endpoint?,
             secret: secret?,
-            http: Client::new(),
+            http: Client::builder()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .expect("valid entitlement HTTP client"),
             cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }

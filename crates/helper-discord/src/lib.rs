@@ -2535,11 +2535,15 @@ impl Handler {
                 let user_text = command.user.id.to_string();
                 let plan = self.effective_plan(&user_text, Some(&guild_text)).await;
                 let workflow_limit = quota_limit(&plan, "workflows");
-                let current_workflows = self
-                    .store
-                    .workflows(&guild_text, (workflow_limit + 1) as u32)?
-                    .len() as u64;
-                if current_workflows >= workflow_limit {
+                let Some(id) = self.store.create_workflow_bounded(
+                    &guild_text,
+                    name,
+                    "message",
+                    condition,
+                    "reply",
+                    reply,
+                    workflow_limit,
+                )? else {
                     return respond(
                         ctx,
                         command,
@@ -2548,8 +2552,7 @@ impl Handler {
                         ),
                     )
                     .await;
-                }
-                let id = self.store.create_workflow(&guild_id.to_string(), name, "message", condition, "reply", reply)?;
+                };
                 format!("Workflow #{id} criado. É executado quando uma mensagem corresponde à condição.")
             }
             "workflow-list" => {

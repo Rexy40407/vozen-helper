@@ -881,28 +881,24 @@ async fn create_workflow(
         None => Plan::Free,
     };
     let workflow_limit = quota_limit(&plan, "workflows");
-    let workflow_count = state
+    let Some(id) = state
         .store
-        .workflows(&claims.guild_id, (workflow_limit + 1) as u32)
-        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
-        .len() as u64;
-    if workflow_count >= workflow_limit {
-        return Err(client_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "workflow_quota_exceeded",
-        ));
-    }
-    let id = state
-        .store
-        .create_workflow(
+        .create_workflow_bounded(
             &claims.guild_id,
             request.name.trim(),
             &request.trigger,
             request.condition.as_deref().unwrap_or_default(),
             &request.action,
             request.payload.trim(),
+            workflow_limit,
         )
-        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+    else {
+        return Err(client_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "workflow_quota_exceeded",
+        ));
+    };
     Ok((StatusCode::CREATED, Json(serde_json::json!({"id": id}))))
 }
 

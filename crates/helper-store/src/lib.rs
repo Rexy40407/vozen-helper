@@ -1283,6 +1283,39 @@ impl Store {
         Ok(conn.last_insert_rowid())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_workflow_bounded(
+        &self,
+        guild_id: &str,
+        name: &str,
+        trigger: &str,
+        condition: &str,
+        action: &str,
+        payload: &str,
+        limit: u64,
+    ) -> Result<Option<i64>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.unchecked_transaction()?;
+        let count: u64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM workflows WHERE guild_id=?1",
+                [guild_id],
+                |row| row.get::<_, i64>(0),
+            )?
+            .try_into()
+            .unwrap_or(u64::MAX);
+        if count >= limit {
+            return Ok(None);
+        }
+        tx.execute(
+            "INSERT INTO workflows(guild_id,name,trigger,condition,action,payload,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![guild_id, name, trigger, condition, action, payload, Utc::now().timestamp_millis()],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(Some(id))
+    }
+
     pub fn workflows(&self, guild_id: &str, limit: u32) -> Result<Vec<WorkflowRecord>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut stmt = conn.prepare("SELECT id,guild_id,name,trigger,condition,action,payload,enabled,created_at FROM workflows WHERE guild_id=?1 ORDER BY id DESC LIMIT ?2")?;
