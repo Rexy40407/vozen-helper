@@ -14,6 +14,7 @@ pub struct Config {
     pub oauth_client_id: String,
     pub oauth_client_secret: String,
     pub oauth_redirect_uri: String,
+    pub allow_legacy_session: bool,
     pub session_secret: String,
     pub entitlement_url: Option<String>,
     pub entitlement_secret: Option<String>,
@@ -45,6 +46,8 @@ impl Config {
             oauth_client_id: required("DISCORD_OAUTH_CLIENT_ID")?,
             oauth_client_secret: required("DISCORD_OAUTH_CLIENT_SECRET")?,
             oauth_redirect_uri: required("DISCORD_OAUTH_REDIRECT_URI")?,
+            allow_legacy_session: env::var("HELPER_ALLOW_LEGACY_SESSION")
+                .is_ok_and(|value| value.eq_ignore_ascii_case("true")),
             session_secret: required("HELPER_SESSION_SECRET")?,
             entitlement_url: env::var("VOZEN_ENTITLEMENT_URL").ok(),
             entitlement_secret: env::var("VOZEN_ENTITLEMENT_SECRET").ok(),

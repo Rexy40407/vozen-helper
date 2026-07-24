@@ -32,6 +32,7 @@ pub struct ApiState {
     pub oauth_client_id: String,
     pub oauth_client_secret: String,
     pub oauth_redirect_uri: String,
+    pub allow_legacy_session: bool,
     pub allowed_origin: Option<String>,
 }
 
@@ -163,7 +164,7 @@ async fn oauth_callback(
             "oauth_token_missing",
         ));
     }
-    create_session(
+    create_session_inner(
         State(state),
         headers,
         Json(SessionRequest {
@@ -207,6 +208,17 @@ struct SessionResponse {
 }
 
 async fn create_session(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(req): Json<SessionRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    if !state.allow_legacy_session {
+        return Err(client_error(StatusCode::GONE, "oauth_required"));
+    }
+    create_session_inner(State(state), headers, Json(req)).await
+}
+
+async fn create_session_inner(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Json(req): Json<SessionRequest>,
