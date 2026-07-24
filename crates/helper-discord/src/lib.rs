@@ -995,8 +995,9 @@ impl EventHandler for Handler {
                     .required(true),
                 ),
         ];
-        if let Err(error) = Command::set_global_commands(&ctx.http, commands).await {
-            tracing::error!(%error, "global command registration failed");
+        match Command::set_global_commands(&ctx.http, commands).await {
+            Ok(registered) => info!(count = registered.len(), "global commands registered"),
+            Err(error) => tracing::error!(%error, "global command registration failed"),
         }
     }
 
