@@ -11,6 +11,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use helper_contracts::{ApiError, SessionClaims};
+use helper_core::{Capability, quota_limit};
 use helper_store::Store;
 use hmac::{Hmac, Mac};
 use reqwest::Client;
@@ -52,6 +53,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/me", get(me))
         .route("/api/cases", get(cases))
         .route("/api/stats", get(stats))
+        .route("/api/quotas", get(quotas))
+        .route("/api/modules", get(modules))
         .with_state(Arc::new(state))
 }
 
@@ -346,6 +349,64 @@ async fn stats(
     Ok(Json(
         serde_json::json!({"totalCases":cases.len(),"guildId":claims.guild_id}),
     ))
+}
+
+async fn quotas(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let snapshot = state
+        .store
+        .load_entitlement(&claims.user_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let free_plan = helper_contracts::Plan::Free;
+    let plan = snapshot
+        .as_ref()
+        .map(|snapshot| &snapshot.plan)
+        .unwrap_or(&free_plan);
+    let keys = [
+        "panels",
+        "forms",
+        "role_panels",
+        "workflows",
+        "workflow_runs",
+        "feeds",
+        "templates",
+        "analytics_days",
+        "audit_days",
+        "transcript_days",
+    ];
+    let limits = keys
+        .into_iter()
+        .map(|key| (key, quota_limit(plan, key)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    Ok(Json(serde_json::json!({
+        "plan": plan,
+        "guildLimit": plan.guild_limit(),
+        "limits": limits,
+        "entitlementVersion": snapshot.as_ref().map(|snapshot| snapshot.version).unwrap_or(0),
+    })))
+}
+
+async fn modules(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let _ = require_auth(&state, &headers)?;
+    let modules = [
+        ("core", Capability::Core),
+        ("studio", Capability::Studio),
+        ("security", Capability::Security),
+        ("support", Capability::Support),
+        ("events", Capability::Events),
+        ("community", Capability::Community),
+        ("automate", Capability::Automate),
+        ("insights", Capability::Insights),
+    ];
+    Ok(Json(serde_json::json!({
+        "modules": modules.into_iter().map(|(name, _)| name).collect::<Vec<_>>()
+    })))
 }
 
 fn require_auth(
