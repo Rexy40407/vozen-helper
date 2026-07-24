@@ -402,13 +402,25 @@ impl Store {
         let mut stmt = conn
             .prepare("SELECT key,value,updated_at FROM settings WHERE guild_id=?1 ORDER BY key")?;
         for row in stmt.query_map([guild_id], |row| {
-            Ok(serde_json::json!({
-                "key": row.get::<_, String>(0)?,
-                "value": row.get::<_, String>(1)?,
-                "updatedAt": row.get::<_, i64>(2)?,
-            }))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })? {
-            settings.push(row?);
+            let (key, value, updated_at) = row?;
+            let lower_key = key.to_ascii_lowercase();
+            if ["secret", "token", "webhook", "credential"]
+                .iter()
+                .any(|needle| lower_key.contains(needle))
+            {
+                continue;
+            }
+            settings.push(serde_json::json!({
+                "key": key,
+                "value": value,
+                "updatedAt": updated_at,
+            }));
         }
 
         let mut tags = Vec::new();
@@ -1090,6 +1102,9 @@ mod tests {
     fn guild_export_and_purge_are_scoped() {
         let store = Store::open(":memory:").unwrap();
         store.set_setting("g1", "welcome.channel", "10").unwrap();
+        store
+            .set_setting("g1", "automation.webhook_secret", "must-not-export")
+            .unwrap();
         store.upsert_tag("g1", "rules", "be kind", "u1").unwrap();
         store
             .create_workflow("g1", "hello", "message", "hi", "reply", "Hello")
@@ -1104,6 +1119,7 @@ mod tests {
         let export = store.export_guild("g1").unwrap();
         assert_eq!(export["guildId"], "g1");
         assert_eq!(export["settings"][0]["key"], "welcome.channel");
+        assert!(!export.to_string().contains("must-not-export"));
         assert_eq!(export["tags"][0]["name"], "rules");
         assert_eq!(export["workflows"][0]["name"], "hello");
 
