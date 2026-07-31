@@ -145,9 +145,7 @@ fn oauth_start_inner(
     code_challenge: &str,
     code_verifier: &str,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
-    if !(43..=128).contains(&code_verifier.len())
-        || code_challenge.trim().len() < 43
-    {
+    if !(43..=128).contains(&code_verifier.len()) || code_challenge.trim().len() < 43 {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
             "invalid_oauth_request",
@@ -209,7 +207,12 @@ async fn oauth_callback(
     let studio_redirect_origin = state
         .allowed_origin
         .as_deref()
-        .and_then(|origins| origins.split(',').map(str::trim).find(|origin| !origin.is_empty()))
+        .and_then(|origins| {
+            origins
+                .split(',')
+                .map(str::trim)
+                .find(|origin| !origin.is_empty())
+        })
         .map(str::to_owned);
     let code_verifier = query
         .code_verifier
@@ -301,7 +304,9 @@ async fn oauth_callback(
             format!("{}/studio/", origin.trim_end_matches('/'))
         };
         *response.status_mut() = StatusCode::SEE_OTHER;
-        response.headers_mut().insert(header::LOCATION, target.parse().unwrap());
+        response
+            .headers_mut()
+            .insert(header::LOCATION, target.parse().unwrap());
     }
     Ok(response)
 }
