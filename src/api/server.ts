@@ -8,7 +8,7 @@ import { sessionTokenDigest, signSessionToken, verifySessionTokenClaims } from '
 import { getRecentCases, countCases } from '../store/cases.js';
 import { getRecentActivity, countActivity } from '../store/activity.js';
 import { getStatsTotals } from '../community/store.js';
-import { setSetting } from '../store/settings.js';
+import { deleteSetting, getSetting, setSetting } from '../store/settings.js';
 import { getEffectiveFlags, FLAG_KEYS, flagSettingKey, clearFlagCache } from '../store/flags.js';
 import {
   getEffectiveTexts,
@@ -42,6 +42,61 @@ const MAX_CASES = 200;
 const MAX_ACTIVITY = 200;
 /** Allowlist de tipos filtráveis no endpoint de atividade. */
 const ACTIVITY_TYPES = new Set(['join', 'leave', 'ban', 'unban', 'kick']);
+
+// Configuração editável pelo painel web. As chaves são deliberadamente fechadas:
+// o painel nunca pode escrever definições arbitrárias na tabela de settings.
+const WEB_CONFIG_KEYS = [
+  'quarantine',
+  'giveaways',
+  'workflows',
+  'polls-events',
+  'self-roles',
+  'audit',
+  'permissions',
+  'privacy',
+  'templates',
+] as const;
+type WebConfigKey = (typeof WEB_CONFIG_KEYS)[number];
+const WEB_CONFIG_KEY_SET = new Set<string>(WEB_CONFIG_KEYS);
+const WEB_CONFIG_MAX_VALUE_BYTES = 64 * 1024;
+
+const WEB_CONFIG_DEFAULTS: Record<WebConfigKey, unknown> = {
+  quarantine: { enabled: false, durationMinutes: 30, action: 'restrict' },
+  giveaways: { giveaways: [] },
+  workflows: [],
+  'polls-events': { polls: [], events: [] },
+  'self-roles': { panels: [] },
+  audit: { enabled: true, logChannelId: '', retentionDays: 90 },
+  permissions: { reviewRequired: true, allowedRoleIds: [] },
+  privacy: { retentionDays: 90, allowExports: true },
+  templates: [],
+};
+
+function webConfigStorageKey(key: WebConfigKey): string {
+  return `web.${key}`;
+}
+
+function readWebConfig(db: Database.Database, guildId: string): Record<WebConfigKey, unknown> {
+  const config = {} as Record<WebConfigKey, unknown>;
+  for (const key of WEB_CONFIG_KEYS) {
+    const raw = getSetting(db, guildId, webConfigStorageKey(key));
+    if (raw === null) {
+      config[key] = WEB_CONFIG_DEFAULTS[key];
+      continue;
+    }
+    try {
+      config[key] = JSON.parse(raw) as unknown;
+    } catch {
+      // Configuração antiga/corrompida não deve quebrar o painel inteiro.
+      config[key] = WEB_CONFIG_DEFAULTS[key];
+    }
+  }
+  return config;
+}
+
+function jsonSize(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8');
+}
 
 export interface ServerOptions {
   /** Application ID Discord esperada no token OAuth do painel. */
@@ -350,6 +405,90 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
         `[api] channel ${key}=${value} por ${opts.allowedUserId} @ ${new Date().toISOString()}`,
       );
       return { ok: true, settings: getChannelSettingsView(opts.db, opts.guildId, modConfig) };
+    },
+  );
+
+  // Configurações avançadas do site. São JSON versionados por funcionalidade,
+  // com allowlist e limites de tamanho. Assim o painel pode evoluir sem criar
+  // uma tabela nova para cada cartão e o bot pode consumi-las numa fase seguinte.
+  app.get('/api/web-config', { preHandler: guard }, async () => ({
+    config: readWebConfig(opts.db, opts.guildId),
+  }));
+
+  app.patch(
+    '/api/web-config',
+    { preHandler: guard },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const body = (req.body ?? {}) as { key?: unknown; value?: unknown };
+      const key = typeof body.key === 'string' ? body.key : '';
+      if (!WEB_CONFIG_KEY_SET.has(key)) return reply.code(400).send({ error: 'invalid_key' });
+      const value = body.value;
+      if (value === undefined || typeof value === 'function') {
+        return reply.code(400).send({ error: 'invalid_value' });
+      }
+      let serialized: string;
+      try {
+        serialized = JSON.stringify(value);
+      } catch {
+        return reply.code(400).send({ error: 'invalid_value' });
+      }
+      if (Buffer.byteLength(serialized, 'utf8') > WEB_CONFIG_MAX_VALUE_BYTES) {
+        return reply.code(413).send({ error: 'value_too_large' });
+      }
+      setSetting(opts.db, opts.guildId, webConfigStorageKey(key as WebConfigKey), serialized, now());
+      console.log(`[api] web config ${key} updated by ${opts.allowedUserId} @ ${new Date().toISOString()}`);
+      return { ok: true, config: readWebConfig(opts.db, opts.guildId) };
+    },
+  );
+
+  // Exportação/importação servem para backups e para clonar uma configuração
+  // entre servidores. O ficheiro nunca contém tokens, mensagens ou dados de membros.
+  app.get('/api/web-config/export', { preHandler: guard }, async () => ({
+    version: 1,
+    exportedAt: new Date(now()).toISOString(),
+    config: readWebConfig(opts.db, opts.guildId),
+  }));
+
+  app.post(
+    '/api/web-config/import',
+    { preHandler: guard },
+    async (req: FastifyRequest, reply: FastifyReply) => {
+      const body = (req.body ?? {}) as { config?: unknown };
+      const incoming = body.config;
+      if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) {
+        return reply.code(400).send({ error: 'invalid_config' });
+      }
+      const entries = Object.entries(incoming as Record<string, unknown>);
+      if (entries.some(([key]) => !WEB_CONFIG_KEY_SET.has(key))) {
+        return reply.code(400).send({ error: 'invalid_key' });
+      }
+      const totalBytes = entries.reduce((total, [, value]) => total + jsonSize(value), 0);
+      if (totalBytes > WEB_CONFIG_MAX_VALUE_BYTES * WEB_CONFIG_KEYS.length) {
+        return reply.code(413).send({ error: 'config_too_large' });
+      }
+      for (const [key, value] of entries) {
+        if (jsonSize(value) > WEB_CONFIG_MAX_VALUE_BYTES) {
+          return reply.code(413).send({ error: 'value_too_large' });
+        }
+      }
+      const save = opts.db.transaction(() => {
+        for (const [key, value] of entries) {
+          setSetting(opts.db, opts.guildId, webConfigStorageKey(key as WebConfigKey), JSON.stringify(value), now());
+        }
+      });
+      save();
+      console.log(`[api] web config imported by ${opts.allowedUserId} @ ${new Date().toISOString()}`);
+      return { ok: true, config: readWebConfig(opts.db, opts.guildId) };
+    },
+  );
+
+  app.post(
+    '/api/web-config/delete',
+    { preHandler: guard },
+    async (_req: FastifyRequest) => {
+      for (const key of WEB_CONFIG_KEYS) deleteSetting(opts.db, opts.guildId, webConfigStorageKey(key));
+      console.log(`[api] web config deleted by ${opts.allowedUserId} @ ${new Date().toISOString()}`);
+      return { ok: true, config: readWebConfig(opts.db, opts.guildId) };
     },
   );
 
