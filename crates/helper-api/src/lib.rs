@@ -183,7 +183,7 @@ fn oauth_start_inner(
     response.headers_mut().insert(
         header::SET_COOKIE,
         format!(
-            "{OAUTH_COOKIE}={}; HttpOnly; Secure; SameSite=Lax; Path=/api/oauth; Max-Age=600",
+            "{OAUTH_COOKIE}={}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600",
             code_verifier
         )
         .parse()
@@ -293,7 +293,7 @@ async fn oauth_callback(
     .await?;
     response.headers_mut().append(
         header::SET_COOKIE,
-        format!("{OAUTH_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/api/oauth; Max-Age=0")
+        format!("{OAUTH_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0")
             .parse()
             .unwrap(),
     );
