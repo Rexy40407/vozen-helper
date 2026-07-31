@@ -206,6 +206,11 @@ async fn oauth_callback(
     headers: HeaderMap,
     Query(query): Query<OAuthCallbackQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    let studio_redirect_origin = state
+        .allowed_origin
+        .as_deref()
+        .and_then(|origins| origins.split(',').map(str::trim).find(|origin| !origin.is_empty()))
+        .map(str::to_owned);
     let code_verifier = query
         .code_verifier
         .or_else(|| cookie_value(&headers, OAUTH_COOKIE))
@@ -289,6 +294,15 @@ async fn oauth_callback(
             .parse()
             .unwrap(),
     );
+    if let Some(origin) = studio_redirect_origin {
+        let target = if origin.ends_with("github.io") {
+            format!("{}/vozen-helper-bot/studio/", origin.trim_end_matches('/'))
+        } else {
+            format!("{}/studio/", origin.trim_end_matches('/'))
+        };
+        *response.status_mut() = StatusCode::SEE_OTHER;
+        response.headers_mut().insert(header::LOCATION, target.parse().unwrap());
+    }
     Ok(response)
 }
 
