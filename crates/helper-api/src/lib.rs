@@ -145,8 +145,7 @@ fn oauth_start_inner(
     code_challenge: &str,
     code_verifier: &str,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
-    if guild_id.trim().is_empty()
-        || !(43..=128).contains(&code_verifier.len())
+    if !(43..=128).contains(&code_verifier.len())
         || code_challenge.trim().len() < 43
     {
         return Err(client_error(
