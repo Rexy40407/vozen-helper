@@ -201,7 +201,7 @@ fn oauth_start_inner(
     response.headers_mut().insert(
         header::SET_COOKIE,
         format!(
-            "{OAUTH_COOKIE}={}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600",
+            "{OAUTH_COOKIE}={}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=600",
             code_verifier
         )
         .parse()
@@ -302,7 +302,7 @@ async fn oauth_callback(
     .await?;
     response.headers_mut().append(
         header::SET_COOKIE,
-        format!("{OAUTH_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0")
+        format!("{OAUTH_COOKIE}=; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=0")
             .parse()
             .unwrap(),
     );
@@ -2833,7 +2833,7 @@ mod tests {
             .unwrap();
         assert!(cookie.starts_with("vh_oauth_verifier="));
         assert!(cookie.contains("HttpOnly"));
-        assert!(cookie.contains("SameSite=Lax"));
+        assert!(cookie.contains("SameSite=None"));
 
         let mismatch = router(state(Store::open(":memory:").unwrap()))
             .oneshot(
