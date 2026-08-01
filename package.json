@@ -13,7 +13,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "start:prod": "npm run build && node scripts/start-prod.mjs",
-    "test": "vitest run",
+    "test": "vitest run --config=vitest.config.mjs",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",

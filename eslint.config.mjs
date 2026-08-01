@@ -13,7 +13,7 @@ export default tseslint.config(
       'scratchpad/',
       'panel/dist/',
       'panel/node_modules/',
-      'site-publish/site/assets/',
+      'site-publish/',
     ],
   },
   js.configs.recommended,
