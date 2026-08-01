@@ -201,9 +201,8 @@ fn oauth_start_inner(
     response.headers_mut().insert(
         header::SET_COOKIE,
         format!(
-            "{OAUTH_COOKIE}={};{} HttpOnly; Secure; SameSite=Lax; Path=/api/oauth; Max-Age=600",
-            code_verifier,
-            cookie_domain(state),
+            "{OAUTH_COOKIE}={}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600",
+            code_verifier
         )
         .parse()
         .unwrap(),
@@ -291,7 +290,6 @@ async fn oauth_callback(
             "oauth_token_missing",
         ));
     }
-    let session_cookie_domain = cookie_domain(&state);
     let success_redirect = state.oauth_success_redirect.clone();
     let mut response = create_session_inner(
         State(state),
@@ -304,12 +302,9 @@ async fn oauth_callback(
     .await?;
     response.headers_mut().append(
         header::SET_COOKIE,
-        format!(
-            "{OAUTH_COOKIE}=;{} HttpOnly; Secure; SameSite=Lax; Path=/api/oauth; Max-Age=0",
-            session_cookie_domain
-        )
-        .parse()
-        .unwrap(),
+        format!("{OAUTH_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0")
+            .parse()
+            .unwrap(),
     );
     *response.status_mut() = StatusCode::SEE_OTHER;
     response.headers_mut().insert(
