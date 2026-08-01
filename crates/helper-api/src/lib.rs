@@ -182,7 +182,7 @@ fn oauth_start_inner(
     let state_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(state_token.as_bytes()));
     state
         .store
-        .register_oauth_state(&state_hash, expires)
+        .register_oauth_state(&state_hash, expires, code_verifier)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     let mut url = url::Url::parse("https://discord.com/oauth2/authorize").expect("static URL");
     url.query_pairs_mut()
@@ -222,10 +222,6 @@ async fn oauth_callback(
     headers: HeaderMap,
     Query(query): Query<OAuthCallbackQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
-    let code_verifier = query
-        .code_verifier
-        .or_else(|| cookie_value(&headers, OAUTH_COOKIE))
-        .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "missing_pkce_verifier"))?;
     let payload = verify_oauth_state(&query.state, &state.session_secret)
         .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "invalid_oauth_state"))?;
     let parts: Vec<&str> = payload.splitn(3, '.').collect();
@@ -238,16 +234,21 @@ async fn oauth_callback(
         return Err(client_error(StatusCode::BAD_REQUEST, "expired_oauth_state"));
     }
     let state_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(query.state.as_bytes()));
-    let state_is_fresh = state
+    let stored_verifier = state
         .store
         .consume_oauth_state(&state_hash, Utc::now().timestamp())
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
-    if !state_is_fresh {
+    if stored_verifier.is_none() {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
             "oauth_state_replayed",
         ));
     }
+    let code_verifier = query
+        .code_verifier
+        .or_else(|| cookie_value(&headers, OAUTH_COOKIE))
+        .or(stored_verifier)
+        .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "missing_pkce_verifier"))?;
     let guild_id = parts[0].to_string();
     let client = Client::new();
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
