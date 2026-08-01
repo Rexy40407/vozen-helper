@@ -11,7 +11,7 @@ type Route = { page: 'overview' | 'features' | 'activity' | 'rank-card' | 'detai
 type FieldSpec = { key: string; label: string; kind: 'toggle' | 'text' | 'number' | 'select' | 'textarea' | 'tags'; help?: string; options?: [string, string][]; min?: number; max?: number; step?: number; advanced?: boolean };
 type SectionSpec = { title: string; description: string; fields: FieldSpec[] };
 
-const pages = [{ id: 'overview', label: 'Início', icon: '⌂', hint: 'Visão geral' }, { id: 'features', label: 'Funcionalidades', icon: '✦', hint: 'Configurar módulos' }, { id: 'activity', label: 'Atividade', icon: '◷', hint: 'Histórico do servidor' }, { id: 'rank-card', label: 'Rank card', icon: '▣', hint: 'Níveis e identidade' }] as const;
+const pages = [{ id: 'overview', label: 'Painel', icon: '⌂', hint: 'Visão geral' }, { id: 'features', label: 'Funcionalidades', icon: '✦', hint: 'Configurar módulos' }, { id: 'activity', label: 'Atividade', icon: '◷', hint: 'Histórico do servidor' }, { id: 'rank-card', label: 'Rank card', icon: '▣', hint: 'Níveis e identidade' }] as const;
 const categories: { id: Category; label: string }[] = [{ id: 'all', label: 'Todas' }, { id: 'protection', label: 'Proteção' }, { id: 'community', label: 'Comunidade' }, { id: 'management', label: 'Gestão' }];
 const demoGuilds: Guild[] = [{ id: 'demo', name: 'Servidor de demonstração', canManage: true }];
 const demoFeatures: Feature[] = [
