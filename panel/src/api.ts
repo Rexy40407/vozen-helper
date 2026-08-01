@@ -17,7 +17,7 @@ export type Feature = {
   key: string;
   label: string;
   description: string;
-  category: 'protection' | 'community' | 'management';
+  category: 'protection' | 'community' | 'management' | 'utility' | 'social' | 'growth' | 'web3';
   capability: string;
   available: boolean;
   enabled: boolean;
