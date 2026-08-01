@@ -39,6 +39,22 @@ export type CaseRecord = {
 export type AuditRecord = { action: string; actor_id?: string; actorId?: string; outcome: string; created_at?: number };
 
 const base = (import.meta.env.VITE_HELPER_API_BASE as string | undefined)?.replace(/\/$/, '') ?? '';
+let sessionBearer: string | null = null;
+
+function persistSessionBearer(token: string | null): void {
+  sessionBearer = token;
+  try {
+    if (token) sessionStorage.setItem('vh_session_bearer', token);
+    else sessionStorage.removeItem('vh_session_bearer');
+  } catch { /* sessionStorage pode estar bloqueado */ }
+}
+
+try { sessionBearer = sessionStorage.getItem('vh_session_bearer'); } catch { /* opcional */ }
+const oauthSession = window.location.hash.match(/^#session=([A-Za-z0-9._~-]{32,4096})$/)?.[1];
+if (oauthSession) {
+  persistSessionBearer(oauthSession);
+  window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#/`);
+}
 
 export function apiUrl(path: string): string {
   return `${base}${path}`;
@@ -48,9 +64,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(apiUrl(path), {
     ...init,
     credentials: 'include',
-    headers: { Accept: 'application/json', ...(init?.headers ?? {}) },
+    headers: {
+      Accept: 'application/json',
+      ...(sessionBearer ? { Authorization: `Bearer ${sessionBearer}` } : {}),
+      ...(init?.headers ?? {}),
+    },
   });
   if (!response.ok) {
+    if (response.status === 401) persistSessionBearer(null);
     const payload = (await response.json().catch(() => ({}))) as { message?: string; code?: string };
     throw new Error(payload.message ?? payload.code ?? `API ${response.status}`);
   }
@@ -93,6 +114,7 @@ export const api = {
       body: JSON.stringify(config),
     }),
   startOAuth: async (guildId = '') => {
+    persistSessionBearer(null);
     const verifier = crypto.randomUUID().replaceAll('-', '') + crypto.randomUUID().replaceAll('-', '');
     try { sessionStorage.setItem('vh_oauth_verifier', verifier); } catch { /* storage opcional */ }
     const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));

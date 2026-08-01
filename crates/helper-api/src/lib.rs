@@ -26,6 +26,7 @@ use uuid::Uuid;
 type HmacSha256 = Hmac<Sha256>;
 const COOKIE: &str = "vh_session";
 const OAUTH_COOKIE: &str = "vh_oauth_verifier";
+const SESSION_RESPONSE_HEADER: &str = "x-vozen-session";
 const SESSION_MAX_HOURS: i64 = 8;
 const IDLE_MINUTES: i64 = 30;
 
@@ -301,20 +302,29 @@ async fn oauth_callback(
         }),
     )
     .await?;
+    let session_token = response
+        .headers_mut()
+        .remove(SESSION_RESPONSE_HEADER)
+        .and_then(|value| value.to_str().ok().map(ToOwned::to_owned))
+        .ok_or_else(|| client_error(StatusCode::INTERNAL_SERVER_ERROR, "session_token_missing"))?;
     response.headers_mut().append(
         header::SET_COOKIE,
         format!("{OAUTH_COOKIE}=; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=0")
             .parse()
             .unwrap(),
     );
+    let mut success_url = url::Url::parse(&success_redirect).map_err(|_| {
+        client_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid_oauth_success_redirect",
+        )
+    })?;
+    success_url.set_fragment(Some(&format!("session={session_token}")));
     *response.status_mut() = StatusCode::SEE_OTHER;
     response.headers_mut().insert(
         header::LOCATION,
-        success_redirect.parse().map_err(|_| {
-            client_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "invalid_oauth_success_redirect",
-            )
+        success_url.as_str().parse().map_err(|_| {
+            client_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid_oauth_redirect")
         })?,
     );
     Ok(response)
@@ -483,6 +493,12 @@ async fn create_session_inner(
         )
         .parse()
         .unwrap(),
+    );
+    response.headers_mut().insert(
+        SESSION_RESPONSE_HEADER,
+        token.parse().map_err(|_| {
+            client_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid_session_token")
+        })?,
     );
     Ok(response)
 }
