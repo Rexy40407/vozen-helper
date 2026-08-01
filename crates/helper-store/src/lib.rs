@@ -1303,6 +1303,28 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Position in the XP ranking (1 = highest XP). Users without a row have
+    /// no rank and are represented as `None` by the caller.
+    pub fn level_rank(&self, guild_id: &str, user_id: &str) -> Result<Option<u64>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let xp: Option<i64> = conn
+            .query_row(
+                "SELECT xp FROM levels WHERE guild_id=?1 AND user_id=?2",
+                params![guild_id, user_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(xp) = xp else {
+            return Ok(None);
+        };
+        let higher: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM levels WHERE guild_id=?1 AND xp>?2",
+            params![guild_id, xp],
+            |row| row.get(0),
+        )?;
+        Ok(Some((higher + 1).try_into().unwrap_or(u64::MAX)))
+    }
+
     pub fn record_message(&self, guild_id: &str, day: &str) -> Result<()> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute("INSERT INTO stats(guild_id,date,messages,joins,leaves) VALUES(?1,?2,1,0,0) ON CONFLICT(guild_id,date) DO UPDATE SET messages=messages+1", params![guild_id, day])?;
@@ -2104,6 +2126,10 @@ mod tests {
         );
         assert_eq!(store.add_xp("g", "u", 5).unwrap(), 5);
         assert_eq!(store.level_for("g", "u").unwrap(), 5);
+        store.add_xp("g", "other", 25).unwrap();
+        assert_eq!(store.level_rank("g", "other").unwrap(), Some(1));
+        assert_eq!(store.level_rank("g", "u").unwrap(), Some(2));
+        assert_eq!(store.level_rank("g", "missing").unwrap(), None);
         let id = store
             .schedule("g", "u", 1, r#"{"channel_id":"2","text":"hello"}"#)
             .unwrap();

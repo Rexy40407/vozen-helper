@@ -7,6 +7,57 @@ use uuid::Uuid;
 pub const API_VERSION: &str = "v1";
 pub const PRODUCT_ID: &str = "vozen-helper";
 
+/// Curated, moderator-safe backgrounds available to every guild.
+pub const RANK_CARD_BACKGROUND_PRESETS: &[(&str, &str)] = &[
+    ("aurora-lake", "Aurora Lake"),
+    ("neon-rain", "Neon Rain"),
+    ("enchanted-forest", "Enchanted Forest"),
+    ("desert-ruins", "Desert Ruins"),
+    ("coral-cavern", "Coral Cavern"),
+    ("sky-islands", "Sky Islands"),
+    ("volcanic-forge", "Volcanic Forge"),
+    ("moonlit-village", "Moonlit Village"),
+    ("starship-hangar", "Starship Hangar"),
+    ("lavender-storm", "Lavender Storm"),
+];
+
+/// Guild-scoped visual configuration used by the `/rank` card and its panel
+/// preview. Keeping this contract shared prevents the API and Discord gateway
+/// from silently rendering different defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct RankCardConfig {
+    pub font: String,
+    pub primary_color: String,
+    pub text_color: String,
+    pub background_color: String,
+    pub overlay_opacity: f32,
+    pub background_preset: Option<String>,
+    /// Kept for wire compatibility with older stored settings. New writes
+    /// intentionally reject custom URLs and data URLs in favour of presets.
+    pub background_url: Option<String>,
+    pub background_data: Option<String>,
+    pub avatar_ring_color: String,
+    pub avatar_ring_width: u8,
+}
+
+impl Default for RankCardConfig {
+    fn default() -> Self {
+        Self {
+            font: "system".into(),
+            primary_color: "#8EE5D2".into(),
+            text_color: "#F4F7FB".into(),
+            background_color: "#101725".into(),
+            overlay_opacity: 0.36,
+            background_preset: None,
+            background_url: None,
+            background_data: None,
+            avatar_ring_color: "#8EE5D2".into(),
+            avatar_ring_width: 4,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GuildRef {
     pub id: String,

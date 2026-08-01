@@ -27,6 +27,8 @@ use std::{
 };
 use tracing::info;
 
+mod rank_card;
+
 #[derive(Clone)]
 struct Handler {
     store: Store,
@@ -1747,6 +1749,47 @@ impl Handler {
         }
     }
 
+    async fn send_rank_card(&self, ctx: &Context, command: &CommandInteraction) -> Result<()> {
+        let Some(guild_id) = command.guild_id else {
+            return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+        };
+        let user_id = command
+            .data
+            .options
+            .iter()
+            .find_map(|option| match option.value {
+                CommandDataOptionValue::User(user) => Some(user),
+                _ => None,
+            })
+            .unwrap_or(command.user.id);
+        let profile = if user_id == command.user.id {
+            command.user.clone()
+        } else {
+            ctx.http.get_user(user_id).await?
+        };
+        let guild_text = guild_id.to_string();
+        let user_text = user_id.to_string();
+        let xp = self.store.level_for(&guild_text, &user_text)?;
+        let level = (xp / 100) + 1;
+        let rank = self.store.level_rank(&guild_text, &user_text)?;
+        let config =
+            rank_card::parse_config(self.store.get_setting(&guild_text, "community.rank_card")?);
+        let avatar_url = profile.face();
+        let svg =
+            rank_card::render_rank_card(&config, &profile.name, Some(&avatar_url), rank, level, xp);
+        command
+            .create_response(
+                ctx,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content(format!("{} · nível {} · {} XP", profile.name, level, xp))
+                        .add_file(CreateAttachment::bytes(svg.into_bytes(), "rank-card.svg")),
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn handle_command(&self, ctx: &Context, command: &CommandInteraction) -> Result<()> {
         if let Some(required) = required_permission(command.data.name.as_str()) {
             let permissions = command
@@ -2165,15 +2208,7 @@ impl Handler {
                 let name = option_string(command, "name").unwrap_or_default().to_lowercase();
                 if self.store.delete_tag(&guild_id.to_string(), &name)? { format!("Tag `{name}` eliminada.") } else { "Tag não encontrada.".to_string() }
             }
-            "rank" => {
-                let Some(guild_id) = command.guild_id else {
-                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
-                };
-                let user = command.data.options.iter().find_map(|option| match option.value { CommandDataOptionValue::User(user) => Some(user), _ => None }).unwrap_or(command.user.id);
-                let xp = self.store.level_for(&guild_id.to_string(), &user.to_string())?;
-                let level = (xp / 100) + 1;
-                format!("<@{}> está no nível {} com {} XP.", user, level, xp)
-            }
+            "rank" => return self.send_rank_card(ctx, command).await,
             "leaderboard" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;

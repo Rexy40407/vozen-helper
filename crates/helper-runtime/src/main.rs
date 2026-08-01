@@ -72,6 +72,7 @@ async fn main() -> Result<()> {
                     oauth_client_id: config.oauth_client_id.clone(),
                     oauth_client_secret: config.oauth_client_secret.clone(),
                     oauth_redirect_uri: config.oauth_redirect_uri.clone(),
+                    oauth_success_redirect: config.oauth_success_redirect.clone(),
                     allow_legacy_session: config.allow_legacy_session,
                     allowed_origin: std::env::var("HELPER_ALLOWED_ORIGIN").ok(),
                     entitlements: EntitlementClient::new(

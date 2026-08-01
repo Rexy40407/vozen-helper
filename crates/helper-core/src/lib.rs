@@ -14,6 +14,7 @@ pub struct Config {
     pub oauth_client_id: String,
     pub oauth_client_secret: String,
     pub oauth_redirect_uri: String,
+    pub oauth_success_redirect: String,
     pub allow_legacy_session: bool,
     pub session_secret: String,
     pub entitlement_url: Option<String>,
@@ -46,6 +47,8 @@ impl Config {
             oauth_client_id: required("DISCORD_OAUTH_CLIENT_ID")?,
             oauth_client_secret: required("DISCORD_OAUTH_CLIENT_SECRET")?,
             oauth_redirect_uri: required("DISCORD_OAUTH_REDIRECT_URI")?,
+            oauth_success_redirect: env::var("HELPER_OAUTH_SUCCESS_REDIRECT")
+                .unwrap_or_else(|_| "https://rexy40407.github.io/vozen-helper-bot/".into()),
             allow_legacy_session: env::var("HELPER_ALLOW_LEGACY_SESSION")
                 .is_ok_and(|value| value.eq_ignore_ascii_case("true")),
             session_secret: required("HELPER_SESSION_SECRET")?,
@@ -66,6 +69,9 @@ impl Config {
         }
         if self.oauth_redirect_uri.starts_with("http://") && self.environment == "production" {
             anyhow::bail!("OAuth redirect URI must use HTTPS in production");
+        }
+        if self.oauth_success_redirect.starts_with("http://") && self.environment == "production" {
+            anyhow::bail!("OAuth success redirect must use HTTPS in production");
         }
         Ok(())
     }

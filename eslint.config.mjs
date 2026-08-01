@@ -7,7 +7,14 @@ import prettier from 'eslint-config-prettier';
 
 export default tseslint.config(
   {
-    ignores: ['dist/', 'node_modules/', 'scratchpad/'],
+    ignores: [
+      'dist/',
+      'node_modules/',
+      'scratchpad/',
+      'panel/dist/',
+      'panel/node_modules/',
+      'site-publish/site/assets/',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

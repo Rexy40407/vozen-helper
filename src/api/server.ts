@@ -466,7 +466,7 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
       if (totalBytes > WEB_CONFIG_MAX_VALUE_BYTES * WEB_CONFIG_KEYS.length) {
         return reply.code(413).send({ error: 'config_too_large' });
       }
-      for (const [key, value] of entries) {
+      for (const [, value] of entries) {
         if (jsonSize(value) > WEB_CONFIG_MAX_VALUE_BYTES) {
           return reply.code(413).send({ error: 'value_too_large' });
         }

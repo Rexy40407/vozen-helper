@@ -16,6 +16,7 @@ sed -i \
   -e '/^DISCORD_OAUTH_CLIENT_ID=/d' \
   -e '/^DISCORD_OAUTH_CLIENT_SECRET=/d' \
   -e '/^DISCORD_OAUTH_REDIRECT_URI=/d' \
+  -e '/^HELPER_OAUTH_SUCCESS_REDIRECT=/d' \
   -e '/^HELPER_DATABASE_URL=/d' \
   -e '/^HELPER_BIND_ADDR=/d' \
   -e '/^HELPER_SESSION_SECRET=/d' \
@@ -30,11 +31,12 @@ client_id="$(awk -F= '/^CLIENT_ID=/{print $2}' "$node_root/.env")"
 printf '\nDISCORD_APPLICATION_ID=%s\n' "$client_id" >> "$root/shared/.env"
 printf 'DISCORD_OAUTH_CLIENT_ID=%s\n' "$client_id" >> "$root/shared/.env"
 printf 'DISCORD_OAUTH_CLIENT_SECRET=%s\n' "$oauth_secret" >> "$root/shared/.env"
-printf 'DISCORD_OAUTH_REDIRECT_URI=https://helper.vozen.org/oauth/callback\n' >> "$root/shared/.env"
+printf 'DISCORD_OAUTH_REDIRECT_URI=https://api.vozen.org/rust/api/oauth/callback\n' >> "$root/shared/.env"
+printf 'HELPER_OAUTH_SUCCESS_REDIRECT=https://rexy40407.github.io/vozen-helper-bot/\n' >> "$root/shared/.env"
 printf 'HELPER_DATABASE_URL=%s/vozen-helper.db\n' "$node_root" >> "$root/shared/.env"
 printf 'HELPER_BIND_ADDR=127.0.0.1:8788\n' >> "$root/shared/.env"
 printf 'HELPER_SESSION_SECRET=%s\n' "$(openssl rand -hex 32)" >> "$root/shared/.env"
-printf 'HELPER_ALLOWED_ORIGIN=https://helper.vozen.org\nHELPER_API_ONLY=false\nHELPER_ALLOW_LEGACY_SESSION=false\n' >> "$root/shared/.env"
+printf 'HELPER_ALLOWED_ORIGIN=https://helper.vozen.org,https://rexy40407.github.io\nHELPER_API_ONLY=false\nHELPER_ALLOW_LEGACY_SESSION=false\n' >> "$root/shared/.env"
 if [[ -n "${VOZEN_ENTITLEMENT_URL:-}" || -n "${VOZEN_ENTITLEMENT_SECRET:-}" ]]; then
   : "${VOZEN_ENTITLEMENT_URL:?set both VOZEN_ENTITLEMENT_URL and VOZEN_ENTITLEMENT_SECRET}"
   : "${VOZEN_ENTITLEMENT_SECRET:?set both VOZEN_ENTITLEMENT_URL and VOZEN_ENTITLEMENT_SECRET}"

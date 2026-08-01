@@ -11,7 +11,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use helper_contracts::Plan;
-use helper_contracts::{ApiError, SessionClaims};
+use helper_contracts::{ApiError, RANK_CARD_BACKGROUND_PRESETS, RankCardConfig, SessionClaims};
 use helper_core::{Capability, quota_limit};
 use helper_modules::EntitlementClient;
 use helper_store::Store;
@@ -20,7 +20,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -36,6 +36,7 @@ pub struct ApiState {
     pub oauth_client_id: String,
     pub oauth_client_secret: String,
     pub oauth_redirect_uri: String,
+    pub oauth_success_redirect: String,
     pub allow_legacy_session: bool,
     pub allowed_origin: Option<String>,
     pub entitlements: Option<EntitlementClient>,
@@ -59,6 +60,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
         .route("/api/guilds", get(guilds))
+        .route("/api/session/switch", post(switch_session_guild))
         .route("/api/cases", get(cases))
         .route("/api/audit", get(audit))
         .route("/api/tickets", get(tickets))
@@ -66,8 +68,21 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/quotas", get(quotas))
         .route("/api/modules", get(modules))
         .route(
+            "/api/config/features",
+            get(feature_config).put(update_feature_config),
+        )
+        .route(
+            "/api/config/features/{key}",
+            get(feature_detail).put(update_feature_detail),
+        )
+        .route("/api/config/features/{key}/test", post(test_feature))
+        .route(
             "/api/studio/brand",
             get(studio_brand).put(update_studio_brand),
+        )
+        .route(
+            "/api/studio/rank-card",
+            get(studio_rank_card).put(update_studio_rank_card),
         )
         .route(
             "/api/studio/templates",
@@ -88,11 +103,15 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/config/import", post(import_config))
         .route("/api/workflows", get(workflows).post(create_workflow))
         .route("/api/workflows/{id}", delete(delete_workflow));
-    let router = if let Some(origin) = allowed_origin {
-        match origin.parse::<HeaderValue>() {
-            Ok(origin) => router.layer(
+    let router = if let Some(origins) = allowed_origin {
+        let values = origins
+            .split(',')
+            .filter_map(|origin| origin.trim().parse::<HeaderValue>().ok())
+            .collect::<Vec<_>>();
+        if !values.is_empty() {
+            router.layer(
                 CorsLayer::new()
-                    .allow_origin(origin)
+                    .allow_origin(AllowOrigin::list(values))
                     .allow_credentials(true)
                     .allow_methods([
                         http::Method::GET,
@@ -102,11 +121,10 @@ pub fn router(state: ApiState) -> Router {
                         http::Method::OPTIONS,
                     ])
                     .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT]),
-            ),
-            Err(_) => {
-                tracing::warn!("HELPER_ALLOWED_ORIGIN is invalid; CORS disabled");
-                router
-            }
+            )
+        } else {
+            tracing::warn!("HELPER_ALLOWED_ORIGIN is invalid; CORS disabled");
+            router
         }
     } else {
         router
@@ -145,10 +163,7 @@ fn oauth_start_inner(
     code_challenge: &str,
     code_verifier: &str,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
-    if guild_id.trim().is_empty()
-        || !(43..=128).contains(&code_verifier.len())
-        || code_challenge.trim().len() < 43
-    {
+    if !(43..=128).contains(&code_verifier.len()) || code_challenge.trim().len() < 43 {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
             "invalid_oauth_request",
@@ -186,8 +201,9 @@ fn oauth_start_inner(
     response.headers_mut().insert(
         header::SET_COOKIE,
         format!(
-            "{OAUTH_COOKIE}={}; HttpOnly; Secure; SameSite=Lax; Path=/api/oauth; Max-Age=600",
-            code_verifier
+            "{OAUTH_COOKIE}={};{} HttpOnly; Secure; SameSite=Lax; Path=/api/oauth; Max-Age=600",
+            code_verifier,
+            cookie_domain(state),
         )
         .parse()
         .unwrap(),
@@ -275,6 +291,8 @@ async fn oauth_callback(
             "oauth_token_missing",
         ));
     }
+    let session_cookie_domain = cookie_domain(&state);
+    let success_redirect = state.oauth_success_redirect.clone();
     let mut response = create_session_inner(
         State(state),
         headers,
@@ -286,9 +304,22 @@ async fn oauth_callback(
     .await?;
     response.headers_mut().append(
         header::SET_COOKIE,
-        format!("{OAUTH_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/api/oauth; Max-Age=0")
-            .parse()
-            .unwrap(),
+        format!(
+            "{OAUTH_COOKIE}=;{} HttpOnly; Secure; SameSite=Lax; Path=/api/oauth; Max-Age=0",
+            session_cookie_domain
+        )
+        .parse()
+        .unwrap(),
+    );
+    *response.status_mut() = StatusCode::SEE_OTHER;
+    response.headers_mut().insert(
+        header::LOCATION,
+        success_redirect.parse().map_err(|_| {
+            client_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid_oauth_success_redirect",
+            )
+        })?,
     );
     Ok(response)
 }
@@ -342,11 +373,8 @@ async fn create_session_inner(
     headers: HeaderMap,
     Json(req): Json<SessionRequest>,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
-    if req.token.trim().is_empty() || req.guild_id.trim().is_empty() {
-        return Err(client_error(
-            StatusCode::BAD_REQUEST,
-            "missing_token_or_guild",
-        ));
+    if req.token.trim().is_empty() {
+        return Err(client_error(StatusCode::BAD_REQUEST, "missing_token"));
     }
     let client = Client::new();
     let user = client
@@ -372,9 +400,23 @@ async fn create_session_inner(
         .json()
         .await
         .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "invalid_discord_response"))?;
+    let selected_guild = if req.guild_id.trim().is_empty() {
+        guilds
+            .iter()
+            .find(|guild| {
+                guild
+                    .permissions
+                    .as_deref()
+                    .is_some_and(has_manage_permission)
+            })
+            .map(|guild| guild.id.clone())
+            .ok_or_else(|| client_error(StatusCode::FORBIDDEN, "guild_not_managed"))?
+    } else {
+        req.guild_id.clone()
+    };
     let can_manage = guilds
         .iter()
-        .find(|guild| guild.id == req.guild_id)
+        .find(|guild| guild.id == selected_guild)
         .map(|guild| {
             guild
                 .permissions
@@ -389,7 +431,7 @@ async fn create_session_inner(
     let claims = SessionClaims {
         session_id: Uuid::new_v4(),
         user_id: discord_user.id.clone(),
-        guild_id: req.guild_id,
+        guild_id: selected_guild,
         issued_at: now,
         expires_at: now + Duration::hours(SESSION_MAX_HOURS),
         last_seen_at: now,
@@ -430,7 +472,7 @@ async fn create_session_inner(
         && state
             .allowed_origin
             .as_deref()
-            .is_some_and(|allowed| allowed == origin)
+            .is_some_and(|allowed| origin_allowed(allowed, origin))
     {
         response
             .headers_mut()
@@ -439,7 +481,8 @@ async fn create_session_inner(
     response.headers_mut().insert(
         header::SET_COOKIE,
         format!(
-            "{COOKIE}={token}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age={}",
+            "{COOKIE}={token};{} HttpOnly; Secure; SameSite=None; Path=/; Max-Age={}",
+            cookie_domain(&state),
             SESSION_MAX_HOURS * 3600
         )
         .parse()
@@ -455,7 +498,10 @@ async fn logout(State(state): State<Arc<ApiState>>, headers: HeaderMap) -> impl 
     (
         [(
             header::SET_COOKIE,
-            format!("{COOKIE}=; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=0"),
+            format!(
+                "{COOKIE}=;{} HttpOnly; Secure; SameSite=None; Path=/; Max-Age=0",
+                cookie_domain(&state)
+            ),
         )],
         Json(serde_json::json!({"ok":true})),
     )
@@ -485,6 +531,540 @@ async fn guilds(
             .into_iter()
             .map(|guild| serde_json::json!({"id": guild.guild_id, "name": guild.name, "canManage": true}))
             .collect::<Vec<_>>()
+    })))
+}
+
+/// Switches the active guild without asking Discord for another access token.
+/// The target must be present in the managed-guild snapshot captured during
+/// OAuth, so a user cannot select a guild they did not authorise for this
+/// session. A fresh signed cookie keeps the active tenant explicit for every
+/// subsequent request.
+#[derive(Debug, Deserialize)]
+struct SwitchGuildRequest {
+    guild_id: String,
+}
+
+async fn switch_session_guild(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(request): Json<SwitchGuildRequest>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    let current = require_mutation_auth(&state, &headers)?;
+    let managed = state
+        .store
+        .session_guilds(current.session_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    if request.guild_id.trim().is_empty()
+        || !managed
+            .iter()
+            .any(|guild| guild.guild_id == request.guild_id)
+    {
+        return Err(client_error(StatusCode::FORBIDDEN, "guild_not_managed"));
+    }
+    let now = Utc::now();
+    let claims = SessionClaims {
+        session_id: Uuid::new_v4(),
+        user_id: current.user_id,
+        guild_id: request.guild_id,
+        issued_at: now,
+        expires_at: current.expires_at,
+        last_seen_at: now,
+    };
+    state
+        .store
+        .save_session(&claims)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let guilds = managed
+        .iter()
+        .map(|guild| {
+            (
+                guild.guild_id.clone(),
+                guild.name.clone(),
+                guild.permissions.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    state
+        .store
+        .replace_session_guilds(claims.session_id, &guilds)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let _ = state.store.revoke_session(current.session_id);
+    let token = sign_session(&claims, &state.session_secret);
+    let mut response = Json(serde_json::json!({
+        "ok": true,
+        "guildId": claims.guild_id,
+        "expiresAt": claims.expires_at,
+    }))
+    .into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        format!(
+            "{COOKIE}={token};{} HttpOnly; Secure; SameSite=None; Path=/; Max-Age={}",
+            cookie_domain(&state),
+            SESSION_MAX_HOURS * 3600
+        )
+        .parse()
+        .unwrap(),
+    );
+    Ok(response)
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FeatureDefinition {
+    key: String,
+    label: String,
+    description: String,
+    category: String,
+    capability: String,
+    available: bool,
+    enabled: bool,
+}
+
+const FEATURE_DEFINITIONS: &[(&str, &str, &str, &str, &str, bool)] = &[
+    (
+        "protection.antispam",
+        "Anti-spam",
+        "Abranda mensagens repetidas e links suspeitos.",
+        "protection",
+        "security",
+        true,
+    ),
+    (
+        "protection.antiscam",
+        "Anti-scam",
+        "Bloqueia padrões comuns de fraude e phishing.",
+        "protection",
+        "security",
+        true,
+    ),
+    (
+        "protection.anti_raid",
+        "Anti-raid",
+        "Ativa uma resposta rápida a entradas anormais.",
+        "protection",
+        "security",
+        true,
+    ),
+    (
+        "protection.join_gate",
+        "Join gate",
+        "Pede verificação antes de dar acesso completo.",
+        "protection",
+        "security",
+        true,
+    ),
+    (
+        "community.levels",
+        "Níveis e XP",
+        "Recompensa conversa saudável com XP e níveis.",
+        "community",
+        "community",
+        true,
+    ),
+    (
+        "community.starboard",
+        "Starboard",
+        "Destaca mensagens que a comunidade mais gosta.",
+        "community",
+        "community",
+        true,
+    ),
+    (
+        "community.suggestions",
+        "Sugestões",
+        "Recolhe ideias e deixa a comunidade votar.",
+        "community",
+        "community",
+        true,
+    ),
+    (
+        "community.giveaways",
+        "Giveaways",
+        "Cria sorteios com entradas rastreáveis.",
+        "community",
+        "events",
+        true,
+    ),
+    (
+        "support.tickets",
+        "Tickets",
+        "Organiza pedidos de suporte num só lugar.",
+        "management",
+        "support",
+        true,
+    ),
+    (
+        "support.welcome",
+        "Boas-vindas",
+        "Recebe novos membros com uma mensagem guiada.",
+        "management",
+        "core",
+        true,
+    ),
+    (
+        "management.workflows",
+        "Automações",
+        "Liga um gatilho a uma resposta sem código.",
+        "management",
+        "automate",
+        true,
+    ),
+    (
+        "management.polls",
+        "Enquetes",
+        "Publica votações simples para decisões rápidas.",
+        "management",
+        "events",
+        true,
+    ),
+    (
+        "insights.stats",
+        "Canais de estatísticas",
+        "Acompanha atividade e tendências do servidor.",
+        "management",
+        "insights",
+        true,
+    ),
+    (
+        "studio.rank_card",
+        "Rank card",
+        "Personaliza a carta de nível mostrada no Discord.",
+        "community",
+        "studio",
+        true,
+    ),
+];
+
+fn feature_key(key: &str) -> String {
+    format!("feature.{key}")
+}
+
+fn runtime_feature_key(key: &str) -> Option<&'static str> {
+    match key {
+        "protection.anti_raid" => Some("security.anti_raid.enabled"),
+        "protection.join_gate" => Some("security.join_gate.enabled"),
+        _ => None,
+    }
+}
+
+async fn feature_config(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let rows = FEATURE_DEFINITIONS
+        .iter()
+        .map(
+            |(key, label, description, category, capability, available)| {
+                let enabled = state
+                    .store
+                    .get_setting(&claims.guild_id, &feature_key(key))
+                    .ok()
+                    .flatten()
+                    .and_then(|value| value.parse::<bool>().ok())
+                    .or_else(|| {
+                        runtime_feature_key(key).and_then(|runtime_key| {
+                            state
+                                .store
+                                .get_setting(&claims.guild_id, runtime_key)
+                                .ok()
+                                .flatten()
+                                .and_then(|value| value.parse::<bool>().ok())
+                        })
+                    })
+                    .unwrap_or(false);
+                FeatureDefinition {
+                    key: (*key).to_string(),
+                    label: (*label).to_string(),
+                    description: (*description).to_string(),
+                    category: (*category).to_string(),
+                    capability: (*capability).to_string(),
+                    available: *available,
+                    enabled,
+                }
+            },
+        )
+        .collect::<Vec<_>>();
+    Ok(Json(
+        serde_json::json!({"guildId": claims.guild_id, "features": rows}),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct FeatureUpdate {
+    key: String,
+    enabled: bool,
+}
+
+fn feature_definition(
+    key: &str,
+) -> Option<&'static (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    bool,
+)> {
+    FEATURE_DEFINITIONS.iter().find(|item| item.0 == key)
+}
+
+fn feature_enabled(state: &ApiState, guild_id: &str, key: &str) -> bool {
+    state
+        .store
+        .get_setting(guild_id, &feature_key(key))
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse::<bool>().ok())
+        .or_else(|| {
+            runtime_feature_key(key).and_then(|runtime_key| {
+                state
+                    .store
+                    .get_setting(guild_id, runtime_key)
+                    .ok()
+                    .flatten()
+                    .and_then(|value| value.parse::<bool>().ok())
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn feature_config_key(key: &str) -> String {
+    format!("feature.config.{key}")
+}
+
+fn sync_runtime_feature_config(
+    store: &Store,
+    guild_id: &str,
+    key: &str,
+    config: &serde_json::Value,
+) -> Result<()> {
+    let object = config.as_object();
+    let number = |name: &str| {
+        object
+            .and_then(|values| values.get(name))
+            .and_then(serde_json::Value::as_i64)
+    };
+    let text = |name: &str| {
+        object
+            .and_then(|values| values.get(name))
+            .and_then(serde_json::Value::as_str)
+    };
+    match key {
+        "protection.anti_raid" => {
+            if let Some(value) = number("joinThreshold") {
+                store.set_setting(guild_id, "security.anti_raid.joins", &value.to_string())?;
+            }
+            if let Some(value) = number("windowSeconds") {
+                store.set_setting(
+                    guild_id,
+                    "security.anti_raid.window_seconds",
+                    &value.to_string(),
+                )?;
+            }
+        }
+        "protection.join_gate" => {
+            if let Some(value) = number("minimumAccountDays") {
+                store.set_setting(
+                    guild_id,
+                    "security.join_gate.min_age_days",
+                    &value.to_string(),
+                )?;
+            }
+            if let Some(value) = text("verifiedRole") {
+                store.set_setting(guild_id, "security.join_gate.role_id", value)?;
+            }
+        }
+        "community.starboard" => {
+            if let Some(value) = text("channel") {
+                store.set_setting(guild_id, "community.starboard.channel_id", value)?;
+            }
+            if let Some(value) = number("threshold") {
+                store.set_setting(
+                    guild_id,
+                    "community.starboard.threshold",
+                    &value.to_string(),
+                )?;
+            }
+        }
+        "support.tickets" => {
+            if let Some(value) = object
+                .and_then(|values| values.get("staffRoles"))
+                .and_then(|values| values.as_array())
+                .and_then(|values| values.first())
+                .and_then(serde_json::Value::as_str)
+            {
+                store.set_setting(guild_id, "support.ticket.staff_role_id", value)?;
+            }
+            if let Some(value) = text("transcriptChannel") {
+                store.set_setting(guild_id, "support.ticket.transcript_channel_id", value)?;
+            }
+            if let Some(value) = number("closeAfterHours") {
+                store.set_setting(
+                    guild_id,
+                    "support.ticket.sla_ms",
+                    &(value * 3_600_000).to_string(),
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn feature_detail(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    if feature_definition(&key).is_none() {
+        return Err(client_error(StatusCode::NOT_FOUND, "unknown_feature"));
+    }
+    let config = state
+        .store
+        .get_setting(&claims.guild_id, &feature_config_key(&key))
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "key": key,
+        "enabled": feature_enabled(&state, &claims.guild_id, &key),
+        "config": config,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct FeatureDetailUpdate {
+    enabled: bool,
+    config: serde_json::Value,
+}
+
+async fn update_feature_detail(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+    Json(update): Json<FeatureDetailUpdate>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let Some(definition) = feature_definition(&key) else {
+        return Err(client_error(StatusCode::BAD_REQUEST, "unknown_feature"));
+    };
+    if !definition.5 {
+        return Err(client_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "feature_not_available",
+        ));
+    }
+    if !update.config.is_object() || update.config.to_string().len() > 64 * 1024 {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_feature_config",
+        ));
+    }
+    state
+        .store
+        .set_setting(
+            &claims.guild_id,
+            &feature_key(&key),
+            if update.enabled { "true" } else { "false" },
+        )
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    state
+        .store
+        .set_setting(
+            &claims.guild_id,
+            &feature_config_key(&key),
+            &update.config.to_string(),
+        )
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    sync_runtime_feature_config(&state.store, &claims.guild_id, &key, &update.config)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "runtime_config_error"))?;
+    if let Some(runtime_key) = runtime_feature_key(&key) {
+        state
+            .store
+            .set_setting(
+                &claims.guild_id,
+                runtime_key,
+                if update.enabled { "true" } else { "false" },
+            )
+            .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    }
+    Ok(Json(
+        serde_json::json!({ "guildId": claims.guild_id, "key": key, "enabled": update.enabled, "config": update.config }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct FeatureTestRequest {
+    config: serde_json::Value,
+}
+
+async fn test_feature(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+    Json(test): Json<FeatureTestRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let _claims = require_auth(&state, &headers)?;
+    if feature_definition(&key).is_none() {
+        return Err(client_error(StatusCode::NOT_FOUND, "unknown_feature"));
+    }
+    if !test.config.is_object() {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_feature_config",
+        ));
+    }
+    Ok(Json(
+        serde_json::json!({ "ok": true, "key": key, "preview": test.config, "mode": "simulation" }),
+    ))
+}
+
+async fn update_feature_config(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(update): Json<FeatureUpdate>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let Some(definition) = FEATURE_DEFINITIONS
+        .iter()
+        .find(|item| item.0 == update.key.as_str())
+    else {
+        return Err(client_error(StatusCode::BAD_REQUEST, "unknown_feature"));
+    };
+    if !definition.5 {
+        return Err(client_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "feature_not_available",
+        ));
+    }
+    state
+        .store
+        .set_setting(
+            &claims.guild_id,
+            &feature_key(&update.key),
+            if update.enabled { "true" } else { "false" },
+        )
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    if let Some(runtime_key) = runtime_feature_key(&update.key) {
+        state
+            .store
+            .set_setting(
+                &claims.guild_id,
+                runtime_key,
+                if update.enabled { "true" } else { "false" },
+            )
+            .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    }
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "guildId": claims.guild_id,
+        "key": update.key,
+        "enabled": update.enabled,
     })))
 }
 
@@ -963,6 +1543,90 @@ async fn update_studio_brand(
     ))
 }
 
+const RANK_CARD_SETTING: &str = "community.rank_card";
+
+fn valid_rank_card_hex(value: &str) -> bool {
+    value.len() == 7
+        && value.starts_with('#')
+        && value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+}
+
+fn valid_rank_card_preset(value: Option<&str>) -> bool {
+    value.is_none_or(|preset| {
+        RANK_CARD_BACKGROUND_PRESETS
+            .iter()
+            .any(|(id, _)| *id == preset)
+    })
+}
+
+fn valid_rank_card_config(config: &RankCardConfig) -> bool {
+    matches!(
+        config.font.as_str(),
+        "system" | "inter" | "roboto" | "poppins" | "space_grotesk" | "lexend"
+    ) && valid_rank_card_hex(&config.primary_color)
+        && valid_rank_card_hex(&config.text_color)
+        && valid_rank_card_hex(&config.background_color)
+        && valid_rank_card_hex(&config.avatar_ring_color)
+        && config.overlay_opacity.is_finite()
+        && (0.0..=0.85).contains(&config.overlay_opacity)
+        && config.avatar_ring_width <= 8
+        && valid_rank_card_preset(config.background_preset.as_deref())
+        // Custom image input is deliberately disabled. This keeps the
+        // feature a curated catalogue and avoids server-owner liability for
+        // member-provided offensive or infringing artwork.
+        && config.background_url.is_none()
+        && config.background_data.is_none()
+}
+
+fn parse_rank_card(value: Option<String>) -> RankCardConfig {
+    value
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .filter(valid_rank_card_config)
+        .unwrap_or_default()
+}
+
+async fn studio_rank_card(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let config = parse_rank_card(
+        state
+            .store
+            .get_setting(&claims.guild_id, RANK_CARD_SETTING)
+            .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?,
+    );
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "config": config,
+        "backgroundPresets": RANK_CARD_BACKGROUND_PRESETS
+            .iter()
+            .map(|(id, label)| serde_json::json!({"id": id, "label": label}))
+            .collect::<Vec<_>>(),
+    })))
+}
+
+async fn update_studio_rank_card(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(config): Json<RankCardConfig>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    if !valid_rank_card_config(&config) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid_rank_card"));
+    }
+    let value = serde_json::to_string(&config)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "serialization_error"))?;
+    state
+        .store
+        .set_setting(&claims.guild_id, RANK_CARD_SETTING, &value)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "config": config,
+    })))
+}
+
 async fn permissions(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -1389,10 +2053,24 @@ fn require_mutation_auth(
     let origin = headers
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok());
-    if state.allowed_origin.as_deref() != origin {
+    if !state
+        .allowed_origin
+        .as_deref()
+        .is_some_and(|allowed| origin.is_some_and(|value| origin_allowed(allowed, value)))
+    {
         return Err(client_error(StatusCode::FORBIDDEN, "csrf_origin_invalid"));
     }
     Ok(claims)
+}
+fn origin_allowed(allowed: &str, origin: &str) -> bool {
+    allowed.split(',').any(|value| value.trim() == origin)
+}
+fn cookie_domain(state: &ApiState) -> &'static str {
+    if state.oauth_redirect_uri.contains(".vozen.org") {
+        " Domain=.vozen.org;"
+    } else {
+        ""
+    }
 }
 fn authenticate(state: &ApiState, headers: &HeaderMap) -> Option<SessionClaims> {
     let raw = headers
@@ -1531,6 +2209,7 @@ mod tests {
             oauth_client_id: "client".into(),
             oauth_client_secret: "secret".into(),
             oauth_redirect_uri: "https://example.test/callback".into(),
+            oauth_success_redirect: "https://example.test/".into(),
             allow_legacy_session: false,
             allowed_origin: None,
             entitlements: None,
@@ -1547,6 +2226,174 @@ mod tests {
             expires_at: now + Duration::hours(1),
             last_seen_at: now,
         }
+    }
+
+    #[tokio::test]
+    async fn feature_catalogue_is_allow_listed_and_guild_scoped() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        let app = router(state(store.clone()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/config/features")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["guildId"], "guild-a");
+        assert!(
+            body["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["key"] == "community.levels")
+        );
+
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config/features")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"key":"community.levels","enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            store
+                .get_setting("guild-a", "feature.community.levels")
+                .unwrap()
+                .as_deref(),
+            Some("true")
+        );
+
+        let response = router(state(store))
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config/features")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"key":"not-a-feature","enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn session_guild_switch_requires_a_managed_guild() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        store
+            .replace_session_guilds(
+                session.session_id,
+                &[
+                    ("guild-a".into(), "Alpha".into(), Some("32".into())),
+                    ("guild-b".into(), "Beta".into(), Some("32".into())),
+                ],
+            )
+            .unwrap();
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/session/switch")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"guild_id":"guild-b"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["guildId"], "guild-b");
+        assert!(store.load_session(session.session_id).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn rank_card_config_is_guild_scoped_and_validated() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+
+        let config = serde_json::json!({
+            "font": "poppins",
+            "primary_color": "#123ABC",
+            "text_color": "#F4F7FB",
+            "background_color": "#101725",
+            "overlay_opacity": 0.42,
+            "background_preset": "neon-rain",
+            "avatar_ring_color": "#123ABC",
+            "avatar_ring_width": 6
+        });
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/studio/rank-card")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(config.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/studio/rank-card")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["guildId"], "guild-a");
+        assert_eq!(body["config"]["primary_color"], "#123ABC");
+
+        let invalid = serde_json::json!({
+            "primary_color": "#123ABC",
+            "background_color": "#101725",
+            "text_color": "#F4F7FB",
+            "avatar_ring_color": "#8EE5D2",
+            "background_url": "https://cdn.example.test/rank.png"
+        });
+        let response = router(state(store))
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/studio/rank-card")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(invalid.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
