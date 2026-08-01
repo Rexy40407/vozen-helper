@@ -991,6 +991,17 @@ async fn update_feature_detail(
             "invalid_feature_config",
         ));
     }
+    if key == "management.nickname" {
+        let nickname = update
+            .config
+            .get("nickname")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "invalid_nickname"))?;
+        if nickname.chars().count() > 32 || nickname.chars().any(|character| character.is_control())
+        {
+            return Err(client_error(StatusCode::BAD_REQUEST, "invalid_nickname"));
+        }
+    }
     state
         .store
         .set_setting(
