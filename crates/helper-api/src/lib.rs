@@ -714,6 +714,14 @@ const FEATURE_DEFINITIONS: &[(&str, &str, &str, &str, &str, bool)] = &[
         true,
     ),
     (
+        "management.nickname",
+        "Nickname",
+        "Define o nome que o Helper mostra neste servidor.",
+        "management",
+        "core",
+        true,
+    ),
+    (
         "management.workflows",
         "Automações",
         "Liga um gatilho a uma resposta sem código.",
@@ -739,7 +747,7 @@ const FEATURE_DEFINITIONS: &[(&str, &str, &str, &str, &str, bool)] = &[
     ),
     (
         "studio.rank_card",
-        "Rank card",
+        "XP card",
         "Personaliza a carta de nível mostrada no Discord.",
         "community",
         "studio",
@@ -755,6 +763,7 @@ fn runtime_feature_key(key: &str) -> Option<&'static str> {
     match key {
         "protection.anti_raid" => Some("security.anti_raid.enabled"),
         "protection.join_gate" => Some("security.join_gate.enabled"),
+        "management.nickname" => Some("identity.nickname.enabled"),
         _ => None,
     }
 }
@@ -917,6 +926,11 @@ fn sync_runtime_feature_config(
                     "support.ticket.sla_ms",
                     &(value * 3_600_000).to_string(),
                 )?;
+            }
+        }
+        "management.nickname" => {
+            if let Some(value) = text("nickname") {
+                store.set_setting(guild_id, "identity.nickname", value)?;
             }
         }
         _ => {}
@@ -2289,6 +2303,29 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("true")
+        );
+
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config/features/management.nickname")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"enabled":true,"config":{"nickname":"Vozen Helper"}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            store
+                .get_setting("guild-a", "identity.nickname")
+                .unwrap()
+                .as_deref(),
+            Some("Vozen Helper")
         );
 
         let response = router(state(store))
