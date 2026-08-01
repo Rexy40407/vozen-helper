@@ -15,8 +15,8 @@ const pages = [{ id: 'overview', label: 'Painel', icon: '⌂', hint: 'Visão ger
 const categories: { id: Category; label: string }[] = [{ id: 'all', label: 'Todas' }, { id: 'protection', label: 'Proteção' }, { id: 'community', label: 'Comunidade' }, { id: 'management', label: 'Gestão' }];
 const demoGuilds: Guild[] = [{ id: 'demo', name: 'Servidor de demonstração', canManage: true }];
 const demoFeatures: Feature[] = [
-  { key: 'protection.antispam', label: 'Anti-spam', description: 'Reduz mensagens repetidas e comportamento de flood.', category: 'protection', capability: 'security', available: true, enabled: true },
-  { key: 'protection.antiscam', label: 'Anti-scam', description: 'Deteta ligações e padrões comuns de fraude.', category: 'protection', capability: 'security', available: true, enabled: true },
+  { key: 'protection.antispam', label: 'Proteção contra spam', description: 'Deteta flood, mensagens repetidas e excesso de menções.', category: 'protection', capability: 'security', available: true, enabled: true },
+  { key: 'protection.antiscam', label: 'Proteção contra fraude', description: 'Bloqueia links suspeitos, convites e padrões de phishing.', category: 'protection', capability: 'security', available: true, enabled: true },
   { key: 'protection.anti_raid', label: 'Anti-raid', description: 'Responde a entradas anormais e protege o servidor.', category: 'protection', capability: 'security', available: true, enabled: false },
   { key: 'protection.join_gate', label: 'Proteção de entradas', description: 'Aplica verificações básicas a novos membros.', category: 'protection', capability: 'security', available: true, enabled: false },
   { key: 'community.levels', label: 'Níveis e XP', description: 'Recompensa conversa saudável com XP e níveis.', category: 'community', capability: 'community', available: true, enabled: false },
@@ -31,6 +31,11 @@ const demoFeatures: Feature[] = [
   { key: 'insights.stats', label: 'Canais de estatísticas', description: 'Acompanha atividade e tendências do servidor.', category: 'management', capability: 'insights', available: true, enabled: false },
   { key: 'studio.rank_card', label: 'XP card', description: 'Personaliza a carta de nível mostrada no Discord.', category: 'community', capability: 'studio', available: true, enabled: true },
 ];
+const featureCopy: Record<string, Pick<Feature, 'label' | 'description'>> = {
+  'protection.antispam': { label: 'Proteção contra spam', description: 'Deteta flood, mensagens repetidas e excesso de menções.' },
+  'protection.antiscam': { label: 'Proteção contra fraude', description: 'Bloqueia links suspeitos, convites e padrões de phishing.' },
+};
+function presentFeature(feature: Feature): Feature { return featureCopy[feature.key] ? { ...feature, ...featureCopy[feature.key] } : feature; }
 const defaults: Record<string, FeatureConfig> = {
   'protection.antispam': { sensitivity: 'balanced', floodCount: 6, duplicateLimit: 3, timeoutSeconds: 60, mentionLimit: 5, ignoredChannels: [], ignoredRoles: [], logChannel: '', alertOnly: false },
   'protection.antiscam': { enabledLinks: true, blockedDomains: [], protectedDomains: [], action: 'delete_timeout', timeoutMinutes: 10, ignoreTrustedRoles: true, logChannel: '' },
@@ -79,7 +84,7 @@ function App() {
   useEffect(() => { const onHash = () => setRoute(parseRoute(window.location.hash)); window.addEventListener('hashchange', onHash); if (!window.location.hash) window.location.hash = '#/'; return () => window.removeEventListener('hashchange', onHash); }, []);
   useEffect(() => {
     if (localPreviewMode) { setMe({ id: 'demo', guildId: 'demo', expiresAt: new Date(Date.now() + 86_400_000).toISOString(), dbOk: true }); setStatus('ready'); return; }
-    void Promise.all([api.me(), api.guilds().catch(() => ({ guilds: demoGuilds })), api.features().catch(() => ({ guildId: '', features: demoFeatures })), api.stats().catch(() => ({ totalCases: 0, guildId: '' })), api.cases().catch(() => ({ cases: [] })), api.audit().catch(() => ({ events: [] })), api.quotas().catch(() => ({ plan: 'Free', limits: {}, usage: {} })), api.rankCard().catch(() => ({ guildId: '', config: defaultRankCard }))]).then(([nextMe, nextGuilds, nextFeatures, nextStats, nextCases, nextAudit, nextQuota, nextRank]) => { setMe(nextMe); setGuilds(nextGuilds.guilds); setFeatures(nextFeatures.features); setStats(nextStats); setCases(nextCases.cases); setAudit(nextAudit.events); setQuota(nextQuota); setRankConfig(nextRank.config); setSavedRankConfig(nextRank.config); setStatus('ready'); }).catch((cause: unknown) => { setMessage(cause instanceof Error ? cause.message : 'Não foi possível carregar o painel.'); setStatus('error'); });
+    void Promise.all([api.me(), api.guilds().catch(() => ({ guilds: demoGuilds })), api.features().catch(() => ({ guildId: '', features: demoFeatures })), api.stats().catch(() => ({ totalCases: 0, guildId: '' })), api.cases().catch(() => ({ cases: [] })), api.audit().catch(() => ({ events: [] })), api.quotas().catch(() => ({ plan: 'Free', limits: {}, usage: {} })), api.rankCard().catch(() => ({ guildId: '', config: defaultRankCard }))]).then(([nextMe, nextGuilds, nextFeatures, nextStats, nextCases, nextAudit, nextQuota, nextRank]) => { setMe(nextMe); setGuilds(nextGuilds.guilds); setFeatures(nextFeatures.features.map(presentFeature)); setStats(nextStats); setCases(nextCases.cases); setAudit(nextAudit.events); setQuota(nextQuota); setRankConfig(nextRank.config); setSavedRankConfig(nextRank.config); setStatus('ready'); }).catch((cause: unknown) => { setMessage(cause instanceof Error ? cause.message : 'Não foi possível carregar o painel.'); setStatus('error'); });
    }, []);
    async function startLogin() { setAuthLoading(true); setAuthError(''); try { await api.startOAuth(); } catch (cause) { setAuthError(cause instanceof Error ? cause.message : 'Não foi possível iniciar o acesso com Discord.'); setAuthLoading(false); } }
   useEffect(() => {

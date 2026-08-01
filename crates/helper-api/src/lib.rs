@@ -635,16 +635,16 @@ struct FeatureDefinition {
 const FEATURE_DEFINITIONS: &[(&str, &str, &str, &str, &str, bool)] = &[
     (
         "protection.antispam",
-        "Anti-spam",
-        "Abranda mensagens repetidas e links suspeitos.",
+        "Proteção contra spam",
+        "Deteta flood, mensagens repetidas e excesso de menções.",
         "protection",
         "security",
         true,
     ),
     (
         "protection.antiscam",
-        "Anti-scam",
-        "Bloqueia padrões comuns de fraude e phishing.",
+        "Proteção contra fraude",
+        "Bloqueia links suspeitos, convites e padrões de phishing.",
         "protection",
         "security",
         true,
