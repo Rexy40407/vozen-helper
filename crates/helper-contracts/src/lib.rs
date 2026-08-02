@@ -7,6 +7,71 @@ use uuid::Uuid;
 pub const API_VERSION: &str = "v1";
 pub const PRODUCT_ID: &str = "vozen-helper";
 
+/// Lifecycle state exposed by the configuration catalogue.  The panel must
+/// never infer this state from a boolean toggle: a feature can be configured
+/// without having a runtime adapter, or can be temporarily unhealthy.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureMaturity {
+    Operational,
+    Beta,
+    Planned,
+    Blocked,
+    Degraded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ValidationIssue {
+    pub path: String,
+    pub code: String,
+    pub message: String,
+    pub severity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FeatureRevision {
+    pub revision: u64,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeatureHealth {
+    pub maturity: FeatureMaturity,
+    pub operational: bool,
+    pub issues: Vec<ValidationIssue>,
+    pub last_applied_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeatureDescriptor {
+    pub key: String,
+    pub label: String,
+    pub description: String,
+    pub category: String,
+    pub capability: String,
+    pub maturity: FeatureMaturity,
+    pub configurable: bool,
+    pub config_schema_version: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeatureState {
+    pub descriptor: FeatureDescriptor,
+    pub enabled: bool,
+    pub config: serde_json::Value,
+    pub revision: FeatureRevision,
+    pub health: FeatureHealth,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SimulationResult {
+    pub key: String,
+    pub would_apply: bool,
+    pub issues: Vec<ValidationIssue>,
+    pub effects: Vec<String>,
+}
+
 /// Curated, moderator-safe backgrounds available to every guild.
 pub const RANK_CARD_BACKGROUND_PRESETS: &[(&str, &str)] = &[
     ("aurora-lake", "Aurora Lake"),

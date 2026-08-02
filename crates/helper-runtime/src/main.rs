@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use helper_api::{ApiState, serve as serve_api};
 use helper_core::Config;
-use helper_modules::EntitlementClient;
+use helper_modules::{EntitlementClient, RssClient, TwitchClient, YouTubeClient};
 use helper_store::Store;
 use std::time::Instant;
 use tokio::{select, signal};
@@ -79,6 +79,9 @@ async fn main() -> Result<()> {
                         config.entitlement_url.clone(),
                         config.entitlement_secret.clone(),
                     ),
+                    youtube: YouTubeClient::from_env(),
+                    rss: Some(RssClient::new()),
+                    twitch: TwitchClient::from_env(),
                 },
             );
             let discord = async {

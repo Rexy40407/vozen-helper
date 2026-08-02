@@ -50,6 +50,180 @@ pub struct AuditEventRecord {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct FeatureSettingRecord {
+    pub guild_id: String,
+    pub key: String,
+    pub enabled: bool,
+    pub config_json: String,
+    pub revision: u64,
+    pub updated_at: i64,
+    pub updated_by: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct YouTubeSubscriptionRecord {
+    pub id: i64,
+    pub guild_id: String,
+    pub source_channel_id: String,
+    pub target_channel_id: String,
+    pub message_template: String,
+    pub mention: String,
+    pub enabled: bool,
+    pub interval_seconds: i64,
+    pub last_video_id: Option<String>,
+    pub next_poll_at: i64,
+    pub failure_count: i64,
+    pub last_error: Option<String>,
+    pub created_by: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Subscription projection written together with a feature revision. Keeping
+/// this input separate from the persisted record prevents callers from
+/// mutating polling state while publishing configuration.
+#[derive(Debug, Clone)]
+pub struct YouTubeSubscriptionWrite {
+    pub source_channel_id: String,
+    pub target_channel_id: String,
+    pub message_template: String,
+    pub mention: String,
+    pub enabled: bool,
+    pub interval_seconds: i64,
+    pub created_by: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RssSubscriptionRecord {
+    pub id: i64,
+    pub guild_id: String,
+    pub feed_url: String,
+    pub target_channel_id: String,
+    pub message_template: String,
+    pub mention: String,
+    pub enabled: bool,
+    pub interval_seconds: i64,
+    pub last_item_id: Option<String>,
+    pub next_poll_at: i64,
+    pub failure_count: i64,
+    pub last_error: Option<String>,
+    pub created_by: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RssSubscriptionWrite {
+    pub feed_url: String,
+    pub target_channel_id: String,
+    pub message_template: String,
+    pub mention: String,
+    pub enabled: bool,
+    pub interval_seconds: i64,
+    pub created_by: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TwitchSubscriptionRecord {
+    pub id: i64,
+    pub guild_id: String,
+    pub source_login: String,
+    pub source_user_id: String,
+    pub target_channel_id: String,
+    pub message_template: String,
+    pub mention: String,
+    pub enabled: bool,
+    pub pending_event_id: Option<String>,
+    pub pending_stream_id: Option<String>,
+    pub pending_started_at: Option<String>,
+    pub last_event_id: Option<String>,
+    pub next_poll_at: i64,
+    pub failure_count: i64,
+    pub last_error: Option<String>,
+    pub created_by: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TwitchSubscriptionWrite {
+    pub source_login: String,
+    pub source_user_id: String,
+    pub target_channel_id: String,
+    pub message_template: String,
+    pub mention: String,
+    pub enabled: bool,
+    pub created_by: String,
+}
+
+fn youtube_subscription_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<YouTubeSubscriptionRecord> {
+    Ok(YouTubeSubscriptionRecord {
+        id: row.get(0)?,
+        guild_id: row.get(1)?,
+        source_channel_id: row.get(2)?,
+        target_channel_id: row.get(3)?,
+        message_template: row.get(4)?,
+        mention: row.get(5)?,
+        enabled: row.get::<_, i64>(6)? != 0,
+        interval_seconds: row.get(7)?,
+        last_video_id: row.get(8)?,
+        next_poll_at: row.get(9)?,
+        failure_count: row.get(10)?,
+        last_error: row.get(11)?,
+        created_by: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+    })
+}
+
+fn rss_subscription_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RssSubscriptionRecord> {
+    Ok(RssSubscriptionRecord {
+        id: row.get(0)?,
+        guild_id: row.get(1)?,
+        feed_url: row.get(2)?,
+        target_channel_id: row.get(3)?,
+        message_template: row.get(4)?,
+        mention: row.get(5)?,
+        enabled: row.get::<_, i64>(6)? != 0,
+        interval_seconds: row.get(7)?,
+        last_item_id: row.get(8)?,
+        next_poll_at: row.get(9)?,
+        failure_count: row.get(10)?,
+        last_error: row.get(11)?,
+        created_by: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+    })
+}
+
+fn twitch_subscription_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<TwitchSubscriptionRecord> {
+    Ok(TwitchSubscriptionRecord {
+        id: row.get(0)?,
+        guild_id: row.get(1)?,
+        source_login: row.get(2)?,
+        source_user_id: row.get(3)?,
+        target_channel_id: row.get(4)?,
+        message_template: row.get(5)?,
+        mention: row.get(6)?,
+        enabled: row.get::<_, i64>(7)? != 0,
+        pending_event_id: row.get(8)?,
+        pending_stream_id: row.get(9)?,
+        pending_started_at: row.get(10)?,
+        last_event_id: row.get(11)?,
+        next_poll_at: row.get(12)?,
+        failure_count: row.get(13)?,
+        last_error: row.get(14)?,
+        created_by: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RetentionSummary {
     pub deleted: serde_json::Value,
 }
@@ -217,7 +391,7 @@ impl Store {
         // The owner column is named `opener_id` there; changing it to `user_id`
         // would make an in-place Rust cutover fail on the live database.
         conn.execute_batch("CREATE TABLE IF NOT EXISTS tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, opener_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', claimed_by TEXT, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_tickets_owner ON tickets(guild_id,opener_id,status); CREATE TABLE IF NOT EXISTS suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, author_id TEXT NOT NULL, content TEXT NOT NULL, message_id TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS suggestion_votes (suggestion_id INTEGER NOT NULL, user_id TEXT NOT NULL, vote INTEGER NOT NULL, PRIMARY KEY(suggestion_id,user_id)); CREATE TABLE IF NOT EXISTS giveaways (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, prize TEXT NOT NULL, winners INTEGER NOT NULL DEFAULT 1, end_at INTEGER NOT NULL, ended INTEGER NOT NULL DEFAULT 0, required_role_id TEXT, host_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS giveaway_entries (giveaway_id INTEGER NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY(giveaway_id,user_id)); CREATE TABLE IF NOT EXISTS polls (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, question TEXT NOT NULL, options TEXT NOT NULL, end_at INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS poll_votes (poll_id INTEGER NOT NULL, user_id TEXT NOT NULL, choice INTEGER NOT NULL, PRIMARY KEY(poll_id,user_id)); CREATE TABLE IF NOT EXISTS workflows (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, name TEXT NOT NULL, trigger TEXT NOT NULL, condition TEXT NOT NULL DEFAULT '', action TEXT NOT NULL, payload TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS workflow_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id INTEGER NOT NULL, guild_id TEXT NOT NULL, source_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_workflows_trigger ON workflows(guild_id,trigger,enabled); CREATE TABLE IF NOT EXISTS quarantine (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, role_ids TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE TABLE IF NOT EXISTS starboard (guild_id TEXT NOT NULL, original_message_id TEXT NOT NULL, starboard_message_id TEXT NOT NULL, star_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,original_message_id));")?;
-        conn.execute_batch("CREATE TABLE IF NOT EXISTS audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, correlation_id TEXT NOT NULL UNIQUE, guild_id TEXT NOT NULL, actor_id TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', before_json TEXT NOT NULL DEFAULT '{}', after_json TEXT NOT NULL DEFAULT '{}', outcome TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_audit_events_guild_time ON audit_events(guild_id, created_at DESC);")?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, correlation_id TEXT NOT NULL UNIQUE, guild_id TEXT NOT NULL, actor_id TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', before_json TEXT NOT NULL DEFAULT '{}', after_json TEXT NOT NULL DEFAULT '{}', outcome TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_audit_events_guild_time ON audit_events(guild_id, created_at DESC); CREATE TABLE IF NOT EXISTS feature_settings (guild_id TEXT NOT NULL, key TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, config_json TEXT NOT NULL DEFAULT '{}', revision INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL DEFAULT '', PRIMARY KEY(guild_id,key)); CREATE TABLE IF NOT EXISTS feature_revisions (guild_id TEXT NOT NULL, key TEXT NOT NULL, revision INTEGER NOT NULL, enabled INTEGER NOT NULL, config_json TEXT NOT NULL, updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL, PRIMARY KEY(guild_id,key,revision)); CREATE INDEX IF NOT EXISTS idx_feature_revisions_lookup ON feature_revisions(guild_id,key,revision DESC);")?;
         for (column, definition) in [
             ("category", "TEXT NOT NULL DEFAULT 'general'"),
             ("priority", "TEXT NOT NULL DEFAULT 'normal'"),
@@ -238,6 +412,20 @@ impl Store {
             }
         }
         conn.execute_batch("CREATE TABLE IF NOT EXISTS event_registrations (guild_id TEXT NOT NULL, event_id TEXT NOT NULL, user_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'registered', created_at INTEGER NOT NULL, checked_in_at INTEGER, PRIMARY KEY(guild_id,event_id,user_id)); CREATE INDEX IF NOT EXISTS idx_event_registrations_event ON event_registrations(guild_id,event_id,status);")?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS twitch_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, source_login TEXT NOT NULL, source_user_id TEXT NOT NULL, target_channel_id TEXT NOT NULL, message_template TEXT NOT NULL DEFAULT '{broadcaster} está ao vivo!\\nhttps://twitch.tv/{login}', mention TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, pending_event_id TEXT, pending_stream_id TEXT, pending_started_at TEXT, last_event_id TEXT, next_poll_at INTEGER NOT NULL, failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(guild_id,source_user_id,target_channel_id)); CREATE INDEX IF NOT EXISTS idx_twitch_due ON twitch_subscriptions(enabled,next_poll_at); CREATE INDEX IF NOT EXISTS idx_twitch_user ON twitch_subscriptions(source_user_id,enabled); CREATE INDEX IF NOT EXISTS idx_twitch_guild ON twitch_subscriptions(guild_id,updated_at DESC);")?;
+        let twitch_last_event_exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('twitch_subscriptions') WHERE name='last_event_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        if twitch_last_event_exists == 0 {
+            conn.execute(
+                "ALTER TABLE twitch_subscriptions ADD COLUMN last_event_id TEXT",
+                [],
+            )?;
+        }
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS youtube_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, source_channel_id TEXT NOT NULL, target_channel_id TEXT NOT NULL, message_template TEXT NOT NULL DEFAULT 'Novo vídeo de {channel}: **{title}**\\n{url}', mention TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 300, last_video_id TEXT, next_poll_at INTEGER NOT NULL, failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(guild_id,source_channel_id,target_channel_id)); CREATE INDEX IF NOT EXISTS idx_youtube_due ON youtube_subscriptions(enabled,next_poll_at); CREATE INDEX IF NOT EXISTS idx_youtube_guild ON youtube_subscriptions(guild_id,updated_at DESC);")?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS rss_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, feed_url TEXT NOT NULL, target_channel_id TEXT NOT NULL, message_template TEXT NOT NULL DEFAULT 'Nova publicação em {feed}: **{title}**\\n{url}', mention TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 300, last_item_id TEXT, next_poll_at INTEGER NOT NULL, failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(guild_id,feed_url,target_channel_id)); CREATE INDEX IF NOT EXISTS idx_rss_due ON rss_subscriptions(enabled,next_poll_at); CREATE INDEX IF NOT EXISTS idx_rss_guild ON rss_subscriptions(guild_id,updated_at DESC);")?;
         Ok(())
     }
 
@@ -654,6 +842,663 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?)
+    }
+
+    pub fn get_feature_setting(
+        &self,
+        guild_id: &str,
+        key: &str,
+    ) -> Result<Option<FeatureSettingRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT guild_id,key,enabled,config_json,revision,updated_at,updated_by FROM feature_settings WHERE guild_id=?1 AND key=?2",
+                params![guild_id, key],
+                |row| {
+                    Ok(FeatureSettingRecord {
+                        guild_id: row.get(0)?,
+                        key: row.get(1)?,
+                        enabled: row.get::<_, i64>(2)? != 0,
+                        config_json: row.get(3)?,
+                        revision: row.get::<_, i64>(4)?.try_into().unwrap_or(0),
+                        updated_at: row.get(5)?,
+                        updated_by: row.get(6)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn feature_revision(
+        &self,
+        guild_id: &str,
+        key: &str,
+        revision: u64,
+    ) -> Result<Option<FeatureSettingRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT ?1,?2,enabled,config_json,revision,updated_at,updated_by FROM feature_revisions WHERE guild_id=?1 AND key=?2 AND revision=?3",
+                params![guild_id, key, i64::try_from(revision).unwrap_or(i64::MAX)],
+                |row| {
+                    Ok(FeatureSettingRecord {
+                        guild_id: row.get(0)?,
+                        key: row.get(1)?,
+                        enabled: row.get::<_, i64>(2)? != 0,
+                        config_json: row.get(3)?,
+                        revision: row.get::<_, i64>(4)?.try_into().unwrap_or(0),
+                        updated_at: row.get(5)?,
+                        updated_by: row.get(6)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn feature_revisions(
+        &self,
+        guild_id: &str,
+        key: &str,
+        limit: u32,
+    ) -> Result<Vec<FeatureSettingRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT ?1,?2,enabled,config_json,revision,updated_at,updated_by FROM feature_revisions WHERE guild_id=?1 AND key=?2 ORDER BY revision DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![guild_id, key, i64::from(limit.min(100))], |row| {
+            Ok(FeatureSettingRecord {
+                guild_id: row.get(0)?,
+                key: row.get(1)?,
+                enabled: row.get::<_, i64>(2)? != 0,
+                config_json: row.get(3)?,
+                revision: row.get::<_, i64>(4)?.try_into().unwrap_or(0),
+                updated_at: row.get(5)?,
+                updated_by: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Publishes a feature and all of its runtime projections atomically.
+    /// `expected_revision` prevents a stale panel tab from overwriting a
+    /// newer change made by another moderator.
+    pub fn publish_feature_setting(
+        &self,
+        guild_id: &str,
+        key: &str,
+        enabled: bool,
+        config_json: &str,
+        expected_revision: Option<u64>,
+        updated_by: &str,
+        projections: &[(String, String)],
+    ) -> Result<FeatureSettingRecord> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let current: Option<(i64, i64, String, String)> = tx
+            .query_row(
+                "SELECT revision,enabled,config_json,updated_by FROM feature_settings WHERE guild_id=?1 AND key=?2",
+                params![guild_id, key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let current_revision = current
+            .as_ref()
+            .and_then(|item| u64::try_from(item.0).ok())
+            .unwrap_or(0);
+        if expected_revision.is_some_and(|value| value != current_revision) {
+            bail!("feature_revision_conflict:{current_revision}");
+        }
+        let next_revision = current_revision.saturating_add(1);
+        let now = Utc::now().timestamp_millis();
+        tx.execute(
+            "INSERT INTO feature_settings(guild_id,key,enabled,config_json,revision,updated_at,updated_by) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(guild_id,key) DO UPDATE SET enabled=excluded.enabled,config_json=excluded.config_json,revision=excluded.revision,updated_at=excluded.updated_at,updated_by=excluded.updated_by",
+            params![guild_id, key, if enabled { 1_i64 } else { 0_i64 }, config_json, i64::try_from(next_revision).unwrap_or(i64::MAX), now, updated_by],
+        )?;
+        tx.execute(
+            "INSERT INTO feature_revisions(guild_id,key,revision,enabled,config_json,updated_at,updated_by) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![guild_id, key, i64::try_from(next_revision).unwrap_or(i64::MAX), if enabled { 1_i64 } else { 0_i64 }, config_json, now, updated_by],
+        )?;
+        for (projection_key, projection_value) in projections {
+            tx.execute(
+                "INSERT INTO settings(guild_id,key,value,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(guild_id,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                params![guild_id, projection_key, projection_value, now],
+            )?;
+        }
+        let correlation_id = Uuid::new_v4().to_string();
+        let before_json = current
+            .as_ref()
+            .map(|item| serde_json::json!({"enabled": item.1 != 0, "config": item.2, "revision": item.0}))
+            .unwrap_or_else(|| serde_json::json!({}));
+        let after_json = serde_json::json!({"enabled": enabled, "config": serde_json::from_str::<serde_json::Value>(config_json).unwrap_or_else(|_| serde_json::json!({})), "revision": next_revision});
+        tx.execute(
+            "INSERT INTO audit_events(correlation_id,guild_id,actor_id,action,reason,before_json,after_json,outcome,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![correlation_id, guild_id, updated_by, "feature.publish", key, before_json.to_string(), after_json.to_string(), "published", now],
+        )?;
+        tx.commit()?;
+        Ok(FeatureSettingRecord {
+            guild_id: guild_id.to_string(),
+            key: key.to_string(),
+            enabled,
+            config_json: config_json.to_string(),
+            revision: next_revision,
+            updated_at: now,
+            updated_by: updated_by.to_string(),
+        })
+    }
+
+    /// Publishes the YouTube feature and its subscription projection in the
+    /// same SQLite transaction. This keeps a stale revision or a failed
+    /// subscription write from leaving the panel and worker out of sync.
+    pub fn publish_youtube_feature_setting(
+        &self,
+        guild_id: &str,
+        key: &str,
+        enabled: bool,
+        config_json: &str,
+        expected_revision: Option<u64>,
+        updated_by: &str,
+        projections: &[(String, String)],
+        subscription: Option<&YouTubeSubscriptionWrite>,
+    ) -> Result<FeatureSettingRecord> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let current: Option<(i64, i64, String, String)> = tx
+            .query_row(
+                "SELECT revision,enabled,config_json,updated_by FROM feature_settings WHERE guild_id=?1 AND key=?2",
+                params![guild_id, key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let current_revision = current
+            .as_ref()
+            .and_then(|item| u64::try_from(item.0).ok())
+            .unwrap_or(0);
+        if expected_revision.is_some_and(|value| value != current_revision) {
+            bail!("feature_revision_conflict:{current_revision}");
+        }
+        let next_revision = current_revision.saturating_add(1);
+        let now = Utc::now().timestamp_millis();
+        tx.execute(
+            "INSERT INTO feature_settings(guild_id,key,enabled,config_json,revision,updated_at,updated_by) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(guild_id,key) DO UPDATE SET enabled=excluded.enabled,config_json=excluded.config_json,revision=excluded.revision,updated_at=excluded.updated_at,updated_by=excluded.updated_by",
+            params![guild_id, key, if enabled { 1_i64 } else { 0_i64 }, config_json, i64::try_from(next_revision).unwrap_or(i64::MAX), now, updated_by],
+        )?;
+        tx.execute(
+            "INSERT INTO feature_revisions(guild_id,key,revision,enabled,config_json,updated_at,updated_by) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![guild_id, key, i64::try_from(next_revision).unwrap_or(i64::MAX), if enabled { 1_i64 } else { 0_i64 }, config_json, now, updated_by],
+        )?;
+        for (projection_key, projection_value) in projections {
+            tx.execute(
+                "INSERT INTO settings(guild_id,key,value,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(guild_id,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                params![guild_id, projection_key, projection_value, now],
+            )?;
+        }
+        if let Some(subscription) = subscription {
+            let existing_id: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM youtube_subscriptions WHERE guild_id=?1 ORDER BY updated_at DESC, id DESC LIMIT 1",
+                    [guild_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(id) = existing_id {
+                tx.execute(
+                    "UPDATE youtube_subscriptions SET source_channel_id=?2,target_channel_id=?3,message_template=?4,mention=?5,enabled=?6,interval_seconds=?7,last_video_id=NULL,next_poll_at=?8,failure_count=0,last_error=NULL,updated_at=?8 WHERE guild_id=?1 AND id=?9",
+                    params![guild_id, subscription.source_channel_id, subscription.target_channel_id, subscription.message_template, subscription.mention, if subscription.enabled { 1_i64 } else { 0_i64 }, subscription.interval_seconds, now, id],
+                )?;
+            } else if subscription.enabled {
+                tx.execute(
+                    "INSERT INTO youtube_subscriptions(guild_id,source_channel_id,target_channel_id,message_template,mention,enabled,interval_seconds,next_poll_at,created_by,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,1,?6,?7,?8,?7,?7)",
+                    params![guild_id, subscription.source_channel_id, subscription.target_channel_id, subscription.message_template, subscription.mention, subscription.interval_seconds, now, subscription.created_by],
+                )?;
+            }
+        }
+        let correlation_id = Uuid::new_v4().to_string();
+        let before_json = current
+            .as_ref()
+            .map(|item| serde_json::json!({"enabled": item.1 != 0, "config": item.2, "revision": item.0}))
+            .unwrap_or_else(|| serde_json::json!({}));
+        let after_json = serde_json::json!({"enabled": enabled, "config": serde_json::from_str::<serde_json::Value>(config_json).unwrap_or_else(|_| serde_json::json!({})), "revision": next_revision});
+        tx.execute(
+            "INSERT INTO audit_events(correlation_id,guild_id,actor_id,action,reason,before_json,after_json,outcome,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![correlation_id, guild_id, updated_by, "feature.publish", key, before_json.to_string(), after_json.to_string(), "published", now],
+        )?;
+        tx.commit()?;
+        Ok(FeatureSettingRecord {
+            guild_id: guild_id.to_string(),
+            key: key.to_string(),
+            enabled,
+            config_json: config_json.to_string(),
+            revision: next_revision,
+            updated_at: now,
+            updated_by: updated_by.to_string(),
+        })
+    }
+
+    /// Publishes the RSS feature and its subscription projection atomically.
+    pub fn publish_rss_feature_setting(
+        &self,
+        guild_id: &str,
+        key: &str,
+        enabled: bool,
+        config_json: &str,
+        expected_revision: Option<u64>,
+        updated_by: &str,
+        projections: &[(String, String)],
+        subscription: Option<&RssSubscriptionWrite>,
+    ) -> Result<FeatureSettingRecord> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let current: Option<(i64, i64, String, String)> = tx
+            .query_row(
+                "SELECT revision,enabled,config_json,updated_by FROM feature_settings WHERE guild_id=?1 AND key=?2",
+                params![guild_id, key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let current_revision = current
+            .as_ref()
+            .and_then(|item| u64::try_from(item.0).ok())
+            .unwrap_or(0);
+        if expected_revision.is_some_and(|value| value != current_revision) {
+            bail!("feature_revision_conflict:{current_revision}");
+        }
+        let next_revision = current_revision.saturating_add(1);
+        let now = Utc::now().timestamp_millis();
+        tx.execute(
+            "INSERT INTO feature_settings(guild_id,key,enabled,config_json,revision,updated_at,updated_by) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(guild_id,key) DO UPDATE SET enabled=excluded.enabled,config_json=excluded.config_json,revision=excluded.revision,updated_at=excluded.updated_at,updated_by=excluded.updated_by",
+            params![guild_id, key, if enabled { 1_i64 } else { 0_i64 }, config_json, i64::try_from(next_revision).unwrap_or(i64::MAX), now, updated_by],
+        )?;
+        tx.execute(
+            "INSERT INTO feature_revisions(guild_id,key,revision,enabled,config_json,updated_at,updated_by) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![guild_id, key, i64::try_from(next_revision).unwrap_or(i64::MAX), if enabled { 1_i64 } else { 0_i64 }, config_json, now, updated_by],
+        )?;
+        for (projection_key, projection_value) in projections {
+            tx.execute(
+                "INSERT INTO settings(guild_id,key,value,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(guild_id,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                params![guild_id, projection_key, projection_value, now],
+            )?;
+        }
+        if let Some(subscription) = subscription {
+            let existing_id: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM rss_subscriptions WHERE guild_id=?1 ORDER BY updated_at DESC, id DESC LIMIT 1",
+                    [guild_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(id) = existing_id {
+                tx.execute(
+                    "UPDATE rss_subscriptions SET feed_url=?2,target_channel_id=?3,message_template=?4,mention=?5,enabled=?6,interval_seconds=?7,last_item_id=NULL,next_poll_at=?8,failure_count=0,last_error=NULL,updated_at=?8 WHERE guild_id=?1 AND id=?9",
+                    params![guild_id, subscription.feed_url, subscription.target_channel_id, subscription.message_template, subscription.mention, if subscription.enabled { 1_i64 } else { 0_i64 }, subscription.interval_seconds, now, id],
+                )?;
+            } else if subscription.enabled {
+                tx.execute(
+                    "INSERT INTO rss_subscriptions(guild_id,feed_url,target_channel_id,message_template,mention,enabled,interval_seconds,next_poll_at,created_by,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,1,?6,?7,?8,?7,?7)",
+                    params![guild_id, subscription.feed_url, subscription.target_channel_id, subscription.message_template, subscription.mention, subscription.interval_seconds, now, subscription.created_by],
+                )?;
+            }
+        }
+        let correlation_id = Uuid::new_v4().to_string();
+        let before_json = current
+            .as_ref()
+            .map(|item| serde_json::json!({"enabled": item.1 != 0, "config": item.2, "revision": item.0}))
+            .unwrap_or_else(|| serde_json::json!({}));
+        let after_json = serde_json::json!({"enabled": enabled, "config": serde_json::from_str::<serde_json::Value>(config_json).unwrap_or_else(|_| serde_json::json!({})), "revision": next_revision});
+        tx.execute(
+            "INSERT INTO audit_events(correlation_id,guild_id,actor_id,action,reason,before_json,after_json,outcome,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![correlation_id, guild_id, updated_by, "feature.publish", key, before_json.to_string(), after_json.to_string(), "published", now],
+        )?;
+        tx.commit()?;
+        Ok(FeatureSettingRecord {
+            guild_id: guild_id.to_string(),
+            key: key.to_string(),
+            enabled,
+            config_json: config_json.to_string(),
+            revision: next_revision,
+            updated_at: now,
+            updated_by: updated_by.to_string(),
+        })
+    }
+
+    pub fn youtube_subscriptions(&self, guild_id: &str) -> Result<Vec<YouTubeSubscriptionRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id,guild_id,source_channel_id,target_channel_id,message_template,mention,enabled,interval_seconds,last_video_id,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM youtube_subscriptions WHERE guild_id=?1 ORDER BY updated_at DESC, id DESC")?;
+        let rows = stmt.query_map([guild_id], youtube_subscription_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn create_youtube_subscription(
+        &self,
+        guild_id: &str,
+        source_channel_id: &str,
+        target_channel_id: &str,
+        message_template: &str,
+        mention: &str,
+        enabled: bool,
+        interval_seconds: i64,
+        created_by: &str,
+    ) -> Result<YouTubeSubscriptionRecord> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("INSERT INTO youtube_subscriptions(guild_id,source_channel_id,target_channel_id,message_template,mention,enabled,interval_seconds,next_poll_at,created_by,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?8,?8)", params![guild_id, source_channel_id, target_channel_id, message_template, mention, if enabled { 1_i64 } else { 0_i64 }, interval_seconds, now, created_by])
+            .map_err(|error| if error.to_string().contains("UNIQUE") { anyhow!("youtube_subscription_exists") } else { error.into() })?;
+        let id = conn.last_insert_rowid();
+        conn.query_row("SELECT id,guild_id,source_channel_id,target_channel_id,message_template,mention,enabled,interval_seconds,last_video_id,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM youtube_subscriptions WHERE id=?1", [id], youtube_subscription_from_row).map_err(Into::into)
+    }
+
+    pub fn update_youtube_subscription(
+        &self,
+        guild_id: &str,
+        id: i64,
+        source_channel_id: &str,
+        target_channel_id: &str,
+        message_template: &str,
+        mention: &str,
+        enabled: bool,
+        interval_seconds: i64,
+    ) -> Result<Option<YouTubeSubscriptionRecord>> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("UPDATE youtube_subscriptions SET source_channel_id=?3,target_channel_id=?4,message_template=?5,mention=?6,enabled=?7,interval_seconds=?8,updated_at=?9 WHERE guild_id=?1 AND id=?2", params![guild_id, id, source_channel_id, target_channel_id, message_template, mention, if enabled { 1_i64 } else { 0_i64 }, interval_seconds, now])?;
+        conn.query_row("SELECT id,guild_id,source_channel_id,target_channel_id,message_template,mention,enabled,interval_seconds,last_video_id,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM youtube_subscriptions WHERE guild_id=?1 AND id=?2", params![guild_id, id], youtube_subscription_from_row).optional()?.map_or(Ok(None), |record| Ok(Some(record)))
+    }
+
+    pub fn delete_youtube_subscription(&self, guild_id: &str, id: i64) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "DELETE FROM youtube_subscriptions WHERE guild_id=?1 AND id=?2",
+            params![guild_id, id],
+        )? > 0)
+    }
+
+    pub fn due_youtube_subscriptions(
+        &self,
+        now_ms: i64,
+        limit: u32,
+    ) -> Result<Vec<YouTubeSubscriptionRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id,guild_id,source_channel_id,target_channel_id,message_template,mention,enabled,interval_seconds,last_video_id,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM youtube_subscriptions WHERE enabled=1 AND next_poll_at<=?1 ORDER BY next_poll_at ASC LIMIT ?2")?;
+        let rows = stmt.query_map(
+            params![now_ms, i64::from(limit.min(100))],
+            youtube_subscription_from_row,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn update_youtube_poll(
+        &self,
+        id: i64,
+        last_video_id: Option<&str>,
+        next_poll_at: i64,
+        failure_count: i64,
+        last_error: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("UPDATE youtube_subscriptions SET last_video_id=?2,next_poll_at=?3,failure_count=?4,last_error=?5,updated_at=?3 WHERE id=?1", params![id, last_video_id, next_poll_at, failure_count, last_error])?;
+        Ok(())
+    }
+
+    /// Publishes the Twitch feature and its EventSub delivery projection atomically.
+    pub fn publish_twitch_feature_setting(
+        &self,
+        guild_id: &str,
+        key: &str,
+        enabled: bool,
+        config_json: &str,
+        expected_revision: Option<u64>,
+        updated_by: &str,
+        projections: &[(String, String)],
+        subscription: Option<&TwitchSubscriptionWrite>,
+    ) -> Result<FeatureSettingRecord> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let current: Option<(i64, i64, String, String)> = tx
+            .query_row(
+                "SELECT revision,enabled,config_json,updated_by FROM feature_settings WHERE guild_id=?1 AND key=?2",
+                params![guild_id, key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let current_revision = current
+            .as_ref()
+            .and_then(|item| u64::try_from(item.0).ok())
+            .unwrap_or(0);
+        if expected_revision.is_some_and(|value| value != current_revision) {
+            bail!("feature_revision_conflict:{current_revision}");
+        }
+        let next_revision = current_revision.saturating_add(1);
+        let now = Utc::now().timestamp_millis();
+        tx.execute(
+            "INSERT INTO feature_settings(guild_id,key,enabled,config_json,revision,updated_at,updated_by) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(guild_id,key) DO UPDATE SET enabled=excluded.enabled,config_json=excluded.config_json,revision=excluded.revision,updated_at=excluded.updated_at,updated_by=excluded.updated_by",
+            params![guild_id, key, if enabled { 1_i64 } else { 0_i64 }, config_json, i64::try_from(next_revision).unwrap_or(i64::MAX), now, updated_by],
+        )?;
+        tx.execute(
+            "INSERT INTO feature_revisions(guild_id,key,revision,enabled,config_json,updated_at,updated_by) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![guild_id, key, i64::try_from(next_revision).unwrap_or(i64::MAX), if enabled { 1_i64 } else { 0_i64 }, config_json, now, updated_by],
+        )?;
+        for (projection_key, projection_value) in projections {
+            tx.execute(
+                "INSERT INTO settings(guild_id,key,value,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(guild_id,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                params![guild_id, projection_key, projection_value, now],
+            )?;
+        }
+        if let Some(subscription) = subscription {
+            let existing_id: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM twitch_subscriptions WHERE guild_id=?1 ORDER BY updated_at DESC, id DESC LIMIT 1",
+                    [guild_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(id) = existing_id {
+                tx.execute(
+                    "UPDATE twitch_subscriptions SET source_login=?2,source_user_id=?3,target_channel_id=?4,message_template=?5,mention=?6,enabled=?7,pending_event_id=NULL,pending_stream_id=NULL,pending_started_at=NULL,last_event_id=NULL,next_poll_at=?8,failure_count=0,last_error=NULL,updated_at=?8 WHERE guild_id=?1 AND id=?9",
+                    params![guild_id, subscription.source_login, subscription.source_user_id, subscription.target_channel_id, subscription.message_template, subscription.mention, if subscription.enabled { 1_i64 } else { 0_i64 }, i64::MAX, id],
+                )?;
+            } else if subscription.enabled {
+                tx.execute(
+                    "INSERT INTO twitch_subscriptions(guild_id,source_login,source_user_id,target_channel_id,message_template,mention,enabled,next_poll_at,created_by,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,1,?7,?8,?9,?9)",
+                    params![guild_id, subscription.source_login, subscription.source_user_id, subscription.target_channel_id, subscription.message_template, subscription.mention, i64::MAX, subscription.created_by, now],
+                )?;
+            }
+        }
+        let correlation_id = Uuid::new_v4().to_string();
+        let before_json = current
+            .as_ref()
+            .map(|item| serde_json::json!({"enabled": item.1 != 0, "config": item.2, "revision": item.0}))
+            .unwrap_or_else(|| serde_json::json!({}));
+        let after_json = serde_json::json!({"enabled": enabled, "config": serde_json::from_str::<serde_json::Value>(config_json).unwrap_or_else(|_| serde_json::json!({})), "revision": next_revision});
+        tx.execute(
+            "INSERT INTO audit_events(correlation_id,guild_id,actor_id,action,reason,before_json,after_json,outcome,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![correlation_id, guild_id, updated_by, "feature.publish", key, before_json.to_string(), after_json.to_string(), "published", now],
+        )?;
+        tx.commit()?;
+        Ok(FeatureSettingRecord {
+            guild_id: guild_id.to_string(),
+            key: key.to_string(),
+            enabled,
+            config_json: config_json.to_string(),
+            revision: next_revision,
+            updated_at: now,
+            updated_by: updated_by.to_string(),
+        })
+    }
+
+    pub fn twitch_subscriptions(&self, guild_id: &str) -> Result<Vec<TwitchSubscriptionRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id,guild_id,source_login,source_user_id,target_channel_id,message_template,mention,enabled,pending_event_id,pending_stream_id,pending_started_at,last_event_id,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM twitch_subscriptions WHERE guild_id=?1 ORDER BY updated_at DESC, id DESC")?;
+        let rows = stmt.query_map([guild_id], twitch_subscription_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn create_twitch_subscription(
+        &self,
+        guild_id: &str,
+        source_login: &str,
+        source_user_id: &str,
+        target_channel_id: &str,
+        message_template: &str,
+        mention: &str,
+        enabled: bool,
+        created_by: &str,
+    ) -> Result<TwitchSubscriptionRecord> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("INSERT INTO twitch_subscriptions(guild_id,source_login,source_user_id,target_channel_id,message_template,mention,enabled,next_poll_at,created_by,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?8,?8)", params![guild_id, source_login, source_user_id, target_channel_id, message_template, mention, if enabled { 1_i64 } else { 0_i64 }, i64::MAX, created_by])
+            .map_err(|error| if error.to_string().contains("UNIQUE") { anyhow!("twitch_subscription_exists") } else { error.into() })?;
+        let id = conn.last_insert_rowid();
+        conn.query_row("SELECT id,guild_id,source_login,source_user_id,target_channel_id,message_template,mention,enabled,pending_event_id,pending_stream_id,pending_started_at,last_event_id,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM twitch_subscriptions WHERE id=?1", [id], twitch_subscription_from_row).map_err(Into::into)
+    }
+
+    pub fn update_twitch_subscription(
+        &self,
+        guild_id: &str,
+        id: i64,
+        source_login: &str,
+        source_user_id: &str,
+        target_channel_id: &str,
+        message_template: &str,
+        mention: &str,
+        enabled: bool,
+    ) -> Result<Option<TwitchSubscriptionRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("UPDATE twitch_subscriptions SET source_login=?3,source_user_id=?4,target_channel_id=?5,message_template=?6,mention=?7,enabled=?8,pending_event_id=NULL,pending_stream_id=NULL,pending_started_at=NULL,last_event_id=NULL,next_poll_at=?9,failure_count=0,last_error=NULL,updated_at=?9 WHERE guild_id=?1 AND id=?2", params![guild_id, id, source_login, source_user_id, target_channel_id, message_template, mention, if enabled { 1_i64 } else { 0_i64 }, i64::MAX])?;
+        conn.query_row("SELECT id,guild_id,source_login,source_user_id,target_channel_id,message_template,mention,enabled,pending_event_id,pending_stream_id,pending_started_at,last_event_id,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM twitch_subscriptions WHERE guild_id=?1 AND id=?2", params![guild_id, id], twitch_subscription_from_row).optional()?.map_or(Ok(None), |record| Ok(Some(record)))
+    }
+
+    pub fn delete_twitch_subscription(&self, guild_id: &str, id: i64) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "DELETE FROM twitch_subscriptions WHERE guild_id=?1 AND id=?2",
+            params![guild_id, id],
+        )? > 0)
+    }
+
+    pub fn due_twitch_subscriptions(
+        &self,
+        now_ms: i64,
+        limit: u32,
+    ) -> Result<Vec<TwitchSubscriptionRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id,guild_id,source_login,source_user_id,target_channel_id,message_template,mention,enabled,pending_event_id,pending_stream_id,pending_started_at,last_event_id,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM twitch_subscriptions WHERE enabled=1 AND pending_event_id IS NOT NULL AND next_poll_at<=?1 ORDER BY next_poll_at ASC LIMIT ?2")?;
+        let rows = stmt.query_map(
+            params![now_ms, i64::from(limit.min(100))],
+            twitch_subscription_from_row,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn stage_twitch_event(
+        &self,
+        source_user_id: &str,
+        event_id: &str,
+        stream_id: &str,
+        started_at: &str,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let now = Utc::now().timestamp_millis();
+        Ok(conn.execute("UPDATE twitch_subscriptions SET pending_event_id=?2,pending_stream_id=?3,pending_started_at=?4,next_poll_at=?5,failure_count=0,last_error=NULL,updated_at=?5 WHERE source_user_id=?1 AND enabled=1 AND (pending_event_id IS NULL OR pending_event_id<>?2) AND (last_event_id IS NULL OR last_event_id<>?2)", params![source_user_id, event_id, stream_id, started_at, now])?)
+    }
+
+    pub fn ack_twitch_event(
+        &self,
+        id: i64,
+        event_id: &str,
+        next_poll_at: i64,
+        failure_count: i64,
+        last_error: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute("UPDATE twitch_subscriptions SET pending_event_id=NULL,pending_stream_id=NULL,pending_started_at=NULL,last_event_id=?2,next_poll_at=?3,failure_count=?4,last_error=?5,updated_at=?3 WHERE id=?1 AND pending_event_id=?2", params![id, event_id, next_poll_at, failure_count, last_error])? > 0)
+    }
+
+    pub fn retry_twitch_event(
+        &self,
+        id: i64,
+        event_id: &str,
+        next_poll_at: i64,
+        failure_count: i64,
+        last_error: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute("UPDATE twitch_subscriptions SET next_poll_at=?3,failure_count=?4,last_error=?5,updated_at=?3 WHERE id=?1 AND pending_event_id=?2", params![id, event_id, next_poll_at, failure_count, last_error])? > 0)
+    }
+
+    pub fn rss_subscriptions(&self, guild_id: &str) -> Result<Vec<RssSubscriptionRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id,guild_id,feed_url,target_channel_id,message_template,mention,enabled,interval_seconds,last_item_id,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM rss_subscriptions WHERE guild_id=?1 ORDER BY updated_at DESC, id DESC")?;
+        let rows = stmt.query_map([guild_id], rss_subscription_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn create_rss_subscription(
+        &self,
+        guild_id: &str,
+        feed_url: &str,
+        target_channel_id: &str,
+        message_template: &str,
+        mention: &str,
+        enabled: bool,
+        interval_seconds: i64,
+        created_by: &str,
+    ) -> Result<RssSubscriptionRecord> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("INSERT INTO rss_subscriptions(guild_id,feed_url,target_channel_id,message_template,mention,enabled,interval_seconds,next_poll_at,created_by,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?8,?8)", params![guild_id, feed_url, target_channel_id, message_template, mention, if enabled { 1_i64 } else { 0_i64 }, interval_seconds, now, created_by])
+            .map_err(|error| if error.to_string().contains("UNIQUE") { anyhow!("rss_subscription_exists") } else { error.into() })?;
+        let id = conn.last_insert_rowid();
+        conn.query_row("SELECT id,guild_id,feed_url,target_channel_id,message_template,mention,enabled,interval_seconds,last_item_id,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM rss_subscriptions WHERE id=?1", [id], rss_subscription_from_row).map_err(Into::into)
+    }
+
+    pub fn update_rss_subscription(
+        &self,
+        guild_id: &str,
+        id: i64,
+        feed_url: &str,
+        target_channel_id: &str,
+        message_template: &str,
+        mention: &str,
+        enabled: bool,
+        interval_seconds: i64,
+    ) -> Result<Option<RssSubscriptionRecord>> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("UPDATE rss_subscriptions SET feed_url=?3,target_channel_id=?4,message_template=?5,mention=?6,enabled=?7,interval_seconds=?8,updated_at=?9 WHERE guild_id=?1 AND id=?2", params![guild_id, id, feed_url, target_channel_id, message_template, mention, if enabled { 1_i64 } else { 0_i64 }, interval_seconds, now])?;
+        conn.query_row("SELECT id,guild_id,feed_url,target_channel_id,message_template,mention,enabled,interval_seconds,last_item_id,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM rss_subscriptions WHERE guild_id=?1 AND id=?2", params![guild_id, id], rss_subscription_from_row).optional()?.map_or(Ok(None), |record| Ok(Some(record)))
+    }
+
+    pub fn delete_rss_subscription(&self, guild_id: &str, id: i64) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "DELETE FROM rss_subscriptions WHERE guild_id=?1 AND id=?2",
+            params![guild_id, id],
+        )? > 0)
+    }
+
+    pub fn due_rss_subscriptions(
+        &self,
+        now_ms: i64,
+        limit: u32,
+    ) -> Result<Vec<RssSubscriptionRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id,guild_id,feed_url,target_channel_id,message_template,mention,enabled,interval_seconds,last_item_id,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM rss_subscriptions WHERE enabled=1 AND next_poll_at<=?1 ORDER BY next_poll_at ASC LIMIT ?2")?;
+        let rows = stmt.query_map(
+            params![now_ms, i64::from(limit.min(100))],
+            rss_subscription_from_row,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn update_rss_poll(
+        &self,
+        id: i64,
+        last_item_id: Option<&str>,
+        next_poll_at: i64,
+        failure_count: i64,
+        last_error: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("UPDATE rss_subscriptions SET last_item_id=?2,next_poll_at=?3,failure_count=?4,last_error=?5,updated_at=?3 WHERE id=?1", params![id, last_item_id, next_poll_at, failure_count, last_error])?;
+        Ok(())
     }
 
     pub fn set_setting(&self, guild_id: &str, key: &str, value: &str) -> Result<()> {
@@ -2236,6 +3081,134 @@ mod tests {
     }
 
     #[test]
+    fn feature_publish_is_revisioned_atomic_and_conflict_safe() {
+        let store = Store::open(":memory:").unwrap();
+        let first = store
+            .publish_feature_setting(
+                "guild-a",
+                "protection.antispam",
+                true,
+                r#"{"floodCount":8}"#,
+                None,
+                "user-a",
+                &[
+                    ("feature.protection.antispam".into(), "true".into()),
+                    ("security.antispam.flood_count".into(), "8".into()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(first.revision, 1);
+        assert_eq!(
+            store
+                .get_setting("guild-a", "security.antispam.flood_count")
+                .unwrap()
+                .as_deref(),
+            Some("8")
+        );
+        let conflict = store.publish_feature_setting(
+            "guild-a",
+            "protection.antispam",
+            false,
+            r#"{}"#,
+            Some(0),
+            "user-b",
+            &[],
+        );
+        assert!(
+            conflict
+                .unwrap_err()
+                .to_string()
+                .starts_with("feature_revision_conflict:1")
+        );
+        let second = store
+            .publish_feature_setting(
+                "guild-a",
+                "protection.antispam",
+                false,
+                r#"{}"#,
+                Some(1),
+                "user-b",
+                &[("feature.protection.antispam".into(), "false".into())],
+            )
+            .unwrap();
+        assert_eq!(second.revision, 2);
+        assert_eq!(
+            store
+                .feature_revisions("guild-a", "protection.antispam", 10)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn youtube_feature_publish_keeps_subscription_and_revision_atomic() {
+        let store = Store::open(":memory:").unwrap();
+        let write = YouTubeSubscriptionWrite {
+            source_channel_id: "UC_abc-123".into(),
+            target_channel_id: "123456789012345678".into(),
+            message_template: "Novo vídeo: {url}".into(),
+            mention: String::new(),
+            enabled: true,
+            interval_seconds: 300,
+            created_by: "user-a".into(),
+        };
+        let first = store
+            .publish_youtube_feature_setting(
+                "guild-a",
+                "social.youtube",
+                true,
+                r#"{"sourceChannelId":"UC_abc-123"}"#,
+                None,
+                "user-a",
+                &[],
+                Some(&write),
+            )
+            .unwrap();
+        assert_eq!(first.revision, 1);
+        assert_eq!(store.youtube_subscriptions("guild-a").unwrap().len(), 1);
+
+        let conflict = store.publish_youtube_feature_setting(
+            "guild-a",
+            "social.youtube",
+            false,
+            "{}",
+            Some(0),
+            "user-b",
+            &[],
+            Some(&YouTubeSubscriptionWrite {
+                enabled: false,
+                ..write.clone()
+            }),
+        );
+        assert!(
+            conflict
+                .unwrap_err()
+                .to_string()
+                .starts_with("feature_revision_conflict:1")
+        );
+        assert!(store.youtube_subscriptions("guild-a").unwrap()[0].enabled);
+
+        let second = store
+            .publish_youtube_feature_setting(
+                "guild-a",
+                "social.youtube",
+                false,
+                "{}",
+                Some(1),
+                "user-b",
+                &[],
+                Some(&YouTubeSubscriptionWrite {
+                    enabled: false,
+                    ..write
+                }),
+            )
+            .unwrap();
+        assert_eq!(second.revision, 2);
+        assert!(!store.youtube_subscriptions("guild-a").unwrap()[0].enabled);
+    }
+
+    #[test]
     fn settings_prefix_counts_are_guild_scoped() {
         let store = Store::open(":memory:").unwrap();
         store.set_setting("g1", "support.panel.1", "{}").unwrap();
@@ -2507,6 +3480,127 @@ mod tests {
         assert_eq!(summary.deleted["cases"], 1);
         assert_eq!(store.recent_cases("g", 10).unwrap().len(), 1);
         assert_eq!(store.recent_audit_events("g", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn youtube_subscriptions_round_trip_and_due_poll() {
+        let store = Store::open(":memory:").unwrap();
+        let record = store
+            .create_youtube_subscription(
+                "g",
+                "UC123",
+                "123456789012345",
+                "{title} {url}",
+                "",
+                true,
+                300,
+                "u",
+            )
+            .unwrap();
+        assert_eq!(store.youtube_subscriptions("g").unwrap().len(), 1);
+        assert_eq!(
+            store
+                .due_youtube_subscriptions(Utc::now().timestamp_millis(), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        store
+            .update_youtube_poll(
+                record.id,
+                Some("video-1"),
+                Utc::now().timestamp_millis() + 60_000,
+                0,
+                None,
+            )
+            .unwrap();
+        let saved = store.youtube_subscriptions("g").unwrap().pop().unwrap();
+        assert_eq!(saved.last_video_id.as_deref(), Some("video-1"));
+        assert!(store.delete_youtube_subscription("g", record.id).unwrap());
+        assert!(store.youtube_subscriptions("g").unwrap().is_empty());
+    }
+
+    #[test]
+    fn rss_subscriptions_round_trip_and_due_poll() {
+        let store = Store::open(":memory:").unwrap();
+        let record = store
+            .create_rss_subscription(
+                "g",
+                "https://example.com/feed.xml",
+                "123456789012345",
+                "{title} {url}",
+                "",
+                true,
+                300,
+                "u",
+            )
+            .unwrap();
+        assert_eq!(store.rss_subscriptions("g").unwrap().len(), 1);
+        assert_eq!(
+            store
+                .due_rss_subscriptions(Utc::now().timestamp_millis(), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        store
+            .update_rss_poll(
+                record.id,
+                Some("item-1"),
+                Utc::now().timestamp_millis() + 60_000,
+                0,
+                None,
+            )
+            .unwrap();
+        let saved = store.rss_subscriptions("g").unwrap().pop().unwrap();
+        assert_eq!(saved.last_item_id.as_deref(), Some("item-1"));
+        assert!(store.delete_rss_subscription("g", record.id).unwrap());
+        assert!(store.rss_subscriptions("g").unwrap().is_empty());
+    }
+
+    #[test]
+    fn twitch_subscriptions_stage_and_ack_are_idempotent() {
+        let store = Store::open(":memory:").unwrap();
+        let record = store
+            .create_twitch_subscription(
+                "g",
+                "creator",
+                "12345",
+                "123456789012345",
+                "{broadcaster} {url}",
+                "",
+                true,
+                "u",
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .stage_twitch_event("12345", "event-1", "stream-1", "2026-08-02T00:00:00Z")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .stage_twitch_event("12345", "event-1", "stream-1", "2026-08-02T00:00:00Z")
+                .unwrap(),
+            0
+        );
+        let due = store
+            .due_twitch_subscriptions(Utc::now().timestamp_millis(), 10)
+            .unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].pending_event_id.as_deref(), Some("event-1"));
+        assert!(
+            store
+                .ack_twitch_event(record.id, "event-1", i64::MAX, 0, None)
+                .unwrap()
+        );
+        assert!(
+            store
+                .due_twitch_subscriptions(Utc::now().timestamp_millis(), 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

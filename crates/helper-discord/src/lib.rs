@@ -4,8 +4,12 @@ use anyhow::Result;
 use chrono::Utc;
 use helper_contracts::Plan;
 use helper_core::{Config, quota_limit};
-use helper_modules::EntitlementClient;
-use helper_store::Store;
+use helper_modules::{
+    EntitlementClient, RssClient, RssItem, TwitchClient, YouTubeClient, YouTubeVideo,
+};
+use helper_store::{
+    RssSubscriptionRecord, Store, TwitchSubscriptionRecord, YouTubeSubscriptionRecord,
+};
 use rand::seq::SliceRandom;
 use serenity::{
     all::{
@@ -33,11 +37,15 @@ mod rank_card;
 struct Handler {
     store: Store,
     spam: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+    duplicate_messages: Arc<Mutex<HashMap<String, VecDeque<(Instant, String)>>>>,
     joins: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
     nuke_events: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
-    xp_ticks: Arc<Mutex<HashMap<String, u32>>>,
+    xp_awarded_at: Arc<Mutex<HashMap<String, Instant>>>,
     scheduler_started: Arc<AtomicBool>,
     entitlements: Option<EntitlementClient>,
+    youtube: Option<YouTubeClient>,
+    rss: Option<RssClient>,
+    twitch: Option<TwitchClient>,
 }
 
 #[async_trait]
@@ -68,6 +76,27 @@ impl EventHandler for Handler {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             });
+            if let Some(youtube) = self.youtube.clone() {
+                let store = self.store.clone();
+                let http = ctx.http.clone();
+                tokio::spawn(async move {
+                    run_youtube_worker(http, store, youtube).await;
+                });
+            }
+            if let Some(rss) = self.rss.clone() {
+                let store = self.store.clone();
+                let http = ctx.http.clone();
+                tokio::spawn(async move {
+                    run_rss_worker(http, store, rss).await;
+                });
+            }
+            if self.twitch.is_some() {
+                let store = self.store.clone();
+                let http = ctx.http.clone();
+                tokio::spawn(async move {
+                    run_twitch_worker(http, store).await;
+                });
+            }
         }
         let commands = vec![
             CreateCommand::new("ping").description("Check Helper latency"),
@@ -1220,6 +1249,11 @@ impl EventHandler for Handler {
                         .ok()
                         .flatten()
                         .as_deref(),
+                ) || setting_bool(
+                    &self.store,
+                    &guild_text,
+                    "security.anti_raid.alert_only",
+                    false,
                 );
                 // Bounded response: latch the existing gate and alert moderators.
                 // Shadow mode records and alerts but deliberately does not contain.
@@ -1248,9 +1282,18 @@ impl EventHandler for Handler {
                     &reason,
                     None,
                 );
-                if let Ok(guild) = guild_id.to_partial_guild(&ctx.http).await
-                    && let Some(channel_id) = guild.system_channel_id
-                {
+                let alert_channel = setting_u64_optional(
+                    &self.store,
+                    &guild_text,
+                    "security.anti_raid.alert_channel",
+                )
+                .map(ChannelId::new);
+                let fallback_channel = guild_id
+                    .to_partial_guild(&ctx.http)
+                    .await
+                    .ok()
+                    .and_then(|guild| guild.system_channel_id);
+                if let Some(channel_id) = alert_channel.or(fallback_channel) {
                     let _ = channel_id
                         .say(
                             &ctx.http,
@@ -1320,15 +1363,39 @@ impl EventHandler for Handler {
                 }
             }
         }
-        if let Ok(guild) = guild_id.to_partial_guild(&ctx.http).await
-            && let Some(channel_id) = guild.system_channel_id
-        {
-            let _ = channel_id
-                .say(
-                    &ctx.http,
-                    format!("👋 Bem-vindo ao servidor, <@{}>!", new_member.user.id),
-                )
-                .await;
+        if feature_enabled(&self.store, &guild_text, "support.welcome", None) {
+            let member_mention = format!("<@{}>", new_member.user.id);
+            if let Some(role_id) =
+                setting_u64_optional(&self.store, &guild_text, "support.welcome.auto_role")
+            {
+                let _ = new_member.add_role(&ctx.http, RoleId::new(role_id)).await;
+            }
+            let message = setting_string(&self.store, &guild_text, "support.welcome.message")
+                .unwrap_or_else(|| "👋 Bem-vindo ao servidor, {member}!".to_string())
+                .replace("{member}", &member_mention)
+                .replace("{server}", "este servidor");
+            let fallback_channel = guild_id
+                .to_partial_guild(&ctx.http)
+                .await
+                .ok()
+                .and_then(|guild| guild.system_channel_id);
+            let channel =
+                setting_u64_optional(&self.store, &guild_text, "support.welcome.channel_id")
+                    .map(ChannelId::new)
+                    .or(fallback_channel);
+            if let Some(channel_id) = channel {
+                let _ = channel_id.say(&ctx.http, message).await;
+            }
+            if setting_bool(&self.store, &guild_text, "support.welcome.send_dm", false) {
+                let dm = setting_string(&self.store, &guild_text, "support.welcome.dm_message")
+                    .unwrap_or_else(|| "Olá {member}, bem-vindo(a) ao servidor!".to_string())
+                    .replace("{member}", &member_mention)
+                    .replace("{server}", "este servidor");
+                let _ = new_member
+                    .user
+                    .direct_message(&ctx.http, serenity::all::CreateMessage::new().content(dm))
+                    .await;
+            }
         }
     }
 
@@ -1500,6 +1567,15 @@ impl EventHandler for Handler {
         let Some(guild_id) = reaction.guild_id else {
             return;
         };
+        if self
+            .store
+            .get_setting(&guild_id.to_string(), "feature.community.starboard")
+            .ok()
+            .flatten()
+            .is_some_and(|value| value != "true")
+        {
+            return;
+        }
         if reaction.user_id == ctx.http.get_current_user().await.ok().map(|user| user.id) {
             return;
         }
@@ -1612,15 +1688,64 @@ impl EventHandler for Handler {
             &guild_text,
             &chrono::Utc::now().format("%Y-%m-%d").to_string(),
         );
-        let xp_key = format!("{guild_text}:{user_text}");
-        let should_award = {
-            let mut ticks = self.xp_ticks.lock().expect("xp mutex poisoned");
-            let value = ticks.entry(xp_key).or_default();
-            *value = value.saturating_add(1);
-            (*value).is_multiple_of(5)
-        };
-        if should_award {
-            let _ = self.store.add_xp(&guild_text, &user_text, 5);
+        if feature_enabled(&self.store, &guild_text, "community.levels", None) {
+            let cooldown = setting_u64(
+                &self.store,
+                &guild_text,
+                "community.levels.cooldown_seconds",
+                60,
+            )
+            .clamp(0, 3_600);
+            let xp_key = format!("{guild_text}:{user_text}");
+            let now = Instant::now();
+            let should_award = {
+                let mut awarded = self.xp_awarded_at.lock().expect("xp mutex poisoned");
+                let ready = awarded
+                    .get(&xp_key)
+                    .is_none_or(|at| now.duration_since(*at) >= Duration::from_secs(cooldown));
+                if ready {
+                    awarded.insert(xp_key, now);
+                }
+                ready
+            };
+            if should_award {
+                let minimum = setting_i64(&self.store, &guild_text, "community.levels.xp_min", 15)
+                    .clamp(1, 1_000);
+                let maximum = setting_i64(&self.store, &guild_text, "community.levels.xp_max", 30)
+                    .clamp(minimum, 2_000);
+                let span = (maximum - minimum + 1) as u64;
+                let stable = message.id.to_string().bytes().fold(0_u64, |total, byte| {
+                    total.wrapping_mul(33).wrapping_add(byte as u64)
+                });
+                let amount = minimum + (stable % span) as i64;
+                let before = self.store.level_for(&guild_text, &user_text).unwrap_or(0);
+                let _ = self.store.add_xp(&guild_text, &user_text, amount);
+                let after = self
+                    .store
+                    .level_for(&guild_text, &user_text)
+                    .unwrap_or(before);
+                let before_level = before / 100 + 1;
+                let after_level = after / 100 + 1;
+                if after_level > before_level {
+                    let text = setting_string(
+                        &self.store,
+                        &guild_text,
+                        "community.levels.announce_template",
+                    )
+                    .unwrap_or_else(|| "{member} chegou ao nível {level}!".to_string())
+                    .replace("{member}", &format!("<@{}>", message.author.id))
+                    .replace("{level}", &after_level.to_string())
+                    .replace("{server}", "este servidor");
+                    let channel = setting_u64_optional(
+                        &self.store,
+                        &guild_text,
+                        "community.levels.announce_channel",
+                    )
+                    .map(ChannelId::new)
+                    .unwrap_or(message.channel_id);
+                    let _ = channel.say(&ctx.http, text).await;
+                }
+            }
         }
         if let Ok(Some(afk)) = self.store.get_afk(&guild_text, &user_text) {
             let _ = self.store.clear_afk(&guild_text, &user_text);
@@ -1635,41 +1760,117 @@ impl EventHandler for Handler {
                 )
                 .await;
         }
-        let key = format!("{}:{}", guild_id, message.author.id);
-        let now = Instant::now();
-        let count = {
-            let mut states = self.spam.lock().expect("spam mutex poisoned");
-            let window = states.entry(key).or_default();
-            while window
-                .front()
-                .is_some_and(|at| now.duration_since(*at) > Duration::from_secs(10))
-            {
-                window.pop_front();
-            }
-            window.push_back(now);
-            window.len()
-        };
-        if count == 7 {
-            let _ = self.store.record_case(
-                &guild_id.to_string(),
-                "anti-spam",
-                &message.author.id.to_string(),
-                &message.author.id.to_string(),
-                "Too many messages in a short window",
-                None,
-            );
-            let _ = message
-                .channel_id
-                .say(
-                    &ctx.http,
-                    format!(
-                        "<@{}>, abranda o ritmo — o anti-spam registou este incidente.",
-                        message.author.id
+        if feature_enabled(&self.store, &guild_text, "protection.antispam", None) {
+            let flood_count =
+                setting_u64(&self.store, &guild_text, "security.antispam.flood_count", 6)
+                    .clamp(3, 30) as usize;
+            let window_seconds = setting_u64(
+                &self.store,
+                &guild_text,
+                "security.antispam.window_seconds",
+                10,
+            )
+            .clamp(3, 60);
+            let duplicate_limit = setting_u64(
+                &self.store,
+                &guild_text,
+                "security.antispam.duplicate_limit",
+                3,
+            )
+            .clamp(2, 12) as usize;
+            let mention_limit = setting_u64(
+                &self.store,
+                &guild_text,
+                "security.antispam.mention_limit",
+                5,
+            )
+            .clamp(1, 30) as usize;
+            let timeout_seconds = setting_u64(
+                &self.store,
+                &guild_text,
+                "security.antispam.timeout_seconds",
+                60,
+            )
+            .min(86_400);
+            let now = Instant::now();
+            let key = format!("{}:{}", guild_id, message.author.id);
+            let count = {
+                let mut states = self.spam.lock().expect("spam mutex poisoned");
+                let window = states.entry(key.clone()).or_default();
+                while window
+                    .front()
+                    .is_some_and(|at| now.duration_since(*at) > Duration::from_secs(window_seconds))
+                {
+                    window.pop_front();
+                }
+                window.push_back(now);
+                window.len()
+            };
+            let normalized = message.content.trim().to_lowercase();
+            let duplicate_count = {
+                let mut messages = self
+                    .duplicate_messages
+                    .lock()
+                    .expect("duplicate spam mutex poisoned");
+                let recent = messages.entry(key).or_default();
+                while recent.front().is_some_and(|(at, _)| {
+                    now.duration_since(*at) > Duration::from_secs(window_seconds)
+                }) {
+                    recent.pop_front();
+                }
+                recent.push_back((now, normalized.clone()));
+                recent
+                    .iter()
+                    .filter(|(_, content)| content == &normalized)
+                    .count()
+            };
+            let mention_count = message.mentions.len();
+            let mention_violation = mention_count >= mention_limit;
+            if count == flood_count || duplicate_count == duplicate_limit || mention_violation {
+                let _ = self.store.record_case(
+                    &guild_id.to_string(),
+                    "anti-spam",
+                    &message.author.id.to_string(),
+                    &message.author.id.to_string(),
+                    &format!(
+                        "Spam detetado: {count} mensagens/{window_seconds}s, {duplicate_count} repetidas, {mention_count} menções"
                     ),
-                )
-                .await;
+                    None,
+                );
+                if !setting_bool(
+                    &self.store,
+                    &guild_text,
+                    "security.antispam.alert_only",
+                    false,
+                ) {
+                    if timeout_seconds > 0 {
+                        let until = (chrono::Utc::now()
+                            + chrono::Duration::seconds(timeout_seconds as i64))
+                        .to_rfc3339();
+                        let _ = guild_id
+                            .edit_member(
+                                &ctx.http,
+                                message.author.id,
+                                serenity::all::EditMember::new().disable_communication_until(until),
+                            )
+                            .await;
+                    }
+                    let _ = message
+                        .channel_id
+                        .say(
+                            &ctx.http,
+                            format!(
+                                "<@{}>, abranda o ritmo — o anti-spam registou este incidente.",
+                                message.author.id
+                            ),
+                        )
+                        .await;
+                }
+            }
         }
-        if let Ok(workflows) = self.store.active_workflows(&guild_text, "message") {
+        if feature_enabled(&self.store, &guild_text, "management.workflows", None)
+            && let Ok(workflows) = self.store.active_workflows(&guild_text, "message")
+        {
             let lower = message.content.to_lowercase();
             for workflow in workflows {
                 if !workflow.condition.is_empty()
@@ -1716,19 +1917,344 @@ pub async fn run(config: &Config) -> Result<()> {
         .event_handler(Handler {
             store,
             spam: Arc::new(Mutex::new(HashMap::new())),
+            duplicate_messages: Arc::new(Mutex::new(HashMap::new())),
             joins: Arc::new(Mutex::new(HashMap::new())),
             nuke_events: Arc::new(Mutex::new(HashMap::new())),
-            xp_ticks: Arc::new(Mutex::new(HashMap::new())),
+            xp_awarded_at: Arc::new(Mutex::new(HashMap::new())),
             scheduler_started: Arc::new(AtomicBool::new(false)),
             entitlements: EntitlementClient::new(
                 config.entitlement_url.clone(),
                 config.entitlement_secret.clone(),
             ),
+            youtube: YouTubeClient::from_env(),
+            rss: Some(RssClient::new()),
+            twitch: TwitchClient::from_env(),
         })
         .application_id(config.discord_application_id.into())
         .await?;
     client.start().await?;
     Ok(())
+}
+
+async fn run_youtube_worker(http: Arc<serenity::http::Http>, store: Store, youtube: YouTubeClient) {
+    let mut interval = tokio::time::interval(Duration::from_secs(15));
+    loop {
+        interval.tick().await;
+        let due = match store.due_youtube_subscriptions(Utc::now().timestamp_millis(), 25) {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::error!(%error, "youtube worker could not load subscriptions");
+                continue;
+            }
+        };
+        for subscription in due {
+            if !feature_enabled(&store, &subscription.guild_id, "social.youtube", None) {
+                let next = Utc::now().timestamp_millis() + subscription.interval_seconds * 1_000;
+                let _ = store.update_youtube_poll(
+                    subscription.id,
+                    subscription.last_video_id.as_deref(),
+                    next,
+                    subscription.failure_count,
+                    Some("feature_disabled"),
+                );
+                continue;
+            }
+            if let Err(error) =
+                process_youtube_subscription(&http, &store, &youtube, &subscription).await
+            {
+                tracing::warn!(%error, subscription_id = subscription.id, "youtube subscription failed");
+            }
+        }
+    }
+}
+
+async fn process_youtube_subscription(
+    http: &serenity::http::Http,
+    store: &Store,
+    youtube: &YouTubeClient,
+    subscription: &YouTubeSubscriptionRecord,
+) -> Result<()> {
+    let now = Utc::now().timestamp_millis();
+    let interval_ms = subscription.interval_seconds.clamp(300, 86_400) * 1_000;
+    let next = || now + interval_ms;
+    let latest = match youtube.latest_video(&subscription.source_channel_id).await {
+        Ok(video) => video,
+        Err(error) => {
+            let failures = subscription.failure_count.saturating_add(1).min(8);
+            let backoff = (subscription.interval_seconds * (1_i64 << failures.min(4))).min(3_600);
+            store.update_youtube_poll(
+                subscription.id,
+                subscription.last_video_id.as_deref(),
+                now + backoff * 1_000,
+                failures,
+                Some(&provider_error_code(&error)),
+            )?;
+            return Err(error);
+        }
+    };
+    let Some(video) = latest else {
+        store.update_youtube_poll(
+            subscription.id,
+            subscription.last_video_id.as_deref(),
+            next(),
+            0,
+            None,
+        )?;
+        return Ok(());
+    };
+    if subscription.last_video_id.is_none() {
+        // Establish a baseline on first poll. Existing videos must not flood
+        // a server when an administrator enables an alert.
+        store.update_youtube_poll(subscription.id, Some(&video.id), next(), 0, None)?;
+        return Ok(());
+    }
+    if subscription.last_video_id.as_deref() == Some(video.id.as_str()) {
+        store.update_youtube_poll(subscription.id, Some(&video.id), next(), 0, None)?;
+        return Ok(());
+    }
+    let content = format_youtube_message(
+        &subscription.message_template,
+        &subscription.mention,
+        &video,
+        &subscription.source_channel_id,
+    );
+    let channel_id = subscription
+        .target_channel_id
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("invalid_discord_channel_id"))?;
+    ChannelId::new(channel_id).say(http, content).await?;
+    store.update_youtube_poll(subscription.id, Some(&video.id), next(), 0, None)?;
+    Ok(())
+}
+
+fn provider_error_code(error: &anyhow::Error) -> String {
+    let value = error.to_string();
+    if value.starts_with("youtube_api_error:") || value.starts_with("rss_http_error:") {
+        value
+    } else {
+        "provider_request_failed".into()
+    }
+}
+
+fn format_youtube_message(
+    template: &str,
+    mention: &str,
+    video: &YouTubeVideo,
+    channel_id: &str,
+) -> String {
+    let rendered = template
+        .replace("{title}", &video.title)
+        .replace("{url}", &video.url)
+        .replace(
+            "{channel}",
+            if video.channel_title.is_empty() {
+                channel_id
+            } else {
+                &video.channel_title
+            },
+        )
+        .replace("{published_at}", &video.published_at)
+        .replace("{description}", &video.description);
+    let rendered = if mention.is_empty() {
+        rendered
+    } else {
+        format!("{mention} {rendered}")
+    };
+    // Discord rejects messages above 2,000 Unicode scalar values. Templates
+    // are bounded in the API, but provider fields such as descriptions are
+    // not, so enforce the platform limit after substitutions as well.
+    rendered.chars().take(2_000).collect()
+}
+
+async fn run_rss_worker(http: Arc<serenity::http::Http>, store: Store, rss: RssClient) {
+    let mut interval = tokio::time::interval(Duration::from_secs(15));
+    loop {
+        interval.tick().await;
+        let due = match store.due_rss_subscriptions(Utc::now().timestamp_millis(), 25) {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::error!(%error, "rss worker could not load subscriptions");
+                continue;
+            }
+        };
+        for subscription in due {
+            if !feature_enabled(&store, &subscription.guild_id, "social.rss", None) {
+                let next = Utc::now().timestamp_millis() + subscription.interval_seconds * 1_000;
+                let _ = store.update_rss_poll(
+                    subscription.id,
+                    subscription.last_item_id.as_deref(),
+                    next,
+                    subscription.failure_count,
+                    Some("feature_disabled"),
+                );
+                continue;
+            }
+            if let Err(error) = process_rss_subscription(&http, &store, &rss, &subscription).await {
+                tracing::warn!(%error, subscription_id = subscription.id, "rss subscription failed");
+            }
+        }
+    }
+}
+
+async fn process_rss_subscription(
+    http: &serenity::http::Http,
+    store: &Store,
+    rss: &RssClient,
+    subscription: &RssSubscriptionRecord,
+) -> Result<()> {
+    let now = Utc::now().timestamp_millis();
+    let interval_ms = subscription.interval_seconds.clamp(300, 86_400) * 1_000;
+    let next = || now + interval_ms;
+    let feed = match rss.fetch(&subscription.feed_url).await {
+        Ok(feed) => feed,
+        Err(error) => {
+            let failures = subscription.failure_count.saturating_add(1).min(8);
+            let backoff = (subscription.interval_seconds * (1_i64 << failures.min(4))).min(3_600);
+            store.update_rss_poll(
+                subscription.id,
+                subscription.last_item_id.as_deref(),
+                now + backoff * 1_000,
+                failures,
+                Some(&provider_error_code(&error)),
+            )?;
+            return Err(error);
+        }
+    };
+    let Some(item) = feed.and_then(|value| value.latest) else {
+        store.update_rss_poll(
+            subscription.id,
+            subscription.last_item_id.as_deref(),
+            next(),
+            0,
+            None,
+        )?;
+        return Ok(());
+    };
+    if subscription.last_item_id.is_none() {
+        store.update_rss_poll(subscription.id, Some(&item.id), next(), 0, None)?;
+        return Ok(());
+    }
+    if subscription.last_item_id.as_deref() == Some(item.id.as_str()) {
+        store.update_rss_poll(subscription.id, Some(&item.id), next(), 0, None)?;
+        return Ok(());
+    }
+    let content = format_rss_message(&subscription.message_template, &subscription.mention, &item);
+    let channel_id = subscription
+        .target_channel_id
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("invalid_discord_channel_id"))?;
+    ChannelId::new(channel_id).say(http, content).await?;
+    store.update_rss_poll(subscription.id, Some(&item.id), next(), 0, None)?;
+    Ok(())
+}
+
+fn format_rss_message(template: &str, mention: &str, item: &RssItem) -> String {
+    let rendered = template
+        .replace("{feed}", &item.feed_title)
+        .replace("{title}", &item.title)
+        .replace("{url}", &item.url)
+        .replace("{published_at}", &item.published_at)
+        .replace("{description}", &item.description);
+    let rendered = if mention.is_empty() {
+        rendered
+    } else {
+        format!("{mention} {rendered}")
+    };
+    rendered.chars().take(2_000).collect()
+}
+
+async fn run_twitch_worker(http: Arc<serenity::http::Http>, store: Store) {
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        interval.tick().await;
+        let due = match store.due_twitch_subscriptions(Utc::now().timestamp_millis(), 25) {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::error!(%error, "twitch worker could not load subscriptions");
+                continue;
+            }
+        };
+        for subscription in due {
+            if !feature_enabled(&store, &subscription.guild_id, "social.twitch", None) {
+                if let Some(event_id) = subscription.pending_event_id.as_deref() {
+                    let _ = store.ack_twitch_event(
+                        subscription.id,
+                        event_id,
+                        i64::MAX,
+                        subscription.failure_count,
+                        Some("feature_disabled"),
+                    );
+                }
+                continue;
+            }
+            if let Err(error) = process_twitch_subscription(&http, &store, &subscription).await {
+                tracing::warn!(%error, subscription_id = subscription.id, "twitch notification failed");
+            }
+        }
+    }
+}
+
+async fn process_twitch_subscription(
+    http: &serenity::http::Http,
+    store: &Store,
+    subscription: &TwitchSubscriptionRecord,
+) -> Result<()> {
+    let Some(event_id) = subscription.pending_event_id.as_deref() else {
+        return Ok(());
+    };
+    let content = format_twitch_message(
+        &subscription.message_template,
+        &subscription.mention,
+        &subscription.source_login,
+        subscription
+            .pending_stream_id
+            .as_deref()
+            .unwrap_or_default(),
+        subscription
+            .pending_started_at
+            .as_deref()
+            .unwrap_or_default(),
+    );
+    let channel_id = subscription
+        .target_channel_id
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("invalid_discord_channel_id"))?;
+    if let Err(error) = ChannelId::new(channel_id).say(http, content).await {
+        let failures = subscription.failure_count.saturating_add(1).min(8);
+        let backoff = 5_i64 * (1_i64 << failures.min(6));
+        store.retry_twitch_event(
+            subscription.id,
+            event_id,
+            Utc::now().timestamp_millis() + backoff * 1_000,
+            failures,
+            Some("discord_delivery_failed"),
+        )?;
+        return Err(error.into());
+    }
+    store.ack_twitch_event(subscription.id, event_id, i64::MAX, 0, None)?;
+    Ok(())
+}
+
+fn format_twitch_message(
+    template: &str,
+    mention: &str,
+    login: &str,
+    stream_id: &str,
+    started_at: &str,
+) -> String {
+    let url = format!("https://twitch.tv/{login}");
+    let rendered = template
+        .replace("{broadcaster}", login)
+        .replace("{login}", login)
+        .replace("{stream_id}", stream_id)
+        .replace("{started_at}", started_at)
+        .replace("{url}", &url);
+    let rendered = if mention.is_empty() {
+        rendered
+    } else {
+        format!("{mention} {rendered}")
+    };
+    rendered.chars().take(2_000).collect()
 }
 
 impl Handler {
@@ -1753,6 +2279,14 @@ impl Handler {
         let Some(guild_id) = command.guild_id else {
             return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
         };
+        if !feature_enabled(&self.store, &guild_id.to_string(), "studio.rank_card", None) {
+            return respond(
+                ctx,
+                command,
+                "O XP card está desativado neste servidor. Ativa-o no painel primeiro.",
+            )
+            .await;
+        }
         let user_id = command
             .data
             .options
@@ -2241,6 +2775,9 @@ impl Handler {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
+                if !feature_enabled(&self.store, &guild_id.to_string(), "community.suggestions", None) {
+                    return respond(ctx, command, "As sugestões estão desativadas neste servidor. Ativa-as no painel.").await;
+                }
                 let text = option_string(command, "text").unwrap_or_default().trim();
                 if !(3..=1_000).contains(&text.len()) {
                     return respond(ctx, command, "A sugestão deve ter entre 3 e 1000 caracteres.").await;
@@ -2259,6 +2796,9 @@ impl Handler {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
+                if !feature_enabled(&self.store, &guild_id.to_string(), "community.suggestions", None) {
+                    return respond(ctx, command, "As sugestões estão desativadas neste servidor. Ativa-as no painel.").await;
+                }
                 let id = option_i64(command, "id").unwrap_or(0);
                 let status = option_string(command, "status").unwrap_or_default().to_ascii_lowercase();
                 if !matches!(status.as_str(), "pending" | "approved" | "denied" | "considered") {
@@ -2274,6 +2814,9 @@ impl Handler {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
+                if !feature_enabled(&self.store, &guild_id.to_string(), "community.giveaways", None) {
+                    return respond(ctx, command, "Os giveaways estão desativados neste servidor. Ativa-os no painel.").await;
+                }
                 let prize = option_string(command, "prize").unwrap_or_default().trim();
                 let Some(delay) = parse_duration(option_string(command, "duration").unwrap_or_default()) else {
                     return respond(ctx, command, "Duração inválida. Usa 10m, 2h ou 1d.").await;
@@ -2307,6 +2850,9 @@ impl Handler {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
+                if !feature_enabled(&self.store, &guild_id.to_string(), "community.giveaways", None) {
+                    return respond(ctx, command, "Os giveaways estão desativados neste servidor. Ativa-os no painel.").await;
+                }
                 let rows = self.store.active_giveaways(&guild_id.to_string(), 20)?;
                 if rows.is_empty() { "Não existem giveaways ativos.".to_string() } else {
                     rows.into_iter().map(|row| format!("#{} — {} — termina <t:{}:R>", row.id, row.prize, row.end_at / 1_000)).collect::<Vec<_>>().join("\n")
@@ -2323,6 +2869,9 @@ impl Handler {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
+                if !feature_enabled(&self.store, &guild_id.to_string(), "management.polls", None) {
+                    return respond(ctx, command, "As enquetes estão desativadas neste servidor. Ativa-as no painel.").await;
+                }
                 let question = option_string(command, "question").unwrap_or_default().trim();
                 let mut options = Vec::new();
                 for name in ["option1", "option2", "option3", "option4", "option5"] {
@@ -2547,6 +3096,9 @@ impl Handler {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
+                if !feature_enabled(&self.store, &guild_id.to_string(), "community.events", None) {
+                    return respond(ctx, command, "Os eventos estão desativados neste servidor. Ativa-os no painel.").await;
+                }
                 let name = option_string(command, "name").unwrap_or_default().trim();
                 let start_raw = option_string(command, "start").unwrap_or_default().trim();
                 let end_raw = option_string(command, "end").unwrap_or_default().trim();
@@ -2637,6 +3189,9 @@ impl Handler {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
+                if !feature_enabled(&self.store, &guild_id.to_string(), "community.events", None) {
+                    return respond(ctx, command, "Os eventos estão desativados neste servidor. Ativa-os no painel.").await;
+                }
                 let event_id = option_i64(command, "event_id").unwrap_or(0);
                 if event_id <= 0 {
                     return respond(ctx, command, "Indica um ID de evento válido.").await;
@@ -2896,6 +3451,9 @@ impl Handler {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
+                if !feature_enabled(&self.store, &guild_id.to_string(), "community.events", None) {
+                    return respond(ctx, command, "Os eventos estão desativados neste servidor. Ativa-os no painel.").await;
+                }
                 let event_id = option_i64(command, "event_id").unwrap_or(0);
                 if event_id <= 0 {
                     return respond(ctx, command, "Indica um ID de evento válido.").await;
@@ -3134,6 +3692,9 @@ impl Handler {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
+                if !feature_enabled(&self.store, &guild_id.to_string(), "community.role_panels", None) {
+                    return respond(ctx, command, "Os painéis de cargos estão desativados neste servidor. Ativa-os no painel.").await;
+                }
                 let guild_text = guild_id.to_string();
                 let plan = self
                     .effective_plan(&command.user.id.to_string(), Some(&guild_text))
@@ -3224,6 +3785,19 @@ impl Handler {
                         .then_some((action, id))
                 })
         {
+            if !feature_enabled(
+                &self.store,
+                &guild_id.to_string(),
+                "community.suggestions",
+                None,
+            ) {
+                return respond_component(
+                    ctx,
+                    component,
+                    "As sugestões estão desativadas neste servidor.",
+                )
+                .await;
+            }
             let id = raw_id
                 .parse::<i64>()
                 .map_err(|_| anyhow::anyhow!("invalid suggestion button"))?;
@@ -3255,6 +3829,19 @@ impl Handler {
             return respond_component(ctx, component, "Voto registado.").await;
         }
         if let Some(raw_id) = component.data.custom_id.strip_prefix("giveaway:join:") {
+            if !feature_enabled(
+                &self.store,
+                &guild_id.to_string(),
+                "community.giveaways",
+                None,
+            ) {
+                return respond_component(
+                    ctx,
+                    component,
+                    "Os giveaways estão desativados neste servidor.",
+                )
+                .await;
+            }
             let id = raw_id
                 .parse::<i64>()
                 .map_err(|_| anyhow::anyhow!("invalid giveaway button"))?;
@@ -3290,6 +3877,14 @@ impl Handler {
             return respond_component(ctx, component, "Saíste do giveaway.").await;
         }
         if let Some(raw) = component.data.custom_id.strip_prefix("poll:") {
+            if !feature_enabled(&self.store, &guild_id.to_string(), "management.polls", None) {
+                return respond_component(
+                    ctx,
+                    component,
+                    "As enquetes estão desativadas neste servidor.",
+                )
+                .await;
+            }
             let mut parts = raw.split(':');
             let id = parts
                 .next()
@@ -3356,6 +3951,18 @@ impl Handler {
         }
         match component.data.custom_id.as_str() {
             "ticket:open" => {
+                if self
+                    .store
+                    .get_setting(&guild_id.to_string(), "feature.support.tickets")?
+                    .is_some_and(|value| value != "true")
+                {
+                    return respond_component(
+                        ctx,
+                        component,
+                        "Os tickets estão desativados neste servidor.",
+                    )
+                    .await;
+                }
                 if let Some(ticket) = self
                     .store
                     .active_ticket_for_user(&guild_id.to_string(), &component.user.id.to_string())?
@@ -3996,6 +4603,50 @@ fn format_duration(milliseconds: i64) -> String {
 
 fn shadow_mode_enabled(raw: Option<&str>) -> bool {
     raw.is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+fn feature_enabled(store: &Store, guild_id: &str, key: &str, legacy_key: Option<&str>) -> bool {
+    store
+        .get_setting(guild_id, &format!("feature.{key}"))
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse::<bool>().ok())
+        .or_else(|| {
+            legacy_key.and_then(|legacy| {
+                store
+                    .get_setting(guild_id, legacy)
+                    .ok()
+                    .flatten()
+                    .and_then(|value| value.parse::<bool>().ok())
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn setting_string(store: &Store, guild_id: &str, key: &str) -> Option<String> {
+    store.get_setting(guild_id, key).ok().flatten()
+}
+
+fn setting_u64(store: &Store, guild_id: &str, key: &str, default: u64) -> u64 {
+    setting_string(store, guild_id, key)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn setting_u64_optional(store: &Store, guild_id: &str, key: &str) -> Option<u64> {
+    setting_string(store, guild_id, key).and_then(|value| value.parse::<u64>().ok())
+}
+
+fn setting_i64(store: &Store, guild_id: &str, key: &str, default: i64) -> i64 {
+    setting_string(store, guild_id, key)
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(default)
+}
+
+fn setting_bool(store: &Store, guild_id: &str, key: &str, default: bool) -> bool {
+    setting_string(store, guild_id, key)
+        .and_then(|value| value.parse::<bool>().ok())
+        .unwrap_or(default)
 }
 
 fn permission_passport_message() -> String {

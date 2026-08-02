@@ -10,6 +10,7 @@ axum.workspace = true
 base64.workspace = true
 chrono.workspace = true
 hmac.workspace = true
+hex.workspace = true
 helper-contracts = { path = "../helper-contracts" }
 helper-core = { path = "../helper-core" }
 helper-modules = { path = "../helper-modules" }

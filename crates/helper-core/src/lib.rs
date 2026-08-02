@@ -1,7 +1,7 @@
 //! Pure configuration and policy primitives. No Discord or HTTP side effects.
 
 use anyhow::{Context, Result};
-use helper_contracts::Plan;
+use helper_contracts::{FeatureMaturity, Plan};
 use serde::Deserialize;
 use std::{env, net::IpAddr, path::PathBuf, str::FromStr};
 
@@ -89,6 +89,119 @@ pub enum Capability {
     Insights,
 }
 
+/// Canonical allow-list shared by validation and migration code. The API
+/// supplies copy and category metadata, but no request may publish a key that
+/// is not present in this list.
+pub const FEATURE_KEYS: &[&str] = &[
+    "protection.antispam",
+    "protection.antiscam",
+    "protection.anti_raid",
+    "protection.join_gate",
+    "community.levels",
+    "community.leaderboard",
+    "community.starboard",
+    "community.suggestions",
+    "community.giveaways",
+    "support.tickets",
+    "support.welcome",
+    "support.welcome_channel",
+    "management.nickname",
+    "management.workflows",
+    "management.polls",
+    "insights.stats",
+    "studio.rank_card",
+    "management.moderation",
+    "management.custom_commands",
+    "management.audit",
+    "management.privacy",
+    "management.templates",
+    "community.role_panels",
+    "community.events",
+    "community.achievements",
+    "management.invite_tracker",
+    "utility.help",
+    "utility.reminders",
+    "utility.emojis",
+    "utility.embeds",
+    "utility.search",
+    "utility.temp_channels",
+    "social.twitch",
+    "social.youtube",
+    "social.instagram",
+    "social.reddit",
+    "social.x",
+    "social.tiktok",
+    "social.rss",
+    "social.podcasts",
+    "social.kick",
+    "social.bluesky",
+    "community.birthdays",
+    "community.economy",
+    "growth.monetization",
+    "web3.nft_stats",
+    "web3.nft_queries",
+    "web3.nft_sales",
+    "web3.crypto_stats",
+    "web3.crypto_queries",
+    "web3.gas_tracker",
+    "web3.gating",
+];
+
+pub fn is_known_feature(key: &str) -> bool {
+    FEATURE_KEYS.contains(&key)
+}
+
+/// Canonical lifecycle policy for the feature catalogue.  Labels and copy are
+/// intentionally kept in the API response for now, but the runtime state is
+/// decided here so the panel cannot mark a stored JSON blob as operational.
+pub fn feature_maturity(key: &str) -> FeatureMaturity {
+    match key {
+        // These adapters are wired to the current Rust runtime.
+        "protection.anti_raid"
+        | "protection.join_gate"
+        | "protection.antispam"
+        | "community.levels"
+        | "community.starboard"
+        | "community.suggestions"
+        | "community.giveaways"
+        | "community.role_panels"
+        | "community.events"
+        | "support.tickets"
+        | "support.welcome"
+        | "management.polls"
+        | "studio.rank_card" => FeatureMaturity::Operational,
+        "social.youtube" | "social.rss" | "social.twitch" => FeatureMaturity::Beta,
+        // Providers without an approved adapter or credentials must never be
+        // presented as configurable, even if a legacy setting exists.
+        "social.instagram"
+        | "social.reddit"
+        | "social.x"
+        | "social.tiktok"
+        | "social.podcasts"
+        | "social.kick"
+        | "social.bluesky"
+        | "utility.search"
+        | "growth.monetization"
+        | "web3.nft_stats"
+        | "web3.nft_queries"
+        | "web3.nft_sales"
+        | "web3.crypto_stats"
+        | "web3.crypto_queries"
+        | "web3.gas_tracker"
+        | "web3.gating" => FeatureMaturity::Blocked,
+        _ => FeatureMaturity::Planned,
+    }
+}
+
+pub fn feature_is_configurable(key: &str) -> bool {
+    matches!(
+        feature_maturity(key),
+        FeatureMaturity::Operational | FeatureMaturity::Beta
+    )
+}
+
+pub const FEATURE_SCHEMA_VERSION: u32 = 1;
+
 pub fn quota_limit(plan: &Plan, key: &str) -> u64 {
     let free = match key {
         "panels" => 1,
@@ -150,5 +263,16 @@ mod tests {
     #[test]
     fn unknown_quota_is_closed() {
         assert_eq!(quota_limit(&Plan::Free, "unknown"), 0);
+    }
+
+    #[test]
+    fn feature_registry_has_52_unique_keys_and_closed_unknowns() {
+        let mut keys = FEATURE_KEYS.to_vec();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(FEATURE_KEYS.len(), 52);
+        assert_eq!(keys.len(), 52);
+        assert!(is_known_feature("community.leaderboard"));
+        assert!(!is_known_feature("community.not_a_real_feature"));
     }
 }
