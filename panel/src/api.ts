@@ -27,14 +27,116 @@ export type Feature = {
   configSchemaVersion?: number;
 };
 export type FeatureConfig = Record<string, unknown>;
-export type YouTubeSubscription = { id: number; sourceChannelId: string; targetChannelId: string; messageTemplate: string; mention: string; enabled: boolean; intervalSeconds: number; lastVideoId?: string | null; nextPollAt: number; failureCount: number; lastError?: string | null };
-export type RssSubscription = { id: number; feedUrl: string; targetChannelId: string; messageTemplate: string; mention: string; enabled: boolean; intervalSeconds: number; lastItemId?: string | null; nextPollAt: number; failureCount: number; lastError?: string | null };
-export type TwitchSubscription = { id: number; sourceLogin: string; sourceUserId: string; targetChannelId: string; messageTemplate: string; mention: string; enabled: boolean; pendingEventId?: string | null; pendingStreamId?: string | null; pendingStartedAt?: string | null; nextPollAt: number; failureCount: number; lastError?: string | null };
-export type FeatureDetail = { guildId: string; key: string; enabled: boolean; config: FeatureConfig; revision?: number; maturity?: Feature['maturity']; configurable?: boolean; health?: { operational: boolean; issues?: Array<{ path: string; code: string; message: string; severity: string }> } };
-export type GuildContext = { guildId: string; name: string; permissions: string; channels: Array<{ id: string; name: string; type: string }>; roles: Array<{ id: string; name: string; position: number }>; hierarchy: { known: boolean; reason?: string }; capabilities: { channelSelectors: boolean; roleSelectors: boolean; permissionPreflight: boolean }; stale: boolean; message?: string };
+export type YouTubeSubscription = {
+  id: number;
+  sourceChannelId: string;
+  targetChannelId: string;
+  messageTemplate: string;
+  mention: string;
+  enabled: boolean;
+  intervalSeconds: number;
+  lastVideoId?: string | null;
+  nextPollAt: number;
+  failureCount: number;
+  lastError?: string | null;
+};
+export type RssSubscription = {
+  id: number;
+  feedUrl: string;
+  targetChannelId: string;
+  messageTemplate: string;
+  mention: string;
+  enabled: boolean;
+  intervalSeconds: number;
+  lastItemId?: string | null;
+  nextPollAt: number;
+  failureCount: number;
+  lastError?: string | null;
+};
+export type TwitchSubscription = {
+  id: number;
+  sourceLogin: string;
+  sourceUserId: string;
+  targetChannelId: string;
+  messageTemplate: string;
+  mention: string;
+  enabled: boolean;
+  pendingEventId?: string | null;
+  pendingStreamId?: string | null;
+  pendingStartedAt?: string | null;
+  nextPollAt: number;
+  failureCount: number;
+  lastError?: string | null;
+};
+export type FeatureSchema = {
+  version: number;
+  source: string;
+  sections: Array<{
+    title: string;
+    description: string;
+    fields: Array<{
+      key: string;
+      label: string;
+      kind: string;
+      help?: string;
+      options?: [string, string][];
+      min?: number;
+      max?: number;
+      maxLength?: number;
+      step?: number;
+      advanced?: boolean;
+    }>;
+  }>;
+};
+export type FeatureDetail = {
+  guildId: string;
+  key: string;
+  enabled: boolean;
+  config: FeatureConfig;
+  defaults?: FeatureConfig;
+  schema?: FeatureSchema;
+  revision?: number;
+  maturity?: Feature['maturity'];
+  configurable?: boolean;
+  health?: {
+    operational: boolean;
+    issues?: Array<{ path: string; code: string; message: string; severity: string }>;
+  };
+};
+export type GuildContext = {
+  guildId: string;
+  name: string;
+  permissions: string;
+  channels: Array<{ id: string; name: string; type: string }>;
+  roles: Array<{ id: string; name: string; position: number }>;
+  hierarchy: { known: boolean; reason?: string };
+  capabilities: { channelSelectors: boolean; roleSelectors: boolean; permissionPreflight: boolean };
+  stale: boolean;
+  message?: string;
+};
 export type QuickSetupStepKey = 'welcome' | 'roles' | 'moderation' | 'protection';
-export type QuickSetupStep = { key: QuickSetupStepKey; status: 'pending' | 'applied' | 'skipped'; updatedAt?: string; summary?: string; revision?: number };
-export type QuickSetupState = { guildId: string; status: 'not_started' | 'in_progress' | 'completed' | 'dismissed'; currentStep: QuickSetupStepKey | null; revision: number; steps: QuickSetupStep[]; draft?: Record<string, unknown>; createdResources: Array<{ type: 'channel' | 'role' | 'message'; name: string; id?: string; state: 'planned' | 'created' | 'reused' }>; updatedAt?: string };
+export type QuickSetupStep = {
+  key: QuickSetupStepKey;
+  status: 'pending' | 'applied' | 'skipped';
+  updatedAt?: string;
+  summary?: string;
+  revision?: number;
+};
+export type QuickSetupState = {
+  guildId: string;
+  status: 'not_started' | 'in_progress' | 'completed' | 'dismissed';
+  currentStep: QuickSetupStepKey | null;
+  revision: number;
+  steps: QuickSetupStep[];
+  draft?: Record<string, unknown>;
+  createdResources: Array<{
+    type: 'channel' | 'role' | 'message';
+    name: string;
+    id?: string;
+    state: 'planned' | 'created' | 'reused';
+  }>;
+  updatedAt?: string;
+};
 export type CaseRecord = {
   id: number;
   kind?: string;
@@ -47,7 +149,13 @@ export type CaseRecord = {
   created_at?: number;
   createdAt?: string;
 };
-export type AuditRecord = { action: string; actor_id?: string; actorId?: string; outcome: string; created_at?: number };
+export type AuditRecord = {
+  action: string;
+  actor_id?: string;
+  actorId?: string;
+  outcome: string;
+  created_at?: number;
+};
 
 const base = (import.meta.env.VITE_HELPER_API_BASE as string | undefined)?.replace(/\/$/, '') ?? '';
 let sessionBearer: string | null = null;
@@ -57,10 +165,16 @@ function persistSessionBearer(token: string | null): void {
   try {
     if (token) sessionStorage.setItem('vh_session_bearer', token);
     else sessionStorage.removeItem('vh_session_bearer');
-  } catch { /* sessionStorage pode estar bloqueado */ }
+  } catch {
+    /* sessionStorage pode estar bloqueado */
+  }
 }
 
-try { sessionBearer = sessionStorage.getItem('vh_session_bearer'); } catch { /* opcional */ }
+try {
+  sessionBearer = sessionStorage.getItem('vh_session_bearer');
+} catch {
+  /* opcional */
+}
 const oauthSession = window.location.hash.match(/^#session=([A-Za-z0-9._~-]{32,4096})$/)?.[1];
 if (oauthSession) {
   persistSessionBearer(oauthSession);
@@ -83,7 +197,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     if (response.status === 401) persistSessionBearer(null);
-    const payload = (await response.json().catch(() => ({}))) as { message?: string; code?: string };
+    const payload = (await response.json().catch(() => ({}))) as {
+      message?: string;
+      code?: string;
+    };
     throw new Error(payload.message ?? payload.code ?? `API ${response.status}`);
   }
   return (await response.json()) as T;
@@ -94,53 +211,245 @@ export const api = {
   guilds: () => request<{ guilds: Guild[] }>('/api/guilds'),
   guildContext: () => request<GuildContext>('/api/guild-context'),
   quickSetup: () => request<QuickSetupState>('/api/quick-setup'),
-  saveQuickSetupStep: (step: QuickSetupStepKey, payload: { status: 'applied' | 'skipped'; config?: Record<string, unknown>; enabled?: boolean; expectedRevision?: number }) =>
-    request<QuickSetupState>(`/api/quick-setup/steps/${step}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: payload.status, config: payload.config ?? {}, enabled: payload.enabled ?? true, expected_revision: payload.expectedRevision }) }),
-  dismissQuickSetup: () => request<QuickSetupState>('/api/quick-setup/dismiss', { method: 'POST', headers: { 'Content-Type': 'application/json' } }),
-  switchGuild: (guildId: string) => request<{ ok: boolean; guildId: string }>('/api/session/switch', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ guild_id: guildId }),
-  }),
+  saveQuickSetupStep: (
+    step: QuickSetupStepKey,
+    payload: {
+      status: 'applied' | 'skipped';
+      config?: Record<string, unknown>;
+      enabled?: boolean;
+      expectedRevision?: number;
+    },
+  ) =>
+    request<QuickSetupState>(`/api/quick-setup/steps/${step}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: payload.status,
+        config: payload.config ?? {},
+        enabled: payload.enabled ?? true,
+        expected_revision: payload.expectedRevision,
+      }),
+    }),
+  dismissQuickSetup: () =>
+    request<QuickSetupState>('/api/quick-setup/dismiss', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    }),
+  switchGuild: (guildId: string) =>
+    request<{ ok: boolean; guildId: string }>('/api/session/switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ guild_id: guildId }),
+    }),
   stats: () => request<{ totalCases: number; guildId: string }>('/api/stats'),
   cases: () => request<{ cases: CaseRecord[] }>('/api/cases?limit=8'),
   audit: () => request<{ events: AuditRecord[] }>('/api/audit?limit=12'),
-  quotas: () => request<{ plan: string; limits: Record<string, number>; usage: Record<string, number> }>('/api/quotas'),
+  quotas: () =>
+    request<{ plan: string; limits: Record<string, number>; usage: Record<string, number> }>(
+      '/api/quotas',
+    ),
   modules: () => request<{ modules: string[] }>('/api/modules'),
   features: () => request<{ guildId: string; features: Feature[] }>('/api/config/features'),
-  updateFeature: (key: string, enabled: boolean) => request<{ ok: boolean; enabled: boolean }>('/api/config/features', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key, enabled }),
-  }),
-  feature: (key: string) => request<FeatureDetail>(`/api/config/features/${encodeURIComponent(key)}`),
+  updateFeature: (key: string, enabled: boolean) =>
+    request<{ ok: boolean; enabled: boolean }>('/api/config/features', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, enabled }),
+    }),
+  feature: (key: string) =>
+    request<FeatureDetail>(`/api/config/features/${encodeURIComponent(key)}`),
   saveFeature: (key: string, enabled: boolean, config: FeatureConfig, expectedRevision?: number) =>
     request<FeatureDetail>(`/api/config/features/${encodeURIComponent(key)}`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled, config, expected_revision: expectedRevision }),
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled, config, expected_revision: expectedRevision }),
     }),
   testFeature: (key: string, config: FeatureConfig) =>
-    request<{ ok: boolean; key: string; preview: FeatureConfig; mode: string; maturity: string; result: { key: string; would_apply: boolean; issues: Array<{ path: string; code: string; message: string; severity: string }>; effects: string[] }; decision?: { ignored: boolean; matched: string[]; should_act: boolean; timeout_seconds: number; reason: string } | null }>(`/api/config/features/${encodeURIComponent(key)}/simulate`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config }),
+    request<{
+      ok: boolean;
+      key: string;
+      preview: FeatureConfig;
+      mode: string;
+      maturity: string;
+      result: {
+        key: string;
+        would_apply: boolean;
+        issues: Array<{ path: string; code: string; message: string; severity: string }>;
+        effects: string[];
+      };
+      decision?: {
+        ignored: boolean;
+        matched: string[];
+        should_act: boolean;
+        timeout_seconds: number;
+        reason: string;
+      } | null;
+    }>(`/api/config/features/${encodeURIComponent(key)}/simulate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config }),
     }),
-  youtubeSubscriptions: () => request<{ guildId: string; subscriptions: YouTubeSubscription[] }>('/api/config/youtube'),
-  createYoutubeSubscription: (payload: { sourceChannelId: string; targetChannelId: string; messageTemplate: string; mention: string; intervalSeconds: number; enabled: boolean }) =>
-    request<YouTubeSubscription>('/api/config/youtube', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source_channel_id: payload.sourceChannelId, target_channel_id: payload.targetChannelId, message_template: payload.messageTemplate, mention: payload.mention, interval_seconds: payload.intervalSeconds, enabled: payload.enabled }) }),
-  updateYoutubeSubscription: (id: number, payload: { sourceChannelId: string; targetChannelId: string; messageTemplate: string; mention: string; intervalSeconds: number; enabled: boolean }) =>
-    request<YouTubeSubscription>(`/api/config/youtube/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source_channel_id: payload.sourceChannelId, target_channel_id: payload.targetChannelId, message_template: payload.messageTemplate, mention: payload.mention, interval_seconds: payload.intervalSeconds, enabled: payload.enabled }) }),
-  rssSubscriptions: () => request<{ guildId: string; subscriptions: RssSubscription[] }>('/api/config/rss'),
-  rssPreview: (url: string) => request<{ provider: string; feed: { url: string; title: string; latest?: { id: string; title: string; url: string } | null } }>(`/api/providers/rss/preview?url=${encodeURIComponent(url)}`),
-  createRssSubscription: (payload: { feedUrl: string; targetChannelId: string; messageTemplate: string; mention: string; intervalSeconds: number; enabled: boolean }) =>
-    request<RssSubscription>('/api/config/rss', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ feed_url: payload.feedUrl, target_channel_id: payload.targetChannelId, message_template: payload.messageTemplate, mention: payload.mention, interval_seconds: payload.intervalSeconds, enabled: payload.enabled }) }),
-  updateRssSubscription: (id: number, payload: { feedUrl: string; targetChannelId: string; messageTemplate: string; mention: string; intervalSeconds: number; enabled: boolean }) =>
-    request<RssSubscription>(`/api/config/rss/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ feed_url: payload.feedUrl, target_channel_id: payload.targetChannelId, message_template: payload.messageTemplate, mention: payload.mention, interval_seconds: payload.intervalSeconds, enabled: payload.enabled }) }),
-  deleteRssSubscription: (id: number) => request<{ deleted: boolean; id: number }>(`/api/config/rss/${id}`, { method: 'DELETE' }),
-  twitchSubscriptions: () => request<{ guildId: string; subscriptions: TwitchSubscription[] }>('/api/config/twitch'),
-  twitchChannel: (login: string) => request<{ provider: string; channel: { id: string; login: string; display_name: string; profile_image_url: string } }>(`/api/providers/twitch/channels/${encodeURIComponent(login)}`),
-  createTwitchSubscription: (payload: { sourceLogin: string; targetChannelId: string; messageTemplate: string; mention: string; enabled: boolean }) =>
-    request<TwitchSubscription>('/api/config/twitch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceLogin: payload.sourceLogin, targetChannelId: payload.targetChannelId, messageTemplate: payload.messageTemplate, mention: payload.mention, enabled: payload.enabled }) }),
-  updateTwitchSubscription: (id: number, payload: { sourceLogin: string; targetChannelId: string; messageTemplate: string; mention: string; enabled: boolean }) =>
-    request<TwitchSubscription>(`/api/config/twitch/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceLogin: payload.sourceLogin, targetChannelId: payload.targetChannelId, messageTemplate: payload.messageTemplate, mention: payload.mention, enabled: payload.enabled }) }),
-  deleteTwitchSubscription: (id: number) => request<{ deleted: boolean; id: number }>(`/api/config/twitch/${id}`, { method: 'DELETE' }),
+  preflight: (operation: string, config: FeatureConfig, enabled = true) =>
+    request<{
+      operation: string;
+      guildId: string;
+      ok: boolean;
+      issues: Array<{ path: string; code: string; message: string; severity: string }>;
+      checks: Record<string, boolean>;
+    }>('/api/preflight', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ operation, config, enabled }),
+    }),
+  youtubeSubscriptions: () =>
+    request<{ guildId: string; subscriptions: YouTubeSubscription[] }>('/api/config/youtube'),
+  createYoutubeSubscription: (payload: {
+    sourceChannelId: string;
+    targetChannelId: string;
+    messageTemplate: string;
+    mention: string;
+    intervalSeconds: number;
+    enabled: boolean;
+  }) =>
+    request<YouTubeSubscription>('/api/config/youtube', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source_channel_id: payload.sourceChannelId,
+        target_channel_id: payload.targetChannelId,
+        message_template: payload.messageTemplate,
+        mention: payload.mention,
+        interval_seconds: payload.intervalSeconds,
+        enabled: payload.enabled,
+      }),
+    }),
+  updateYoutubeSubscription: (
+    id: number,
+    payload: {
+      sourceChannelId: string;
+      targetChannelId: string;
+      messageTemplate: string;
+      mention: string;
+      intervalSeconds: number;
+      enabled: boolean;
+    },
+  ) =>
+    request<YouTubeSubscription>(`/api/config/youtube/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source_channel_id: payload.sourceChannelId,
+        target_channel_id: payload.targetChannelId,
+        message_template: payload.messageTemplate,
+        mention: payload.mention,
+        interval_seconds: payload.intervalSeconds,
+        enabled: payload.enabled,
+      }),
+    }),
+  rssSubscriptions: () =>
+    request<{ guildId: string; subscriptions: RssSubscription[] }>('/api/config/rss'),
+  rssPreview: (url: string) =>
+    request<{
+      provider: string;
+      feed: {
+        url: string;
+        title: string;
+        latest?: { id: string; title: string; url: string } | null;
+      };
+    }>(`/api/providers/rss/preview?url=${encodeURIComponent(url)}`),
+  createRssSubscription: (payload: {
+    feedUrl: string;
+    targetChannelId: string;
+    messageTemplate: string;
+    mention: string;
+    intervalSeconds: number;
+    enabled: boolean;
+  }) =>
+    request<RssSubscription>('/api/config/rss', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        feed_url: payload.feedUrl,
+        target_channel_id: payload.targetChannelId,
+        message_template: payload.messageTemplate,
+        mention: payload.mention,
+        interval_seconds: payload.intervalSeconds,
+        enabled: payload.enabled,
+      }),
+    }),
+  updateRssSubscription: (
+    id: number,
+    payload: {
+      feedUrl: string;
+      targetChannelId: string;
+      messageTemplate: string;
+      mention: string;
+      intervalSeconds: number;
+      enabled: boolean;
+    },
+  ) =>
+    request<RssSubscription>(`/api/config/rss/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        feed_url: payload.feedUrl,
+        target_channel_id: payload.targetChannelId,
+        message_template: payload.messageTemplate,
+        mention: payload.mention,
+        interval_seconds: payload.intervalSeconds,
+        enabled: payload.enabled,
+      }),
+    }),
+  deleteRssSubscription: (id: number) =>
+    request<{ deleted: boolean; id: number }>(`/api/config/rss/${id}`, { method: 'DELETE' }),
+  twitchSubscriptions: () =>
+    request<{ guildId: string; subscriptions: TwitchSubscription[] }>('/api/config/twitch'),
+  twitchChannel: (login: string) =>
+    request<{
+      provider: string;
+      channel: { id: string; login: string; display_name: string; profile_image_url: string };
+    }>(`/api/providers/twitch/channels/${encodeURIComponent(login)}`),
+  createTwitchSubscription: (payload: {
+    sourceLogin: string;
+    targetChannelId: string;
+    messageTemplate: string;
+    mention: string;
+    enabled: boolean;
+  }) =>
+    request<TwitchSubscription>('/api/config/twitch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sourceLogin: payload.sourceLogin,
+        targetChannelId: payload.targetChannelId,
+        messageTemplate: payload.messageTemplate,
+        mention: payload.mention,
+        enabled: payload.enabled,
+      }),
+    }),
+  updateTwitchSubscription: (
+    id: number,
+    payload: {
+      sourceLogin: string;
+      targetChannelId: string;
+      messageTemplate: string;
+      mention: string;
+      enabled: boolean;
+    },
+  ) =>
+    request<TwitchSubscription>(`/api/config/twitch/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sourceLogin: payload.sourceLogin,
+        targetChannelId: payload.targetChannelId,
+        messageTemplate: payload.messageTemplate,
+        mention: payload.mention,
+        enabled: payload.enabled,
+      }),
+    }),
+  deleteTwitchSubscription: (id: number) =>
+    request<{ deleted: boolean; id: number }>(`/api/config/twitch/${id}`, { method: 'DELETE' }),
   rankCard: () => request<{ guildId: string; config: RankCardConfig }>('/api/studio/rank-card'),
   saveRankCard: (config: RankCardConfig) =>
     request<{ guildId: string; config: RankCardConfig }>('/api/studio/rank-card', {
@@ -150,15 +459,26 @@ export const api = {
     }),
   startOAuth: async (guildId = '') => {
     persistSessionBearer(null);
-    const verifier = crypto.randomUUID().replaceAll('-', '') + crypto.randomUUID().replaceAll('-', '');
-    try { sessionStorage.setItem('vh_oauth_verifier', verifier); } catch { /* storage opcional */ }
+    const verifier =
+      crypto.randomUUID().replaceAll('-', '') + crypto.randomUUID().replaceAll('-', '');
+    try {
+      sessionStorage.setItem('vh_oauth_verifier', verifier);
+    } catch {
+      /* storage opcional */
+    }
     const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
     const challenge = btoa(String.fromCharCode(...new Uint8Array(digest)))
-      .replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+      .replaceAll('+', '-')
+      .replaceAll('/', '_')
+      .replaceAll('=', '');
     const result = await request<{ authorization_url: string }>('/api/oauth/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ guild_id: guildId, code_challenge: challenge, code_verifier: verifier }),
+      body: JSON.stringify({
+        guild_id: guildId,
+        code_challenge: challenge,
+        code_verifier: verifier,
+      }),
     });
     window.location.assign(result.authorization_url);
   },

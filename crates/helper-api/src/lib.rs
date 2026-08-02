@@ -114,6 +114,7 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/api/guilds", get(guilds))
         .route("/api/guild-context", get(guild_context))
+        .route("/api/preflight", post(preflight))
         .route("/api/quick-setup", get(quick_setup))
         .route("/api/quick-setup/dismiss", post(quick_setup_dismiss))
         .route("/api/quick-setup/steps/{step}", put(quick_setup_step))
@@ -1895,6 +1896,100 @@ async fn guild_context(
     })))
 }
 
+#[derive(Debug, Deserialize)]
+struct PreflightRequest {
+    operation: String,
+    #[serde(default)]
+    config: serde_json::Value,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn permission_bit(permissions: &str, bit: u8) -> bool {
+    permissions
+        .parse::<u64>()
+        .map(|value| value & (1_u64 << 3) != 0 || value & (1_u64 << bit) != 0)
+        .unwrap_or(false)
+}
+
+async fn preflight(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(request): Json<PreflightRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    if request.operation != "protection.antispam.publish" {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "unknown_preflight_operation",
+        ));
+    }
+
+    let mut issues = validate_feature_config("protection.antispam", &request.config);
+    let guild = state
+        .store
+        .session_guilds(claims.session_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .find(|guild| guild.guild_id == claims.guild_id)
+        .ok_or_else(|| client_error(StatusCode::FORBIDDEN, "guild_not_managed"))?;
+    let permissions = guild.permissions.unwrap_or_default();
+    let alert_only = request
+        .config
+        .get("alertOnly")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if request.enabled && !alert_only && !permission_bit(&permissions, 40) {
+        issues.push(ValidationIssue {
+            path: "permissions.moderate_members".into(),
+            code: "missing_permission".into(),
+            message: "Falta a permissão Moderar membros para aplicar timeouts. Podes publicar em modo de alerta.".into(),
+            severity: "error".into(),
+        });
+    }
+    if request.enabled && !permission_bit(&permissions, 11) {
+        issues.push(ValidationIssue {
+            path: "permissions.send_messages".into(),
+            code: "missing_permission".into(),
+            message: "Falta a permissão Enviar mensagens para publicar os avisos do anti-spam."
+                .into(),
+            severity: "error".into(),
+        });
+    }
+    if let Some(channel) = request
+        .config
+        .get("logChannel")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        && channel.parse::<u64>().is_err()
+    {
+        issues.push(ValidationIssue {
+            path: "logChannel".into(),
+            code: "invalid_channel_id".into(),
+            message: "Escolhe um canal da lista do servidor; o ID não é válido.".into(),
+            severity: "error".into(),
+        });
+    }
+
+    let error_count = issues
+        .iter()
+        .filter(|issue| issue.severity == "error")
+        .count();
+    Ok(Json(serde_json::json!({
+        "operation": request.operation,
+        "guildId": claims.guild_id,
+        "ok": error_count == 0,
+        "issues": issues,
+        "checks": {
+            "guildManaged": true,
+            "permissionBitfieldAvailable": permissions.parse::<u64>().is_ok(),
+            "moderateMembers": permission_bit(&permissions, 40),
+            "sendMessages": permission_bit(&permissions, 11),
+            "shadowModeAvailable": true
+        }
+    })))
+}
+
 const QUICK_SETUP_KEY: &str = "quick_setup.state";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2307,6 +2402,55 @@ struct FeatureDefinition {
     config_schema_version: u32,
     revision: u64,
     issues: Vec<ValidationIssue>,
+}
+
+/// The anti-spam editor is deliberately described by the API.  This keeps
+/// the panel from exposing a field that the runtime does not understand and
+/// gives us one place to document bounded limits and real Discord resources.
+fn feature_schema(key: &str) -> Option<serde_json::Value> {
+    (key == "protection.antispam").then(|| serde_json::json!({
+        "version": FEATURE_SCHEMA_VERSION,
+        "source": "anti_spam_adapter_v1",
+        "sections": [
+            {
+                "title": "Resposta automática",
+                "description": "Deteta padrões de flood, repetição e menções com limites seguros.",
+                "fields": [
+                    {"key":"floodCount","label":"Mensagens no intervalo","kind":"number","min":3,"max":30,"help":"Número de mensagens do mesmo membro antes de sinalizar."},
+                    {"key":"windowSeconds","label":"Janela de tempo (segundos)","kind":"number","min":3,"max":60,"help":"As mensagens antigas saem automaticamente desta janela."},
+                    {"key":"duplicateLimit","label":"Repetições iguais","kind":"number","min":2,"max":12,"help":"Quantas mensagens iguais acionam a regra."},
+                    {"key":"timeoutSeconds","label":"Timeout inicial (segundos)","kind":"number","min":0,"max":86400,"help":"Usa 0 para apenas registar o incidente."}
+                ]
+            },
+            {
+                "title": "Exceções e alertas",
+                "description": "Escolhe recursos reais do servidor para evitar falsos positivos e receber contexto.",
+                "fields": [
+                    {"key":"mentionLimit","label":"Limite de menções por mensagem","kind":"number","min":1,"max":30,"advanced":true},
+                    {"key":"ignoredChannels","label":"Canais ignorados","kind":"channels","help":"Mensagens nestes canais não entram no avaliador.","advanced":true},
+                    {"key":"ignoredRoles","label":"Cargos ignorados","kind":"roles","help":"Membros com um destes cargos não entram no avaliador.","advanced":true},
+                    {"key":"logChannel","label":"Canal de registo","kind":"channel","help":"O Helper publica aqui o motivo e o modo da decisão.","advanced":true},
+                    {"key":"alertOnly","label":"Apenas alertar, sem aplicar castigo","kind":"toggle","help":"Mantém a deteção e auditoria, mas não aplica timeout.","advanced":true}
+                ]
+            }
+        ]
+    }))
+}
+
+fn feature_defaults(key: &str) -> Option<serde_json::Value> {
+    (key == "protection.antispam").then(|| {
+        serde_json::json!({
+            "floodCount": 6,
+            "windowSeconds": 10,
+            "duplicateLimit": 3,
+            "timeoutSeconds": 60,
+            "mentionLimit": 5,
+            "ignoredChannels": [],
+            "ignoredRoles": [],
+            "logChannel": "",
+            "alertOnly": false
+        })
+    })
 }
 
 const FEATURE_DEFINITIONS: &[(&str, &str, &str, &str, &str, bool)] = &[
@@ -3340,6 +3484,8 @@ async fn feature_detail(
         "key": key,
         "enabled": feature_enabled(&state, &claims.guild_id, &key),
         "config": config,
+        "defaults": feature_defaults(&key),
+        "schema": feature_schema(&key),
         "revision": revision,
         "maturity": maturity,
         "configurable": feature_is_configurable(&key),
@@ -5024,6 +5170,89 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("timeout")
+        );
+    }
+
+    #[tokio::test]
+    async fn anti_spam_preflight_reports_missing_permissions() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        store
+            .replace_session_guilds(
+                session.session_id,
+                &[("guild-a".into(), "Alpha".into(), Some("0".into()))],
+            )
+            .unwrap();
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/preflight")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "operation": "protection.antispam.publish",
+                            "enabled": true,
+                            "config": {"timeoutSeconds": 60}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                .unwrap();
+        assert_eq!(body["ok"], false);
+        assert!(
+            body["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|issue| issue["path"] == "permissions.moderate_members")
+        );
+        assert!(
+            body["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|issue| issue["path"] == "permissions.send_messages")
+        );
+    }
+
+    #[tokio::test]
+    async fn anti_spam_detail_exposes_runtime_schema_and_defaults() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        let response = router(state(store))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/config/features/protection.antispam")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                .unwrap();
+        assert_eq!(body["schema"]["source"], "anti_spam_adapter_v1");
+        assert_eq!(body["defaults"]["floodCount"], 6);
+        assert!(
+            body["schema"]["sections"][1]["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field["kind"] == "channels")
         );
     }
 
