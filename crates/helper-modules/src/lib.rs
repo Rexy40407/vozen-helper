@@ -195,7 +195,7 @@ impl TwitchClient {
 
     pub async fn user(&self, login: &str) -> anyhow::Result<Option<TwitchUser>> {
         let login = login.trim().trim_start_matches('@').to_ascii_lowercase();
-        if login.len() < 1
+        if login.is_empty()
             || login.len() > 25
             || !login
                 .bytes()
@@ -349,6 +349,12 @@ impl RssClient {
     }
 }
 
+impl Default for RssClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 const MAX_FEED_BYTES: usize = 1_048_576;
 
 async fn validate_feed_url(raw_url: &str) -> anyhow::Result<Url> {
@@ -416,7 +422,9 @@ struct RawRssItem {
 
 fn parse_feed(bytes: &[u8]) -> anyhow::Result<Option<RssFeed>> {
     let mut reader = Reader::from_reader(bytes);
-    reader.config_mut().trim_text(true);
+    // Keep whitespace around `Event::GeneralRef` entities (for example
+    // `Hello &amp; welcome`), then trim each field once the item is complete.
+    reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
     let mut feed_title = String::new();
     let mut current_tag = String::new();
@@ -436,10 +444,13 @@ fn parse_feed(bytes: &[u8]) -> anyhow::Result<Option<RssFeed>> {
                     if let Some(item) = current_item.as_mut() {
                         if name == "link" {
                             for attribute in event.attributes().flatten() {
-                                if attribute.key.as_ref() == b"href" {
-                                    if let Ok(value) = attribute.unescape_value() {
-                                        item.url = value.into_owned();
-                                    }
+                                if attribute.key.as_ref() == b"href"
+                                    && let Ok(value) = attribute.decoded_and_normalized_value(
+                                        quick_xml::XmlVersion::Implicit1_0,
+                                        reader.decoder(),
+                                    )
+                                {
+                                    item.url = value.into_owned();
                                 }
                             }
                         }
@@ -454,12 +465,14 @@ fn parse_feed(bytes: &[u8]) -> anyhow::Result<Option<RssFeed>> {
                     && event.local_name().as_ref().eq_ignore_ascii_case(b"link")
                 {
                     for attribute in event.attributes().flatten() {
-                        if attribute.key.as_ref() == b"href" {
-                            if let Ok(value) = attribute.unescape_value() {
-                                if let Some(item) = current_item.as_mut() {
-                                    item.url = value.into_owned();
-                                }
-                            }
+                        if attribute.key.as_ref() == b"href"
+                            && let Ok(value) = attribute.decoded_and_normalized_value(
+                                quick_xml::XmlVersion::Implicit1_0,
+                                reader.decoder(),
+                            )
+                            && let Some(item) = current_item.as_mut()
+                        {
+                            item.url = value.into_owned();
                         }
                     }
                 }
@@ -476,6 +489,9 @@ fn parse_feed(bytes: &[u8]) -> anyhow::Result<Option<RssFeed>> {
                 &current_tag,
                 event.as_ref(),
             ),
+            Ok(Event::GeneralRef(event)) => {
+                assign_feed_reference(&mut current_item, &mut feed_title, &current_tag, &event)
+            }
             Ok(Event::End(event)) => {
                 let name =
                     String::from_utf8_lossy(event.local_name().as_ref()).to_ascii_lowercase();
@@ -537,17 +553,52 @@ fn assign_feed_text(
     let text = unescape(&String::from_utf8_lossy(bytes))
         .map(|value| value.into_owned())
         .unwrap_or_else(|_| String::from_utf8_lossy(bytes).into_owned());
+    append_feed_text(current_item, feed_title, current_tag, &text);
+}
+
+fn assign_feed_reference(
+    current_item: &mut Option<RawRssItem>,
+    feed_title: &mut String,
+    current_tag: &str,
+    reference: &quick_xml::events::BytesRef<'_>,
+) {
+    let name = reference
+        .decode()
+        .map(|value| value.into_owned())
+        .unwrap_or_default();
+    let text = match name.as_str() {
+        "amp" => "&".to_string(),
+        "lt" => "<".to_string(),
+        "gt" => ">".to_string(),
+        "quot" => "\"".to_string(),
+        "apos" => "'".to_string(),
+        _ => reference
+            .resolve_char_ref()
+            .ok()
+            .flatten()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| format!("&{name};")),
+    };
+    append_feed_text(current_item, feed_title, current_tag, &text);
+}
+
+fn append_feed_text(
+    current_item: &mut Option<RawRssItem>,
+    feed_title: &mut String,
+    current_tag: &str,
+    text: &str,
+) {
     if let Some(item) = current_item.as_mut() {
         match current_tag {
-            "title" => item.title.push_str(&text),
-            "description" | "summary" | "content" => item.description.push_str(&text),
+            "title" => item.title.push_str(text),
+            "description" | "summary" | "content" => item.description.push_str(text),
             "link" if item.url.is_empty() => item.url.push_str(text.trim()),
-            "guid" | "id" => item.id.push_str(&text),
-            "pubdate" | "published" | "updated" | "date" => item.published_at.push_str(&text),
+            "guid" | "id" => item.id.push_str(text),
+            "pubdate" | "published" | "updated" | "date" => item.published_at.push_str(text),
             _ => {}
         }
     } else if current_tag == "title" && feed_title.is_empty() {
-        *feed_title = text;
+        *feed_title = text.to_string();
     }
 }
 

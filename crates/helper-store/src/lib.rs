@@ -922,6 +922,7 @@ impl Store {
     /// Publishes a feature and all of its runtime projections atomically.
     /// `expected_revision` prevents a stale panel tab from overwriting a
     /// newer change made by another moderator.
+    #[allow(clippy::too_many_arguments)]
     pub fn publish_feature_setting(
         &self,
         guild_id: &str,
@@ -989,6 +990,7 @@ impl Store {
     /// Publishes the YouTube feature and its subscription projection in the
     /// same SQLite transaction. This keeps a stale revision or a failed
     /// subscription write from leaving the panel and worker out of sync.
+    #[allow(clippy::too_many_arguments)]
     pub fn publish_youtube_feature_setting(
         &self,
         guild_id: &str,
@@ -1075,6 +1077,7 @@ impl Store {
     }
 
     /// Publishes the RSS feature and its subscription projection atomically.
+    #[allow(clippy::too_many_arguments)]
     pub fn publish_rss_feature_setting(
         &self,
         guild_id: &str,
@@ -1167,6 +1170,7 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_youtube_subscription(
         &self,
         guild_id: &str,
@@ -1186,6 +1190,7 @@ impl Store {
         conn.query_row("SELECT id,guild_id,source_channel_id,target_channel_id,message_template,mention,enabled,interval_seconds,last_video_id,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM youtube_subscriptions WHERE id=?1", [id], youtube_subscription_from_row).map_err(Into::into)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_youtube_subscription(
         &self,
         guild_id: &str,
@@ -1239,6 +1244,7 @@ impl Store {
     }
 
     /// Publishes the Twitch feature and its EventSub delivery projection atomically.
+    #[allow(clippy::too_many_arguments)]
     pub fn publish_twitch_feature_setting(
         &self,
         guild_id: &str,
@@ -1331,6 +1337,7 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_twitch_subscription(
         &self,
         guild_id: &str,
@@ -1349,6 +1356,7 @@ impl Store {
         conn.query_row("SELECT id,guild_id,source_login,source_user_id,target_channel_id,message_template,mention,enabled,pending_event_id,pending_stream_id,pending_started_at,last_event_id,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM twitch_subscriptions WHERE id=?1", [id], twitch_subscription_from_row).map_err(Into::into)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_twitch_subscription(
         &self,
         guild_id: &str,
@@ -1430,6 +1438,7 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_rss_subscription(
         &self,
         guild_id: &str,
@@ -1449,6 +1458,7 @@ impl Store {
         conn.query_row("SELECT id,guild_id,feed_url,target_channel_id,message_template,mention,enabled,interval_seconds,last_item_id,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM rss_subscriptions WHERE id=?1", [id], rss_subscription_from_row).map_err(Into::into)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_rss_subscription(
         &self,
         guild_id: &str,

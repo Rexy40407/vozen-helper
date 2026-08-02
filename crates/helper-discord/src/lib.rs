@@ -33,11 +33,13 @@ use tracing::info;
 
 mod rank_card;
 
+type DuplicateMessageCache = Arc<Mutex<HashMap<String, VecDeque<(Instant, String)>>>>;
+
 #[derive(Clone)]
 struct Handler {
     store: Store,
     spam: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
-    duplicate_messages: Arc<Mutex<HashMap<String, VecDeque<(Instant, String)>>>>,
+    duplicate_messages: DuplicateMessageCache,
     joins: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
     nuke_events: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
     xp_awarded_at: Arc<Mutex<HashMap<String, Instant>>>,
