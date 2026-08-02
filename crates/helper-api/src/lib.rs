@@ -1840,20 +1840,33 @@ async fn guild_context(
             .unwrap_or_else(|_| Client::new());
         let auth = format!("Bot {}", state.discord_token);
         let channels_result = client
-            .get(format!("https://discord.com/api/v10/guilds/{}/channels", guild.guild_id))
+            .get(format!(
+                "https://discord.com/api/v10/guilds/{}/channels",
+                guild.guild_id
+            ))
             .header(header::AUTHORIZATION, &auth)
             .send()
             .await;
         let roles_result = client
-            .get(format!("https://discord.com/api/v10/guilds/{}/roles", guild.guild_id))
+            .get(format!(
+                "https://discord.com/api/v10/guilds/{}/roles",
+                guild.guild_id
+            ))
             .header(header::AUTHORIZATION, &auth)
             .send()
             .await;
         if let (Ok(channels_response), Ok(roles_response)) = (channels_result, roles_result)
-            && channels_response.status().is_success() && roles_response.status().is_success()
+            && channels_response.status().is_success()
+            && roles_response.status().is_success()
         {
-            let channel_values = channels_response.json::<Vec<serde_json::Value>>().await.unwrap_or_default();
-            let role_values = roles_response.json::<Vec<serde_json::Value>>().await.unwrap_or_default();
+            let channel_values = channels_response
+                .json::<Vec<serde_json::Value>>()
+                .await
+                .unwrap_or_default();
+            let role_values = roles_response
+                .json::<Vec<serde_json::Value>>()
+                .await
+                .unwrap_or_default();
             channels = channel_values.into_iter().filter_map(|value| {
                 let channel_type = value.get("type").and_then(serde_json::Value::as_i64).unwrap_or(0);
                 if channel_type != 0 && channel_type != 5 { return None; }
@@ -1894,7 +1907,9 @@ struct QuickSetupStepUpdate {
     expected_revision: Option<u64>,
 }
 
-fn quick_default_true() -> bool { true }
+fn quick_default_true() -> bool {
+    true
+}
 
 fn empty_quick_setup(guild_id: &str) -> serde_json::Value {
     serde_json::json!({
@@ -1913,14 +1928,33 @@ fn empty_quick_setup(guild_id: &str) -> serde_json::Value {
 }
 
 fn read_quick_setup(state: &ApiState, guild_id: &str) -> serde_json::Value {
-    state.store.get_setting(guild_id, QUICK_SETUP_KEY).ok().flatten()
+    state
+        .store
+        .get_setting(guild_id, QUICK_SETUP_KEY)
+        .ok()
+        .flatten()
         .and_then(|value| serde_json::from_str(&value).ok())
         .unwrap_or_else(|| empty_quick_setup(guild_id))
 }
 
-async fn discord_create_channel(state: &ApiState, guild_id: &str, name: &str) -> Result<(String, String), (StatusCode, Json<ApiError>)> {
-    if state.discord_token.len() < 20 { return Err(client_error(StatusCode::SERVICE_UNAVAILABLE, "discord_adapter_unavailable")); }
-    let safe_name: String = name.chars().filter(|character| character.is_ascii_alphanumeric() || *character == '-' || *character == '_').take(90).collect();
+async fn discord_create_channel(
+    state: &ApiState,
+    guild_id: &str,
+    name: &str,
+) -> Result<(String, String), (StatusCode, Json<ApiError>)> {
+    if state.discord_token.len() < 20 {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "discord_adapter_unavailable",
+        ));
+    }
+    let safe_name: String = name
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || *character == '-' || *character == '_'
+        })
+        .take(90)
+        .collect();
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
@@ -1929,21 +1963,53 @@ async fn discord_create_channel(state: &ApiState, guild_id: &str, name: &str) ->
         .header(header::AUTHORIZATION, format!("Bot {}", state.discord_token))
         .json(&serde_json::json!({"name": if safe_name.is_empty() { "vozen-setup" } else { &safe_name }, "type": 0, "reason": "Vozen Quick Setup"}))
         .send().await.map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_unreachable"))?;
-    if !response.status().is_success() { return Err(client_error(StatusCode::BAD_GATEWAY, "discord_channel_create_failed")); }
-    let value = response.json::<serde_json::Value>().await.map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_invalid_response"))?;
-    let id = value.get("id").and_then(serde_json::Value::as_str).ok_or_else(|| client_error(StatusCode::BAD_GATEWAY, "discord_invalid_response"))?;
+    if !response.status().is_success() {
+        return Err(client_error(
+            StatusCode::BAD_GATEWAY,
+            "discord_channel_create_failed",
+        ));
+    }
+    let value = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_invalid_response"))?;
+    let id = value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| client_error(StatusCode::BAD_GATEWAY, "discord_invalid_response"))?;
     Ok((id.to_string(), safe_name))
 }
 
-async fn discord_find_resource(state: &ApiState, guild_id: &str, name: &str, resource: &str) -> Option<(String, String)> {
-    if state.discord_token.len() < 20 { return None; }
-    let endpoint = if resource == "role" { format!("https://discord.com/api/v10/guilds/{guild_id}/roles") } else { format!("https://discord.com/api/v10/guilds/{guild_id}/channels") };
+async fn discord_find_resource(
+    state: &ApiState,
+    guild_id: &str,
+    name: &str,
+    resource: &str,
+) -> Option<(String, String)> {
+    if state.discord_token.len() < 20 {
+        return None;
+    }
+    let endpoint = if resource == "role" {
+        format!("https://discord.com/api/v10/guilds/{guild_id}/roles")
+    } else {
+        format!("https://discord.com/api/v10/guilds/{guild_id}/channels")
+    };
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .unwrap_or_else(|_| Client::new());
-    let response = client.get(endpoint).header(header::AUTHORIZATION, format!("Bot {}", state.discord_token)).send().await.ok()?;
-    if !response.status().is_success() { return None; }
+    let response = client
+        .get(endpoint)
+        .header(
+            header::AUTHORIZATION,
+            format!("Bot {}", state.discord_token),
+        )
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
     let values = response.json::<Vec<serde_json::Value>>().await.ok()?;
     values.into_iter().find_map(|value| {
         let value_name = value.get("name").and_then(serde_json::Value::as_str)?;
@@ -1952,10 +2018,26 @@ async fn discord_find_resource(state: &ApiState, guild_id: &str, name: &str, res
     })
 }
 
-async fn discord_create_role(state: &ApiState, guild_id: &str, name: &str) -> Result<(String, String), (StatusCode, Json<ApiError>)> {
-    if state.discord_token.len() < 20 { return Err(client_error(StatusCode::SERVICE_UNAVAILABLE, "discord_adapter_unavailable")); }
-    let safe_name: String = name.trim().chars().filter(|character| !character.is_control()).take(80).collect();
-    if safe_name.is_empty() { return Err(client_error(StatusCode::BAD_REQUEST, "role_name_required")); }
+async fn discord_create_role(
+    state: &ApiState,
+    guild_id: &str,
+    name: &str,
+) -> Result<(String, String), (StatusCode, Json<ApiError>)> {
+    if state.discord_token.len() < 20 {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "discord_adapter_unavailable",
+        ));
+    }
+    let safe_name: String = name
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(80)
+        .collect();
+    if safe_name.is_empty() {
+        return Err(client_error(StatusCode::BAD_REQUEST, "role_name_required"));
+    }
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
@@ -1964,9 +2046,20 @@ async fn discord_create_role(state: &ApiState, guild_id: &str, name: &str) -> Re
         .header(header::AUTHORIZATION, format!("Bot {}", state.discord_token))
         .json(&serde_json::json!({"name": safe_name, "permissions": "0", "mentionable": false, "reason": "Vozen Quick Setup"}))
         .send().await.map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_unreachable"))?;
-    if !response.status().is_success() { return Err(client_error(StatusCode::BAD_GATEWAY, "discord_role_create_failed")); }
-    let value = response.json::<serde_json::Value>().await.map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_invalid_response"))?;
-    let id = value.get("id").and_then(serde_json::Value::as_str).ok_or_else(|| client_error(StatusCode::BAD_GATEWAY, "discord_invalid_response"))?;
+    if !response.status().is_success() {
+        return Err(client_error(
+            StatusCode::BAD_GATEWAY,
+            "discord_role_create_failed",
+        ));
+    }
+    let value = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_invalid_response"))?;
+    let id = value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| client_error(StatusCode::BAD_GATEWAY, "discord_invalid_response"))?;
     Ok((id.to_string(), safe_name))
 }
 
@@ -1985,9 +2078,13 @@ async fn quick_setup_dismiss(
     let claims = require_mutation_auth(&state, &headers)?;
     let mut value = read_quick_setup(&state, &claims.guild_id);
     value["status"] = serde_json::json!("dismissed");
-    value["revision"] = serde_json::json!(value["revision"].as_u64().unwrap_or(0).saturating_add(1));
+    value["revision"] =
+        serde_json::json!(value["revision"].as_u64().unwrap_or(0).saturating_add(1));
     value["updatedAt"] = serde_json::json!(Utc::now().to_rfc3339());
-    state.store.set_setting(&claims.guild_id, QUICK_SETUP_KEY, &value.to_string()).map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    state
+        .store
+        .set_setting(&claims.guild_id, QUICK_SETUP_KEY, &value.to_string())
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     Ok(Json(value))
 }
 
@@ -1999,23 +2096,55 @@ async fn quick_setup_step(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
     if !["welcome", "roles", "moderation", "protection"].contains(&step.as_str()) {
-        return Err(client_error(StatusCode::BAD_REQUEST, "unknown_quick_setup_step"));
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "unknown_quick_setup_step",
+        ));
     }
     if !["applied", "skipped"].contains(&update.status.as_str()) {
-        return Err(client_error(StatusCode::BAD_REQUEST, "invalid_quick_setup_status"));
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_quick_setup_status",
+        ));
     }
     let mut value = read_quick_setup(&state, &claims.guild_id);
     let revision = value["revision"].as_u64().unwrap_or(0);
-    if update.expected_revision.is_some_and(|expected| expected != revision) {
-        return Err(client_error(StatusCode::CONFLICT, "quick_setup_revision_conflict"));
+    if update
+        .expected_revision
+        .is_some_and(|expected| expected != revision)
+    {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "quick_setup_revision_conflict",
+        ));
     }
     let mut normalized_config = update.config.clone();
     let mut created_resources = Vec::new();
-    let create_channel = update.config.get("createChannel").and_then(serde_json::Value::as_bool).unwrap_or(false);
-    let channel_key = if step == "moderation" || step == "protection" { "logChannel" } else { "channel" };
-    if create_channel && update.config.get(channel_key).and_then(serde_json::Value::as_str).is_none_or(str::is_empty) {
-        let suggested = match step.as_str() { "welcome" => "boas-vindas", "roles" => "escolhe-cargos", _ => "vozen-alertas" };
-        let (id, name, resource_state) = if let Some((id, name)) = discord_find_resource(&state, &claims.guild_id, suggested, "channel").await {
+    let create_channel = update
+        .config
+        .get("createChannel")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let channel_key = if step == "moderation" || step == "protection" {
+        "logChannel"
+    } else {
+        "channel"
+    };
+    if create_channel
+        && update
+            .config
+            .get(channel_key)
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        let suggested = match step.as_str() {
+            "welcome" => "boas-vindas",
+            "roles" => "escolhe-cargos",
+            _ => "vozen-alertas",
+        };
+        let (id, name, resource_state) = if let Some((id, name)) =
+            discord_find_resource(&state, &claims.guild_id, suggested, "channel").await
+        {
             (id, name, "reused")
         } else {
             let (id, name) = discord_create_channel(&state, &claims.guild_id, suggested).await?;
@@ -2025,10 +2154,20 @@ async fn quick_setup_step(
         created_resources.push(serde_json::json!({"type": "channel", "name": format!("#{name}"), "id": id, "state": resource_state}));
     }
     if step == "roles" {
-        let role_names = update.config.get("roleNames").and_then(serde_json::Value::as_str).unwrap_or("").split(',').map(str::trim).filter(|name| !name.is_empty()).take(5);
+        let role_names = update
+            .config
+            .get("roleNames")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .take(5);
         let mut role_ids = Vec::new();
         for role_name in role_names {
-            let (id, name, resource_state) = if let Some((id, name)) = discord_find_resource(&state, &claims.guild_id, role_name, "role").await {
+            let (id, name, resource_state) = if let Some((id, name)) =
+                discord_find_resource(&state, &claims.guild_id, role_name, "role").await
+            {
                 (id, name, "reused")
             } else {
                 let (id, name) = discord_create_role(&state, &claims.guild_id, role_name).await?;
@@ -2039,21 +2178,43 @@ async fn quick_setup_step(
         }
         normalized_config["roleIds"] = serde_json::Value::Array(role_ids);
     }
-    if let Some(steps) = value["steps"].as_array_mut() {
-        if let Some(item) = steps.iter_mut().find(|item| item.get("key").and_then(serde_json::Value::as_str) == Some(step.as_str())) {
-            item["status"] = serde_json::json!(update.status);
-            item["updatedAt"] = serde_json::json!(Utc::now().to_rfc3339());
-            item["summary"] = serde_json::json!(format!("Etapa {} guardada pelo painel", step));
-        }
+    if let Some(steps) = value["steps"].as_array_mut()
+        && let Some(item) = steps
+            .iter_mut()
+            .find(|item| item.get("key").and_then(serde_json::Value::as_str) == Some(step.as_str()))
+    {
+        item["status"] = serde_json::json!(update.status);
+        item["updatedAt"] = serde_json::json!(Utc::now().to_rfc3339());
+        item["summary"] = serde_json::json!(format!("Etapa {} guardada pelo painel", step));
     }
-    let next = ["welcome", "roles", "moderation", "protection"].iter().find(|candidate| value["steps"].as_array().is_some_and(|steps| steps.iter().any(|item| item.get("key").and_then(serde_json::Value::as_str) == Some(**candidate) && item.get("status").and_then(serde_json::Value::as_str) == Some("pending"))));
-    value["currentStep"] = next.map(|item| serde_json::json!(*item)).unwrap_or(serde_json::Value::Null);
-    value["status"] = if next.is_none() { serde_json::json!("completed") } else { serde_json::json!("in_progress") };
+    let next = ["welcome", "roles", "moderation", "protection"]
+        .iter()
+        .find(|candidate| {
+            value["steps"].as_array().is_some_and(|steps| {
+                steps.iter().any(|item| {
+                    item.get("key").and_then(serde_json::Value::as_str) == Some(**candidate)
+                        && item.get("status").and_then(serde_json::Value::as_str) == Some("pending")
+                })
+            })
+        });
+    value["currentStep"] = next
+        .map(|item| serde_json::json!(*item))
+        .unwrap_or(serde_json::Value::Null);
+    value["status"] = if next.is_none() {
+        serde_json::json!("completed")
+    } else {
+        serde_json::json!("in_progress")
+    };
     value["revision"] = serde_json::json!(revision.saturating_add(1));
     value["updatedAt"] = serde_json::json!(Utc::now().to_rfc3339());
-    if !normalized_config.is_null() { value["draft"] = normalized_config; }
+    if !normalized_config.is_null() {
+        value["draft"] = normalized_config;
+    }
     value["createdResources"] = serde_json::Value::Array(created_resources);
-    state.store.set_setting(&claims.guild_id, QUICK_SETUP_KEY, &value.to_string()).map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    state
+        .store
+        .set_setting(&claims.guild_id, QUICK_SETUP_KEY, &value.to_string())
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     Ok(Json(value))
 }
 
