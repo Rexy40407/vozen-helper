@@ -32,6 +32,9 @@ export type RssSubscription = { id: number; feedUrl: string; targetChannelId: st
 export type TwitchSubscription = { id: number; sourceLogin: string; sourceUserId: string; targetChannelId: string; messageTemplate: string; mention: string; enabled: boolean; pendingEventId?: string | null; pendingStreamId?: string | null; pendingStartedAt?: string | null; nextPollAt: number; failureCount: number; lastError?: string | null };
 export type FeatureDetail = { guildId: string; key: string; enabled: boolean; config: FeatureConfig; revision?: number; maturity?: Feature['maturity']; configurable?: boolean; health?: { operational: boolean; issues?: Array<{ path: string; code: string; message: string; severity: string }> } };
 export type GuildContext = { guildId: string; name: string; permissions: string; channels: Array<{ id: string; name: string; type: string }>; roles: Array<{ id: string; name: string; position: number }>; hierarchy: { known: boolean; reason?: string }; capabilities: { channelSelectors: boolean; roleSelectors: boolean; permissionPreflight: boolean }; stale: boolean; message?: string };
+export type QuickSetupStepKey = 'welcome' | 'roles' | 'moderation' | 'protection';
+export type QuickSetupStep = { key: QuickSetupStepKey; status: 'pending' | 'applied' | 'skipped'; updatedAt?: string; summary?: string; revision?: number };
+export type QuickSetupState = { guildId: string; status: 'not_started' | 'in_progress' | 'completed' | 'dismissed'; currentStep: QuickSetupStepKey | null; revision: number; steps: QuickSetupStep[]; draft?: Record<string, unknown>; createdResources: Array<{ type: 'channel' | 'role' | 'message'; name: string; id?: string; state: 'planned' | 'created' | 'reused' }>; updatedAt?: string };
 export type CaseRecord = {
   id: number;
   kind?: string;
@@ -90,6 +93,10 @@ export const api = {
   me: () => request<Me>('/api/me'),
   guilds: () => request<{ guilds: Guild[] }>('/api/guilds'),
   guildContext: () => request<GuildContext>('/api/guild-context'),
+  quickSetup: () => request<QuickSetupState>('/api/quick-setup'),
+  saveQuickSetupStep: (step: QuickSetupStepKey, payload: { status: 'applied' | 'skipped'; config?: Record<string, unknown>; enabled?: boolean; expectedRevision?: number }) =>
+    request<QuickSetupState>(`/api/quick-setup/steps/${step}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: payload.status, config: payload.config ?? {}, enabled: payload.enabled ?? true, expected_revision: payload.expectedRevision }) }),
+  dismissQuickSetup: () => request<QuickSetupState>('/api/quick-setup/dismiss', { method: 'POST', headers: { 'Content-Type': 'application/json' } }),
   switchGuild: (guildId: string) => request<{ ok: boolean; guildId: string }>('/api/session/switch', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
