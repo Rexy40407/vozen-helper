@@ -1,7 +1,9 @@
 //! Pure configuration and policy primitives. No Discord or HTTP side effects.
 
 use anyhow::{Context, Result};
-use helper_contracts::{FeatureMaturity, Plan};
+use helper_contracts::{
+    AntiSpamDecision, AntiSpamObservation, AntiSpamPolicy, FeatureMaturity, Plan,
+};
 use serde::Deserialize;
 use std::{env, net::IpAddr, path::PathBuf, str::FromStr};
 
@@ -48,7 +50,7 @@ impl Config {
             oauth_client_secret: required("DISCORD_OAUTH_CLIENT_SECRET")?,
             oauth_redirect_uri: required("DISCORD_OAUTH_REDIRECT_URI")?,
             oauth_success_redirect: env::var("HELPER_OAUTH_SUCCESS_REDIRECT")
-                .unwrap_or_else(|_| "https://rexy40407.github.io/vozen-helper-bot/".into()),
+                .unwrap_or_else(|_| "https://rexy40407.github.io/Vozen_Helper/".into()),
             allow_legacy_session: env::var("HELPER_ALLOW_LEGACY_SESSION")
                 .is_ok_and(|value| value.eq_ignore_ascii_case("true")),
             session_secret: required("HELPER_SESSION_SECRET")?,
@@ -149,6 +151,107 @@ pub const FEATURE_KEYS: &[&str] = &[
 
 pub fn is_known_feature(key: &str) -> bool {
     FEATURE_KEYS.contains(&key)
+}
+
+/// Parse the JSON feature representation into the bounded anti-spam policy
+/// shared by the API and gateway.
+pub fn anti_spam_policy_from_json(value: &serde_json::Value) -> AntiSpamPolicy {
+    let mut policy = AntiSpamPolicy::default();
+    let Some(object) = value.as_object() else {
+        return policy;
+    };
+    let number = |name: &str| object.get(name).and_then(serde_json::Value::as_u64);
+    if let Some(value) = number("floodCount") {
+        policy.flood_count = value.clamp(3, 30) as u32;
+    }
+    if let Some(value) = number("windowSeconds") {
+        policy.window_seconds = value.clamp(3, 60);
+    }
+    if let Some(value) = number("duplicateLimit") {
+        policy.duplicate_limit = value.clamp(2, 12) as u32;
+    }
+    if let Some(value) = number("mentionLimit") {
+        policy.mention_limit = value.clamp(1, 30) as u32;
+    }
+    if let Some(value) = number("timeoutSeconds") {
+        policy.timeout_seconds = value.min(86_400);
+    }
+    if let Some(value) = object
+        .get("ignoredChannels")
+        .and_then(serde_json::Value::as_array)
+    {
+        policy.ignored_channels = value
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect();
+    }
+    if let Some(value) = object
+        .get("ignoredRoles")
+        .and_then(serde_json::Value::as_array)
+    {
+        policy.ignored_roles = value
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect();
+    }
+    if let Some(value) = object.get("alertOnly").and_then(serde_json::Value::as_bool) {
+        policy.alert_only = value;
+    }
+    policy
+}
+
+/// Evaluate one message observation without Discord side effects. This is the
+/// sole place where anti-spam matching precedence is decided.
+pub fn evaluate_anti_spam(
+    policy: &AntiSpamPolicy,
+    observation: &AntiSpamObservation,
+) -> AntiSpamDecision {
+    let ignored = policy
+        .ignored_channels
+        .iter()
+        .any(|channel| channel == &observation.channel_id)
+        || observation
+            .role_ids
+            .iter()
+            .any(|role| policy.ignored_roles.iter().any(|ignored| ignored == role));
+    if ignored {
+        return AntiSpamDecision {
+            ignored: true,
+            matched: Vec::new(),
+            should_act: false,
+            timeout_seconds: 0,
+            reason: "channel_or_role_exempt".into(),
+        };
+    }
+    let mut matched = Vec::new();
+    if observation.message_count >= policy.flood_count {
+        matched.push("flood".into());
+    }
+    if observation.duplicate_count >= policy.duplicate_limit {
+        matched.push("duplicate".into());
+    }
+    if observation.mention_count >= policy.mention_limit {
+        matched.push("mentions".into());
+    }
+    let should_act = !matched.is_empty() && !policy.alert_only;
+    let reason = if matched.is_empty() {
+        "no_match".into()
+    } else {
+        format!("matched:{}", matched.join(","))
+    };
+    AntiSpamDecision {
+        ignored: false,
+        matched,
+        should_act,
+        timeout_seconds: if should_act {
+            policy.timeout_seconds
+        } else {
+            0
+        },
+        reason,
+    }
 }
 
 /// Canonical lifecycle policy for the feature catalogue.  Labels and copy are
@@ -274,5 +377,72 @@ mod tests {
         assert_eq!(keys.len(), 52);
         assert!(is_known_feature("community.leaderboard"));
         assert!(!is_known_feature("community.not_a_real_feature"));
+    }
+
+    #[test]
+    fn anti_spam_evaluator_explains_matches_and_respects_alert_only() {
+        let policy = anti_spam_policy_from_json(&serde_json::json!({
+            "floodCount": 5,
+            "windowSeconds": 12,
+            "duplicateLimit": 2,
+            "mentionLimit": 4,
+            "timeoutSeconds": 90,
+        }));
+        let decision = evaluate_anti_spam(
+            &policy,
+            &AntiSpamObservation {
+                channel_id: "general".into(),
+                role_ids: vec![],
+                message_count: 5,
+                duplicate_count: 2,
+                mention_count: 4,
+            },
+        );
+        assert_eq!(decision.matched, vec!["flood", "duplicate", "mentions"]);
+        assert!(decision.should_act);
+        assert_eq!(decision.timeout_seconds, 90);
+        assert!(decision.reason.contains("matched:flood,duplicate,mentions"));
+
+        let monitor = AntiSpamPolicy {
+            alert_only: true,
+            ..policy
+        };
+        let decision = evaluate_anti_spam(
+            &monitor,
+            &AntiSpamObservation {
+                channel_id: "general".into(),
+                role_ids: vec![],
+                message_count: 5,
+                duplicate_count: 0,
+                mention_count: 0,
+            },
+        );
+        assert!(!decision.should_act);
+        assert_eq!(decision.timeout_seconds, 0);
+        assert_eq!(decision.matched, vec!["flood"]);
+    }
+
+    #[test]
+    fn anti_spam_exemptions_short_circuit_before_matching() {
+        let policy = AntiSpamPolicy {
+            ignored_channels: vec!["staff".into()],
+            ignored_roles: vec!["trusted".into()],
+            ..AntiSpamPolicy::default()
+        };
+        for (channel_id, role_ids) in [("staff", vec![]), ("general", vec!["trusted".into()])] {
+            let decision = evaluate_anti_spam(
+                &policy,
+                &AntiSpamObservation {
+                    channel_id: channel_id.into(),
+                    role_ids,
+                    message_count: 99,
+                    duplicate_count: 99,
+                    mention_count: 99,
+                },
+            );
+            assert!(decision.ignored);
+            assert!(!decision.should_act);
+            assert!(decision.matched.is_empty());
+        }
     }
 }

@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use helper_contracts::Plan;
-use helper_core::{Config, quota_limit};
+use helper_contracts::{AntiSpamObservation, AntiSpamPolicy, Plan};
+use helper_core::{Config, anti_spam_policy_from_json, evaluate_anti_spam, quota_limit};
 use helper_modules::{
     EntitlementClient, RssClient, RssItem, TwitchClient, YouTubeClient, YouTubeVideo,
 };
@@ -40,6 +40,7 @@ struct Handler {
     store: Store,
     spam: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
     duplicate_messages: DuplicateMessageCache,
+    spam_action_at: Arc<Mutex<HashMap<String, Instant>>>,
     joins: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
     nuke_events: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
     xp_awarded_at: Arc<Mutex<HashMap<String, Instant>>>,
@@ -1584,7 +1585,27 @@ impl EventHandler for Handler {
         let serenity::all::ReactionType::Unicode(emoji) = &reaction.emoji else {
             return;
         };
-        if emoji != "⭐" && emoji != "🌟" {
+        let configured_emoji = setting_string(
+            &self.store,
+            &guild_id.to_string(),
+            "community.starboard.emoji",
+        )
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "⭐".to_string());
+        if emoji != &configured_emoji && emoji != "🌟" {
+            return;
+        }
+        let ignored_channels = setting_string(
+            &self.store,
+            &guild_id.to_string(),
+            "community.starboard.ignored_channels",
+        )
+        .unwrap_or_default();
+        if ignored_channels
+            .split(',')
+            .map(str::trim)
+            .any(|channel| channel == reaction.channel_id.to_string())
+        {
             return;
         }
         let Ok(Some(raw_board_id)) = self
@@ -1621,11 +1642,36 @@ impl EventHandler for Handler {
             Ok(message) => message,
             Err(_) => return,
         };
+        if !setting_bool(
+            &self.store,
+            &guild_id.to_string(),
+            "community.starboard.allow_self_star",
+            false,
+        ) && reaction.user_id == Some(original.author.id)
+        {
+            return;
+        }
+        if !setting_bool(
+            &self.store,
+            &guild_id.to_string(),
+            "community.starboard.include_images",
+            true,
+        ) && !original.attachments.is_empty()
+        {
+            return;
+        }
         let link = format!(
             "https://discord.com/channels/{}/{}/{}",
             guild_id, reaction.channel_id, reaction.message_id
         );
-        if count < 3 {
+        let threshold = setting_i64(
+            &self.store,
+            &guild_id.to_string(),
+            "community.starboard.threshold",
+            3,
+        )
+        .clamp(1, 100);
+        if count < threshold {
             if let Ok(Some(entry)) = self
                 .store
                 .star_entry(&guild_id.to_string(), &reaction.message_id.to_string())
@@ -1763,37 +1809,8 @@ impl EventHandler for Handler {
                 .await;
         }
         if feature_enabled(&self.store, &guild_text, "protection.antispam", None) {
-            let flood_count =
-                setting_u64(&self.store, &guild_text, "security.antispam.flood_count", 6)
-                    .clamp(3, 30) as usize;
-            let window_seconds = setting_u64(
-                &self.store,
-                &guild_text,
-                "security.antispam.window_seconds",
-                10,
-            )
-            .clamp(3, 60);
-            let duplicate_limit = setting_u64(
-                &self.store,
-                &guild_text,
-                "security.antispam.duplicate_limit",
-                3,
-            )
-            .clamp(2, 12) as usize;
-            let mention_limit = setting_u64(
-                &self.store,
-                &guild_text,
-                "security.antispam.mention_limit",
-                5,
-            )
-            .clamp(1, 30) as usize;
-            let timeout_seconds = setting_u64(
-                &self.store,
-                &guild_text,
-                "security.antispam.timeout_seconds",
-                60,
-            )
-            .min(86_400);
+            let policy = anti_spam_policy_for_store(&self.store, &guild_text);
+            let window_seconds = policy.window_seconds;
             let now = Instant::now();
             let key = format!("{}:{}", guild_id, message.author.id);
             let count = {
@@ -1814,7 +1831,7 @@ impl EventHandler for Handler {
                     .duplicate_messages
                     .lock()
                     .expect("duplicate spam mutex poisoned");
-                let recent = messages.entry(key).or_default();
+                let recent = messages.entry(key.clone()).or_default();
                 while recent.front().is_some_and(|(at, _)| {
                     now.duration_since(*at) > Duration::from_secs(window_seconds)
                 }) {
@@ -1826,47 +1843,98 @@ impl EventHandler for Handler {
                     .filter(|(_, content)| content == &normalized)
                     .count()
             };
-            let mention_count = message.mentions.len();
-            let mention_violation = mention_count >= mention_limit;
-            if count == flood_count || duplicate_count == duplicate_limit || mention_violation {
-                let _ = self.store.record_case(
-                    &guild_id.to_string(),
-                    "anti-spam",
-                    &message.author.id.to_string(),
-                    &message.author.id.to_string(),
-                    &format!(
-                        "Spam detetado: {count} mensagens/{window_seconds}s, {duplicate_count} repetidas, {mention_count} menções"
-                    ),
-                    None,
-                );
-                if !setting_bool(
-                    &self.store,
-                    &guild_text,
-                    "security.antispam.alert_only",
-                    false,
-                ) {
-                    if timeout_seconds > 0 {
-                        let until = (chrono::Utc::now()
-                            + chrono::Duration::seconds(timeout_seconds as i64))
-                        .to_rfc3339();
-                        let _ = guild_id
-                            .edit_member(
+            let role_ids = message
+                .member
+                .as_ref()
+                .map(|member| member.roles.iter().map(ToString::to_string).collect())
+                .unwrap_or_default();
+            let decision = evaluate_anti_spam(
+                &policy,
+                &AntiSpamObservation {
+                    channel_id: message.channel_id.to_string(),
+                    role_ids,
+                    message_count: count as u32,
+                    duplicate_count: duplicate_count as u32,
+                    mention_count: message.mentions.len() as u32,
+                },
+            );
+            if !decision.ignored && !decision.matched.is_empty() {
+                let should_emit = {
+                    let mut actions = self
+                        .spam_action_at
+                        .lock()
+                        .expect("spam action mutex poisoned");
+                    actions.retain(|_, at| {
+                        now.duration_since(*at)
+                            < Duration::from_secs(window_seconds.saturating_mul(2))
+                    });
+                    let allowed = actions.get(&key).is_none_or(|at| {
+                        now.duration_since(*at) >= Duration::from_secs(window_seconds)
+                    });
+                    if allowed {
+                        actions.insert(key.clone(), now);
+                    }
+                    allowed
+                };
+                if should_emit {
+                    let _ = self.store.record_case(
+                        &guild_id.to_string(),
+                        "anti-spam",
+                        &message.author.id.to_string(),
+                        &message.author.id.to_string(),
+                        &format!(
+                            "Spam detetado ({signals}): {count} mensagens/{window_seconds}s, {duplicate_count} repetidas, {mention_count} menções",
+                            signals = decision.matched.join(", "),
+                            mention_count = message.mentions.len(),
+                        ),
+                        None,
+                    );
+                    if let Some(raw_channel) =
+                        setting_string(&self.store, &guild_text, "security.antispam.log_channel")
+                            .filter(|value| !value.trim().is_empty())
+                        && let Ok(channel) = raw_channel.parse::<u64>()
+                    {
+                        let _ = ChannelId::new(channel)
+                            .say(
                                 &ctx.http,
-                                message.author.id,
-                                serenity::all::EditMember::new().disable_communication_until(until),
+                                format!(
+                                    "Anti-spam: <@{}> — {} ({})",
+                                    message.author.id,
+                                    decision.reason,
+                                    if decision.should_act {
+                                        "ação"
+                                    } else {
+                                        "monitorização"
+                                    },
+                                ),
                             )
                             .await;
                     }
-                    let _ = message
-                        .channel_id
-                        .say(
-                            &ctx.http,
-                            format!(
-                                "<@{}>, abranda o ritmo — o anti-spam registou este incidente.",
-                                message.author.id
-                            ),
-                        )
-                        .await;
+                    if decision.should_act {
+                        if decision.timeout_seconds > 0 {
+                            let until = (chrono::Utc::now()
+                                + chrono::Duration::seconds(decision.timeout_seconds as i64))
+                            .to_rfc3339();
+                            let _ = guild_id
+                                .edit_member(
+                                    &ctx.http,
+                                    message.author.id,
+                                    serenity::all::EditMember::new()
+                                        .disable_communication_until(until),
+                                )
+                                .await;
+                        }
+                        let _ = message
+                            .channel_id
+                            .say(
+                                &ctx.http,
+                                format!(
+                                    "<@{}>, abranda o ritmo — o anti-spam registou este incidente.",
+                                    message.author.id
+                                ),
+                            )
+                            .await;
+                    }
                 }
             }
         }
@@ -1920,6 +1988,7 @@ pub async fn run(config: &Config) -> Result<()> {
             store,
             spam: Arc::new(Mutex::new(HashMap::new())),
             duplicate_messages: Arc::new(Mutex::new(HashMap::new())),
+            spam_action_at: Arc::new(Mutex::new(HashMap::new())),
             joins: Arc::new(Mutex::new(HashMap::new())),
             nuke_events: Arc::new(Mutex::new(HashMap::new())),
             xp_awarded_at: Arc::new(Mutex::new(HashMap::new())),
@@ -4649,6 +4718,28 @@ fn setting_bool(store: &Store, guild_id: &str, key: &str, default: bool) -> bool
     setting_string(store, guild_id, key)
         .and_then(|value| value.parse::<bool>().ok())
         .unwrap_or(default)
+}
+
+fn anti_spam_policy_for_store(store: &Store, guild_id: &str) -> AntiSpamPolicy {
+    let csv = |key: &str| {
+        setting_string(store, guild_id, key)
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    anti_spam_policy_from_json(&serde_json::json!({
+        "floodCount": setting_u64(store, guild_id, "security.antispam.flood_count", 6),
+        "windowSeconds": setting_u64(store, guild_id, "security.antispam.window_seconds", 10),
+        "duplicateLimit": setting_u64(store, guild_id, "security.antispam.duplicate_limit", 3),
+        "mentionLimit": setting_u64(store, guild_id, "security.antispam.mention_limit", 5),
+        "timeoutSeconds": setting_u64(store, guild_id, "security.antispam.timeout_seconds", 60),
+        "ignoredChannels": csv("security.antispam.ignored_channels"),
+        "ignoredRoles": csv("security.antispam.ignored_roles"),
+        "alertOnly": setting_bool(store, guild_id, "security.antispam.alert_only", false),
+    }))
 }
 
 fn permission_passport_message() -> String {

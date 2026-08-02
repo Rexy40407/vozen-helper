@@ -13,12 +13,12 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use helper_contracts::Plan;
 use helper_contracts::{
-    ApiError, FeatureMaturity, RANK_CARD_BACKGROUND_PRESETS, RankCardConfig, SessionClaims,
-    SimulationResult, ValidationIssue,
+    AntiSpamDecision, AntiSpamObservation, ApiError, FeatureMaturity, RANK_CARD_BACKGROUND_PRESETS,
+    RankCardConfig, SessionClaims, SimulationResult, ValidationIssue,
 };
 use helper_core::{
-    Capability, FEATURE_SCHEMA_VERSION, feature_is_configurable, feature_maturity,
-    is_known_feature, quota_limit,
+    Capability, FEATURE_SCHEMA_VERSION, anti_spam_policy_from_json, evaluate_anti_spam,
+    feature_is_configurable, feature_maturity, is_known_feature, quota_limit,
 };
 use helper_modules::{EntitlementClient, RssClient, TwitchClient, YouTubeClient};
 use helper_store::{
@@ -2921,6 +2921,43 @@ fn sync_runtime_feature_config(
                     &value.to_string(),
                 )?;
             }
+            if let Some(value) = text("emoji") {
+                store.set_setting(guild_id, "community.starboard.emoji", value)?;
+            }
+            if let Some(value) = object
+                .and_then(|values| values.get("allowSelfStar"))
+                .and_then(serde_json::Value::as_bool)
+            {
+                store.set_setting(
+                    guild_id,
+                    "community.starboard.allow_self_star",
+                    &value.to_string(),
+                )?;
+            }
+            if let Some(value) = object
+                .and_then(|values| values.get("includeImages"))
+                .and_then(serde_json::Value::as_bool)
+            {
+                store.set_setting(
+                    guild_id,
+                    "community.starboard.include_images",
+                    &value.to_string(),
+                )?;
+            }
+            if let Some(values) = object
+                .and_then(|values| values.get("ignoredChannels"))
+                .and_then(serde_json::Value::as_array)
+            {
+                store.set_setting(
+                    guild_id,
+                    "community.starboard.ignored_channels",
+                    &values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )?;
+            }
         }
         "support.tickets" => {
             if let Some(value) = object
@@ -2999,6 +3036,34 @@ fn runtime_projection_pairs(key: &str, config: &serde_json::Value) -> Vec<(Strin
             if let Some(value) = number("threshold") {
                 add("community.starboard.threshold", value.to_string());
             }
+            if let Some(value) = text("emoji") {
+                add("community.starboard.emoji", value.to_string());
+            }
+            if let Some(value) = object
+                .and_then(|values| values.get("allowSelfStar"))
+                .and_then(serde_json::Value::as_bool)
+            {
+                add("community.starboard.allow_self_star", value.to_string());
+            }
+            if let Some(value) = object
+                .and_then(|values| values.get("includeImages"))
+                .and_then(serde_json::Value::as_bool)
+            {
+                add("community.starboard.include_images", value.to_string());
+            }
+            if let Some(values) = object
+                .and_then(|values| values.get("ignoredChannels"))
+                .and_then(serde_json::Value::as_array)
+            {
+                add(
+                    "community.starboard.ignored_channels",
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+            }
         }
         "support.tickets" => {
             if let Some(value) = object
@@ -3025,6 +3090,9 @@ fn runtime_projection_pairs(key: &str, config: &serde_json::Value) -> Vec<(Strin
             if let Some(value) = number("floodCount") {
                 add("security.antispam.flood_count", value.to_string());
             }
+            if let Some(value) = number("windowSeconds") {
+                add("security.antispam.window_seconds", value.to_string());
+            }
             if let Some(value) = number("duplicateLimit") {
                 add("security.antispam.duplicate_limit", value.to_string());
             }
@@ -3036,6 +3104,22 @@ fn runtime_projection_pairs(key: &str, config: &serde_json::Value) -> Vec<(Strin
             }
             if let Some(value) = text("logChannel") {
                 add("security.antispam.log_channel", value.to_string());
+            }
+            for (field, setting) in [
+                ("ignoredChannels", "security.antispam.ignored_channels"),
+                ("ignoredRoles", "security.antispam.ignored_roles"),
+            ] {
+                if let Some(values) = object
+                    .and_then(|values| values.get(field))
+                    .and_then(serde_json::Value::as_array)
+                {
+                    let serialized = values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    add(setting, serialized);
+                }
             }
             if let Some(value) = object
                 .and_then(|values| values.get("alertOnly"))
@@ -3152,6 +3236,42 @@ fn validate_feature_config(key: &str, config: &serde_json::Value) -> Vec<Validat
                 message: format!("O valor tem de estar entre {min} e {max}."),
                 severity: "error".into(),
             });
+        }
+    }
+    if key == "protection.antispam" {
+        if let Some(value) = config
+            .get("windowSeconds")
+            .and_then(serde_json::Value::as_i64)
+            && !(3..=60).contains(&value)
+        {
+            issues.push(ValidationIssue {
+                path: "windowSeconds".into(),
+                code: "out_of_range".into(),
+                message: "A janela do anti-spam tem de estar entre 3 e 60 segundos.".into(),
+                severity: "error".into(),
+            });
+        }
+        for field in ["ignoredChannels", "ignoredRoles"] {
+            if let Some(value) = config.get(field) {
+                let valid = value.as_array().is_some_and(|items| {
+                    items.len() <= 100
+                        && items.iter().all(|item| {
+                            item.as_str().is_some_and(|text| {
+                                !text.is_empty()
+                                    && text.chars().count() <= 64
+                                    && !text.chars().any(char::is_control)
+                            })
+                        })
+                });
+                if !valid {
+                    issues.push(ValidationIssue {
+                        path: field.into(),
+                        code: "invalid_exemptions".into(),
+                        message: "Indica no máximo 100 IDs ou nomes válidos.".into(),
+                        severity: "error".into(),
+                    });
+                }
+            }
         }
     }
     if key == "community.levels"
@@ -3351,6 +3471,8 @@ async fn update_feature_detail(
 #[derive(Debug, Deserialize)]
 struct FeatureTestRequest {
     config: serde_json::Value,
+    #[serde(default)]
+    fixture: Option<AntiSpamObservation>,
 }
 
 async fn test_feature(
@@ -3374,8 +3496,36 @@ async fn test_feature(
             severity: "error".into(),
         });
     }
+    let mut anti_spam_decision: Option<AntiSpamDecision> = None;
     let effects = match key.as_str() {
-        "protection.antispam" => vec!["Detetar flood e mensagens repetidas".into()],
+        "protection.antispam" => {
+            let fixture = test.fixture.unwrap_or_else(|| AntiSpamObservation {
+                channel_id: "preview-channel".into(),
+                role_ids: Vec::new(),
+                message_count: 6,
+                duplicate_count: 3,
+                mention_count: 5,
+            });
+            let decision = evaluate_anti_spam(&anti_spam_policy_from_json(&test.config), &fixture);
+            let effects = if decision.ignored {
+                vec!["Ignorar a mensagem por causa de uma exceção configurada".into()]
+            } else if decision.matched.is_empty() {
+                vec!["Não aplicar qualquer ação".into()]
+            } else if decision.should_act {
+                vec![format!(
+                    "Registar {} e aplicar timeout de {} segundo(s)",
+                    decision.matched.join(", "),
+                    decision.timeout_seconds
+                )]
+            } else {
+                vec![format!(
+                    "Registar {} em modo de monitorização, sem timeout",
+                    decision.matched.join(", ")
+                )]
+            };
+            anti_spam_decision = Some(decision);
+            effects
+        }
         "protection.anti_raid" => {
             vec!["Registar uma entrada anormal e aplicar a resposta escolhida".into()]
         }
@@ -3403,6 +3553,7 @@ async fn test_feature(
         "mode": "simulation",
         "maturity": maturity,
         "result": result,
+        "decision": anti_spam_decision,
     })))
 }
 
@@ -4821,6 +4972,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn anti_spam_simulation_uses_the_runtime_evaluator() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        let body = serde_json::json!({
+            "config": {
+                "floodCount": 4,
+                "windowSeconds": 12,
+                "duplicateLimit": 2,
+                "mentionLimit": 3,
+                "timeoutSeconds": 90,
+                "alertOnly": false
+            },
+            "fixture": {
+                "channel_id": "general",
+                "role_ids": [],
+                "message_count": 4,
+                "duplicate_count": 2,
+                "mention_count": 3
+            }
+        });
+        let response = router(state(store))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/config/features/protection.antispam/simulate")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                .unwrap();
+        assert_eq!(response["result"]["would_apply"], true);
+        assert_eq!(
+            response["decision"]["matched"],
+            serde_json::json!(["flood", "duplicate", "mentions"])
+        );
+        assert_eq!(response["decision"]["timeout_seconds"], 90);
+        assert!(
+            response["result"]["effects"][0]
+                .as_str()
+                .unwrap()
+                .contains("timeout")
+        );
     }
 
     #[tokio::test]

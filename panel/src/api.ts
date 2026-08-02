@@ -119,7 +119,7 @@ export const api = {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled, config, expected_revision: expectedRevision }),
     }),
   testFeature: (key: string, config: FeatureConfig) =>
-    request<{ key: string; wouldApply: boolean; issues: Array<{ path: string; code: string; message: string; severity: string }>; effects: string[] }>(`/api/config/features/${encodeURIComponent(key)}/simulate`, {
+    request<{ ok: boolean; key: string; preview: FeatureConfig; mode: string; maturity: string; result: { key: string; would_apply: boolean; issues: Array<{ path: string; code: string; message: string; severity: string }>; effects: string[] }; decision?: { ignored: boolean; matched: string[]; should_act: boolean; timeout_seconds: number; reason: string } | null }>(`/api/config/features/${encodeURIComponent(key)}/simulate`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config }),
     }),
   youtubeSubscriptions: () => request<{ guildId: string; subscriptions: YouTubeSubscription[] }>('/api/config/youtube'),

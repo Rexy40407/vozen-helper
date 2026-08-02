@@ -72,6 +72,56 @@ pub struct SimulationResult {
     pub effects: Vec<String>,
 }
 
+/// A bounded, guild-scoped policy for detecting message spam. The policy is
+/// independent from Discord so API simulation and the live gateway share the
+/// same decision function.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AntiSpamPolicy {
+    pub flood_count: u32,
+    pub window_seconds: u64,
+    pub duplicate_limit: u32,
+    pub mention_limit: u32,
+    pub timeout_seconds: u64,
+    pub ignored_channels: Vec<String>,
+    pub ignored_roles: Vec<String>,
+    pub alert_only: bool,
+}
+
+impl Default for AntiSpamPolicy {
+    fn default() -> Self {
+        Self {
+            flood_count: 6,
+            window_seconds: 10,
+            duplicate_limit: 3,
+            mention_limit: 5,
+            timeout_seconds: 60,
+            ignored_channels: Vec::new(),
+            ignored_roles: Vec::new(),
+            alert_only: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AntiSpamObservation {
+    pub channel_id: String,
+    #[serde(default)]
+    pub role_ids: Vec<String>,
+    pub message_count: u32,
+    pub duplicate_count: u32,
+    pub mention_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AntiSpamDecision {
+    pub ignored: bool,
+    pub matched: Vec<String>,
+    pub should_act: bool,
+    pub timeout_seconds: u64,
+    pub reason: String,
+}
+
 /// Curated, moderator-safe backgrounds available to every guild.
 pub const RANK_CARD_BACKGROUND_PRESETS: &[(&str, &str)] = &[
     ("aurora-lake", "Aurora Lake"),
