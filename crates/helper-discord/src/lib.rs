@@ -4613,7 +4613,6 @@ fn english_bot_text(input: &str) -> String {
         ("Setup:", "Setup:"),
         ("Módulos:", "Modules:"),
         ("concluído", "complete"),
-        ("concluÃ­do", "complete"),
         ("pendente", "pending"),
         ("nenhum", "none"),
         ("Painel:", "Dashboard:"),
@@ -4624,10 +4623,6 @@ fn english_bot_text(input: &str) -> String {
         ("Plano ", "Plan "),
         (
             "Não foi possível consultar o plano agora; o Helper mantém o último snapshot seguro.",
-            "Unable to check the plan right now; Helper is keeping the last safe snapshot.",
-        ),
-        (
-            "NÃ£o foi possÃ­vel consultar o plano agora; o Helper mantém o último snapshot seguro.",
             "Unable to check the plan right now; Helper is keeping the last safe snapshot.",
         ),
         (
@@ -4663,7 +4658,6 @@ fn english_bot_text(input: &str) -> String {
             "Não encontrei mensagens para apagar.",
             "No messages found to delete.",
         ),
-        ("Softban concluÃ­do como caso", "Softban completed as case"),
         ("Softban concluído como caso", "Softban completed as case"),
         ("Tempban concluído como caso", "Tempban completed as case"),
         ("expira em", "expires in"),
