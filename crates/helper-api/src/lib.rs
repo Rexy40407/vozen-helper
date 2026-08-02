@@ -423,7 +423,7 @@ async fn youtube_health(
         "configured": configured,
         "status": if configured { "ready" } else { "missing_credentials" },
         "message": if configured {
-            "A integração oficial está pronta para validar canais públicos."
+            "The official integration is ready to validate public channels."
         } else {
             "Adiciona YOUTUBE_API_KEY apenas no ambiente do servidor."
         }
@@ -504,7 +504,7 @@ fn validate_youtube_subscription(
     }
     let template = input
         .message_template
-        .unwrap_or_else(|| "Novo vídeo de {channel}: **{title}**\n{url}".into());
+        .unwrap_or_else(|| "New video from {channel}: **{title}**\n{url}".into());
     if template.trim().is_empty() || template.chars().count() > 1_800 {
         return Err("invalid_youtube_template");
     }
@@ -845,7 +845,7 @@ fn validate_rss_subscription(
     }
     let template = input
         .message_template
-        .unwrap_or_else(|| "Nova publicação em {feed}: **{title}**\n{url}".into());
+        .unwrap_or_else(|| "New post from {feed}: **{title}**\n{url}".into());
     if template.trim().is_empty() || template.chars().count() > 1_800 {
         return Err("invalid_rss_template");
     }
@@ -1136,7 +1136,7 @@ fn validate_twitch_subscription(
     }
     let template = input
         .message_template
-        .unwrap_or_else(|| "{broadcaster} está ao vivo!\nhttps://twitch.tv/{login}".to_string());
+        .unwrap_or_else(|| "{broadcaster} is live!\nhttps://twitch.tv/{login}".to_string());
     if template.trim().is_empty() || template.chars().count() > 1_800 {
         return Err("invalid_twitch_template");
     }
@@ -1194,7 +1194,7 @@ async fn twitch_health(
         "configured": configured,
         "status": if configured { "ready" } else { "missing_credentials" },
         "message": if configured {
-            "A integração oficial da Twitch está pronta para EventSub."
+            "The official Twitch integration is ready for EventSub."
         } else {
             "Adiciona TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET e TWITCH_EVENTSUB_SECRET apenas no servidor."
         }
@@ -1892,7 +1892,7 @@ async fn guild_context(
             "permissionPreflight": !permissions.is_empty() && !stale
         },
         "stale": stale,
-        "message": if stale { Some("Não foi possível atualizar os canais e cargos com o bot.") } else { None::<&str> }
+        "message": if stale { Some("Unable to refresh channels and roles from Discord.") } else { None::<&str> }
     })))
 }
 
@@ -1943,7 +1943,7 @@ async fn preflight(
         issues.push(ValidationIssue {
             path: "permissions.moderate_members".into(),
             code: "missing_permission".into(),
-            message: "Falta a permissão Moderar membros para aplicar timeouts. Podes publicar em modo de alerta.".into(),
+            message: "The Moderate Members permission is required to apply timeouts. You can publish in alert-only mode.".into(),
             severity: "error".into(),
         });
     }
@@ -1951,8 +1951,7 @@ async fn preflight(
         issues.push(ValidationIssue {
             path: "permissions.send_messages".into(),
             code: "missing_permission".into(),
-            message: "Falta a permissão Enviar mensagens para publicar os avisos do anti-spam."
-                .into(),
+            message: "The Send Messages permission is required to publish anti-spam alerts.".into(),
             severity: "error".into(),
         });
     }
@@ -1966,7 +1965,7 @@ async fn preflight(
         issues.push(ValidationIssue {
             path: "logChannel".into(),
             code: "invalid_channel_id".into(),
-            message: "Escolhe um canal da lista do servidor; o ID não é válido.".into(),
+            message: "Choose a channel from the server list; this ID is not valid.".into(),
             severity: "error".into(),
         });
     }

@@ -1196,7 +1196,7 @@ impl EventHandler for Handler {
                             &ctx,
                             CreateInteractionResponse::Message(
                                 CreateInteractionResponseMessage::new()
-                                    .content("Não foi possível concluir esta ação.")
+                                    .content("Unable to complete this action.")
                                     .ephemeral(true),
                             ),
                         )
@@ -1301,11 +1301,11 @@ impl EventHandler for Handler {
                         .say(
                             &ctx.http,
                             format!(
-                                "⚠️ Possível raid detetada: {threshold} entradas em {window_seconds}s. {} Verifica os casos recentes.",
+                                "⚠️ Possible raid detected: {threshold} joins in {window_seconds}s. {} Review the recent cases.",
                                 if shadow_mode {
-                                    "Shadow mode ativo; não foi aplicada contenção automática."
+                                    "Shadow mode is active; no automatic containment was applied."
                                 } else {
-                                    "O join gate foi ativado."
+                                    "The join gate was enabled."
                                 }
                             ),
                         )
@@ -1341,7 +1341,7 @@ impl EventHandler for Handler {
             );
             if account_age_days < minimum_age {
                 let reason = format!(
-                    "Join gate: conta com {account_age_days} dia(s); mínimo configurado {minimum_age}"
+                    "Join gate: account is {account_age_days} day(s) old; configured minimum is {minimum_age}"
                 );
                 let _ = self.store.record_case(
                     &guild_text,
@@ -1358,7 +1358,7 @@ impl EventHandler for Handler {
                         .say(
                             &ctx.http,
                             format!(
-                                "⚠️ <@{}> precisa de verificação: conta demasiado recente.",
+                                "⚠️ <@{}> needs verification: this account is too new.",
                                 new_member.user.id
                             ),
                         )
@@ -1374,9 +1374,9 @@ impl EventHandler for Handler {
                 let _ = new_member.add_role(&ctx.http, RoleId::new(role_id)).await;
             }
             let message = setting_string(&self.store, &guild_text, "support.welcome.message")
-                .unwrap_or_else(|| "👋 Bem-vindo ao servidor, {member}!".to_string())
+                .unwrap_or_else(|| "👋 Welcome to the server, {member}!".to_string())
                 .replace("{member}", &member_mention)
-                .replace("{server}", "este servidor");
+                .replace("{server}", "this server");
             let fallback_channel = guild_id
                 .to_partial_guild(&ctx.http)
                 .await
@@ -1391,9 +1391,9 @@ impl EventHandler for Handler {
             }
             if setting_bool(&self.store, &guild_text, "support.welcome.send_dm", false) {
                 let dm = setting_string(&self.store, &guild_text, "support.welcome.dm_message")
-                    .unwrap_or_else(|| "Olá {member}, bem-vindo(a) ao servidor!".to_string())
+                    .unwrap_or_else(|| "Hello {member}, welcome to the server!".to_string())
                     .replace("{member}", &member_mention)
-                    .replace("{server}", "este servidor");
+                    .replace("{server}", "this server");
                 let _ = new_member
                     .user
                     .direct_message(&ctx.http, serenity::all::CreateMessage::new().content(dm))
@@ -1519,7 +1519,7 @@ impl EventHandler for Handler {
                 &executor,
                 "helper",
                 &format!(
-                    "{threshold} ações destrutivas em {window_seconds}s; shadow mode, sem contenção automática"
+                    "{threshold} destructive actions in {window_seconds}s; shadow mode, no automatic containment"
                 ),
                 None,
             );
@@ -1530,7 +1530,7 @@ impl EventHandler for Handler {
                     .say(
                         &ctx.http,
                         format!(
-                            "🚨 Possível ataque nuke: <@{executor}> executou {threshold} ações destrutivas em {window_seconds}s. Shadow mode ativo; não foi aplicada contenção automática."
+                            "🚨 Possible nuke attack: <@{executor}> performed {threshold} destructive actions in {window_seconds}s. Shadow mode is active; no automatic containment was applied."
                         ),
                     )
                     .await;
@@ -1548,7 +1548,7 @@ impl EventHandler for Handler {
             &executor,
             "helper",
             &format!(
-                "{threshold} ações destrutivas em {window_seconds}s; join gate ativado para revisão"
+                "{threshold} destructive actions in {window_seconds}s; join gate enabled for review"
             ),
             None,
         );
@@ -1559,7 +1559,7 @@ impl EventHandler for Handler {
                 .say(
                     &ctx.http,
                     format!(
-                        "🚨 Possível ataque nuke: <@{executor}> executou {threshold} ações destrutivas em {window_seconds}s. O join gate foi ativado; revê o Audit Log antes de remover cargos."
+                        "🚨 Possible nuke attack: <@{executor}> performed {threshold} destructive actions in {window_seconds}s. The join gate was enabled; review the Audit Log before removing roles."
                     ),
                 )
                 .await;
@@ -1780,10 +1780,10 @@ impl EventHandler for Handler {
                         &guild_text,
                         "community.levels.announce_template",
                     )
-                    .unwrap_or_else(|| "{member} chegou ao nível {level}!".to_string())
+                    .unwrap_or_else(|| "{member} reached level {level}!".to_string())
                     .replace("{member}", &format!("<@{}>", message.author.id))
                     .replace("{level}", &after_level.to_string())
-                    .replace("{server}", "este servidor");
+                    .replace("{server}", "this server");
                     let channel = setting_u64_optional(
                         &self.store,
                         &guild_text,
@@ -1802,7 +1802,7 @@ impl EventHandler for Handler {
                 .say(
                     &ctx.http,
                     format!(
-                        "Bem-vindo de volta, <@{}>. O teu AFK foi removido.",
+                        "Welcome back, <@{}>. Your AFK status was removed.",
                         afk.user_id
                     ),
                 )
@@ -1883,7 +1883,7 @@ impl EventHandler for Handler {
                         &message.author.id.to_string(),
                         &message.author.id.to_string(),
                         &format!(
-                            "Spam detetado ({signals}): {count} mensagens/{window_seconds}s, {duplicate_count} repetidas, {mention_count} menções",
+                            "Spam detected ({signals}): {count} messages/{window_seconds}s, {duplicate_count} duplicates, {mention_count} mentions",
                             signals = decision.matched.join(", "),
                             mention_count = message.mentions.len(),
                         ),
@@ -1902,9 +1902,9 @@ impl EventHandler for Handler {
                                     message.author.id,
                                     decision.reason,
                                     if decision.should_act {
-                                        "ação"
+                                        "action"
                                     } else {
-                                        "monitorização"
+                                        "monitoring"
                                     },
                                 ),
                             )
@@ -1929,7 +1929,7 @@ impl EventHandler for Handler {
                             .say(
                                 &ctx.http,
                                 format!(
-                                    "<@{}>, abranda o ritmo — o anti-spam registou este incidente.",
+                                    "<@{}>, please slow down — anti-spam recorded this incident.",
                                     message.author.id
                                 ),
                             )
@@ -2387,7 +2387,7 @@ impl Handler {
                 ctx,
                 CreateInteractionResponse::Message(
                     CreateInteractionResponseMessage::new()
-                        .content(format!("{} · nível {} · {} XP", profile.name, level, xp))
+                        .content(format!("{} · level {} · {} XP", profile.name, level, xp))
                         .add_file(CreateAttachment::bytes(svg.into_bytes(), "rank-card.svg")),
                 ),
             )
@@ -2515,7 +2515,7 @@ impl Handler {
                                 channel.send_message(
                                     &ctx.http,
                                     CreateMessage::new()
-                                        .content("Aqui estÃ¡ o export dos teus dados do Vozen Helper.")
+                                        .content("Here is your Vozen Helper data export.")
                                         .add_file(CreateAttachment::bytes(bytes, "my-vozen-data.json")),
                                 ).await?;
                                 "Enviei os teus dados por mensagem privada.".to_string()
@@ -2855,10 +2855,10 @@ impl Handler {
                 }
                 let id = self.store.create_suggestion(&guild_id.to_string(), &command.user.id.to_string(), text)?;
                 let message = command.channel_id.send_message(&ctx.http, serenity::all::CreateMessage::new()
-                    .content(format!("**Sugestão #{id}** por <@{}>\n{text}\n\nVota nesta sugestão:", command.user.id))
+                    .content(format!("**Suggestion #{id}** by <@{}>\n{text}\n\nVote on this suggestion:", command.user.id))
                     .components(vec![CreateActionRow::Buttons(vec![
-                        CreateButton::new(format!("suggest:up:{id}")).label("Apoio").style(ButtonStyle::Success),
-                        CreateButton::new(format!("suggest:down:{id}")).label("Contra").style(ButtonStyle::Danger),
+                        CreateButton::new(format!("suggest:up:{id}")).label("Support").style(ButtonStyle::Success),
+                        CreateButton::new(format!("suggest:down:{id}")).label("Against").style(ButtonStyle::Danger),
                     ])])).await?;
                 self.store.set_suggestion_message(id, &message.id.to_string())?;
                 format!("Sugestão #{id} publicada.")
@@ -2903,8 +2903,8 @@ impl Handler {
                 let end_at = chrono::Utc::now().timestamp_millis() + delay;
                 let id = self.store.create_giveaway(&guild_id.to_string(), &command.channel_id.to_string(), prize, winners, end_at, required_role.as_deref(), &command.user.id.to_string())?;
                 let message = command.channel_id.send_message(&ctx.http, serenity::all::CreateMessage::new()
-                    .content(format!("🎉 **Giveaway #{id}**\nPrémio: **{prize}**\nVencedores: **{winners}**\nTermina <t:{}:R>\nCarrega no botão para participar.", end_at / 1_000))
-                    .components(vec![CreateActionRow::Buttons(vec![CreateButton::new(format!("giveaway:join:{id}")).label("Participar").style(ButtonStyle::Primary)])])).await?;
+                    .content(format!("🎉 **Giveaway #{id}**\nPrize: **{prize}**\nWinners: **{winners}**\nEnds <t:{}:R>\nClick the button to join.", end_at / 1_000))
+                    .components(vec![CreateActionRow::Buttons(vec![CreateButton::new(format!("giveaway:join:{id}")).label("Join").style(ButtonStyle::Primary)])])).await?;
                 self.store.set_giveaway_message(id, &message.id.to_string())?;
                 self.store.schedule_typed(&guild_id.to_string(), "giveaway_end", &command.user.id.to_string(), end_at, &serde_json::json!({"channel_id": command.channel_id.to_string(), "giveaway_id": id}).to_string())?;
                 format!("Giveaway #{id} criado.")
@@ -2958,7 +2958,7 @@ impl Handler {
                 let id = self.store.create_poll(&guild_id.to_string(), &command.channel_id.to_string(), question, &options, end_at)?;
                 let labels = options.iter().enumerate().map(|(index, value)| CreateButton::new(format!("poll:{id}:{index}")).label(format!("{}: {}", index + 1, truncate(value, 70))).style(ButtonStyle::Secondary)).collect::<Vec<_>>();
                 let message = command.channel_id.send_message(&ctx.http, serenity::all::CreateMessage::new()
-                    .content(format!("🗳️ **Poll #{id}: {question}**\n{}\nTermina <t:{}:R>", options.iter().enumerate().map(|(i, v)| format!("{}️⃣ {}", i + 1, v)).collect::<Vec<_>>().join("\n"), end_at / 1_000))
+                    .content(format!("🗳️ **Poll #{id}: {question}**\n{}\nEnds <t:{}:R>", options.iter().enumerate().map(|(i, v)| format!("{}️⃣ {}", i + 1, v)).collect::<Vec<_>>().join("\n"), end_at / 1_000))
                     .components(vec![CreateActionRow::Buttons(labels)])).await?;
                 self.store.set_poll_message(id, &message.id.to_string())?;
                 self.store.schedule_typed(&guild_id.to_string(), "poll_end", &command.user.id.to_string(), end_at, &serde_json::json!({"channel_id": command.channel_id.to_string(), "poll_id": id}).to_string())?;
@@ -3064,10 +3064,10 @@ impl Handler {
                 command.channel_id.send_message(
                     &ctx.http,
                     serenity::all::CreateMessage::new()
-                        .content("Carrega no botÃ£o para receber o cargo de membro verificado.")
+                        .content("Click the button to receive the verified member role.")
                         .components(vec![CreateActionRow::Buttons(vec![
                             CreateButton::new(format!("verify:{guild_text}:{role_id}"))
-                                .label("Verificar")
+                                .label("Verify")
                                 .style(ButtonStyle::Success),
                         ])]),
                 ).await?;
@@ -3678,10 +3678,10 @@ impl Handler {
                     .send_message(
                         &ctx.http,
                         serenity::all::CreateMessage::new()
-                            .content("Precisas de ajuda? Abre um ticket privado.")
+                            .content("Need help? Open a private ticket.")
                             .components(vec![CreateActionRow::Buttons(vec![
                                 CreateButton::new("ticket:open")
-                                    .label("Abrir ticket")
+                                    .label("Open ticket")
                                     .style(ButtonStyle::Primary),
                             ])]),
                     )
@@ -3782,7 +3782,7 @@ impl Handler {
                     )
                     .await;
                 }
-                let title = option_string(command, "title").unwrap_or("Escolhe os teus cargos");
+                let title = option_string(command, "title").unwrap_or("Choose your roles");
                 let mut buttons = Vec::new();
                 for name in ["role1", "role2", "role3", "role4", "role5"] {
                     if let Some(role_id) = command.data.options.iter().find_map(|option| {
@@ -3829,7 +3829,7 @@ impl Handler {
                 ctx,
                 CreateInteractionResponse::Message(
                     CreateInteractionResponseMessage::new()
-                        .content(content)
+                        .content(english_bot_text(&content))
                         .ephemeral(command.data.name != "ping"),
                 ),
             )
@@ -4041,7 +4041,7 @@ impl Handler {
                     return respond_component(
                         ctx,
                         component,
-                        &format!("Já tens um ticket aberto: <#{}>.", ticket.channel_id),
+                        &format!("You already have an open ticket: <#{}>.", ticket.channel_id),
                     )
                     .await;
                 }
@@ -4109,15 +4109,15 @@ impl Handler {
                         &ctx.http,
                         serenity::all::CreateMessage::new()
                             .content(format!(
-                                "Olá <@{}>. Explica aqui o que precisas.",
+                                "Hello <@{}>. Tell us what you need.",
                                 component.user.id
                             ))
                             .components(vec![CreateActionRow::Buttons(vec![
                                 CreateButton::new("ticket:claim")
-                                    .label("Assumir")
+                                    .label("Claim")
                                     .style(ButtonStyle::Secondary),
                                 CreateButton::new("ticket:close")
-                                    .label("Fechar")
+                                    .label("Close")
                                     .style(ButtonStyle::Danger),
                             ])]),
                     )
@@ -4138,12 +4138,12 @@ impl Handler {
                         .channel_id
                         .say(
                             &ctx.http,
-                            format!("Ticket assumido por <@{}>.", component.user.id),
+                            format!("Ticket claimed by <@{}>.", component.user.id),
                         )
                         .await?;
-                    respond_component(ctx, component, "Ticket assumido.").await
+                    respond_component(ctx, component, "Ticket claimed.").await
                 } else {
-                    respond_component(ctx, component, "Este ticket já foi fechado.").await
+                    respond_component(ctx, component, "This ticket is already closed.").await
                 }
             }
             "ticket:reopen" => {
@@ -4151,7 +4151,7 @@ impl Handler {
                     .store
                     .ticket_by_channel(&component.channel_id.to_string())?
                 else {
-                    return respond_component(ctx, component, "Ticket não encontrado.").await;
+                    return respond_component(ctx, component, "Ticket not found.").await;
                 };
                 let is_opener = ticket.user_id == component.user.id.to_string();
                 let is_staff = if let Ok(Some(raw_role)) = self
@@ -4170,7 +4170,7 @@ impl Handler {
                     return respond_component(
                         ctx,
                         component,
-                        "Só o autor ou a equipa de suporte pode reabrir este ticket.",
+                        "Only the ticket author or support team can reopen this ticket.",
                     )
                     .await;
                 }
@@ -4197,25 +4197,25 @@ impl Handler {
                     .send_message(
                         &ctx.http,
                         serenity::all::CreateMessage::new()
-                            .content("Ticket reaberto. A equipa pode continuar a responder.")
+                            .content("Ticket reopened. The team can continue responding.")
                             .components(vec![CreateActionRow::Buttons(vec![
                                 CreateButton::new("ticket:claim")
-                                    .label("Assumir")
+                                    .label("Claim")
                                     .style(ButtonStyle::Secondary),
                                 CreateButton::new("ticket:close")
-                                    .label("Fechar")
+                                    .label("Close")
                                     .style(ButtonStyle::Danger),
                             ])]),
                     )
                     .await?;
-                respond_component(ctx, component, "Ticket reaberto.").await
+                respond_component(ctx, component, "Ticket reopened.").await
             }
             "ticket:close" => {
                 let ticket = self
                     .store
                     .ticket_by_channel(&component.channel_id.to_string())?;
                 let Some(ticket_for_auth) = ticket.as_ref() else {
-                    return respond_component(ctx, component, "Ticket não encontrado.").await;
+                    return respond_component(ctx, component, "Ticket not found.").await;
                 };
                 let is_opener = ticket_for_auth.user_id == component.user.id.to_string();
                 let is_staff = if let Ok(Some(raw_role)) = self
@@ -4234,7 +4234,7 @@ impl Handler {
                     return respond_component(
                         ctx,
                         component,
-                        "Só o autor ou a equipa de suporte pode fechar este ticket.",
+                        "Only the ticket author or support team can close this ticket.",
                     )
                     .await;
                 }
@@ -4253,7 +4253,7 @@ impl Handler {
                             .as_ref()
                             .map(|ticket| format!("<@{}>", ticket.user_id))
                             .unwrap_or_else(|| "unknown".to_string());
-                        let mut transcript = format!("Transcript do ticket de {opener}\n");
+                        let mut transcript = format!("Ticket transcript for {opener}\n");
                         for message in messages.iter().rev() {
                             transcript.push_str(&format!(
                                 "{}: {}\n",
@@ -4280,10 +4280,10 @@ impl Handler {
                         .send_message(
                             &ctx.http,
                             serenity::all::CreateMessage::new()
-                                .content("Ticket fechado. O histórico foi preservado; o autor ou a equipa pode reabri-lo.")
+                                .content("Ticket closed. The history was preserved; the author or team can reopen it.")
                                 .components(vec![CreateActionRow::Buttons(vec![
                                     CreateButton::new("ticket:reopen")
-                                        .label("Reabrir")
+                                        .label("Reopen")
                                         .style(ButtonStyle::Success),
                                 ])]),
                         )
@@ -4291,11 +4291,11 @@ impl Handler {
                     respond_component(
                         ctx,
                         component,
-                        "Ticket fechado e arquivado. O canal não foi apagado.",
+                        "Ticket closed and archived. The channel was not deleted.",
                     )
                     .await?;
                 } else {
-                    respond_component(ctx, component, "Este ticket já está fechado.").await?;
+                    respond_component(ctx, component, "This ticket is already closed.").await?;
                 }
                 Ok(())
             }
@@ -4310,7 +4310,7 @@ async fn respond(ctx: &Context, command: &CommandInteraction, content: &str) -> 
             ctx,
             CreateInteractionResponse::Message(
                 CreateInteractionResponseMessage::new()
-                    .content(content)
+                    .content(english_bot_text(content))
                     .ephemeral(true),
             ),
         )
@@ -4328,12 +4328,602 @@ async fn respond_component(
             ctx,
             CreateInteractionResponse::Message(
                 CreateInteractionResponseMessage::new()
-                    .content(content)
+                    .content(english_bot_text(content))
                     .ephemeral(true),
             ),
         )
         .await?;
     Ok(())
+}
+
+/// Translate legacy Portuguese system text at the Discord boundary.
+///
+/// Configuration values, tag bodies and user supplied content remain untouched;
+/// only known Helper-owned phrases are translated. This keeps existing guild
+/// settings compatible while ensuring command/component feedback is English.
+fn english_bot_text(input: &str) -> String {
+    const REPLACEMENTS: &[(&str, &str)] = &[
+        ("Olá ", "Hello "),
+        ("Explica aqui o que precisas.", "Tell us what you need."),
+        (
+            "Este comando só pode ser usado num servidor.",
+            "This command can only be used in a server.",
+        ),
+        (
+            "Este comando sÃ³ pode ser usado num servidor.",
+            "This command can only be used in a server.",
+        ),
+        ("Indica um membro.", "Specify a member."),
+        ("Indica um utilizador.", "Specify a user."),
+        ("Indica um ID de utilizador.", "Specify a user ID."),
+        ("ID de utilizador inválido.", "Invalid user ID."),
+        ("Indica um canal válido.", "Specify a valid channel."),
+        (
+            "Indica pelo menos um cargo válido.",
+            "Specify at least one valid role.",
+        ),
+        (
+            "Indica uma pergunta e pelo menos duas opções.",
+            "Specify a question and at least two options.",
+        ),
+        (
+            "Indica prioridade, categoria ou nota.",
+            "Specify a priority, category or note.",
+        ),
+        (
+            "Indica pelo menos um campo para alterar.",
+            "Specify at least one field to change.",
+        ),
+        (
+            "Não foi possível concluir esta ação.",
+            "Unable to complete this action.",
+        ),
+        (
+            "Nao foi possivel executar o ban; confirma as permissoes e a hierarquia.",
+            "Unable to ban this member; check permissions and role hierarchy.",
+        ),
+        (
+            "Não tens a permissão necessária para este comando.",
+            "You do not have the required permission for this command.",
+        ),
+        (
+            "O conteúdo não pode exceder 500 caracteres.",
+            "Content cannot exceed 500 characters.",
+        ),
+        (
+            "A mensagem de teste não pode exceder 2000 caracteres.",
+            "The test message cannot exceed 2,000 characters.",
+        ),
+        (
+            "O lembrete não pode exceder 500 caracteres.",
+            "The reminder cannot exceed 500 characters.",
+        ),
+        ("Nome ou conteúdo inválido.", "Invalid name or content."),
+        (
+            "Nome, condição ou resposta inválidos.",
+            "Invalid name, condition or response.",
+        ),
+        (
+            "Nome, local ou descrição inválidos.",
+            "Invalid name, location or description.",
+        ),
+        (
+            "Duração inválida. Usa formatos como 10m, 2h ou 1d.",
+            "Invalid duration. Use formats such as 10m, 2h or 1d.",
+        ),
+        (
+            "Duração inválida. Usa 10m, 2h ou 1d.",
+            "Invalid duration. Use 10m, 2h or 1d.",
+        ),
+        (
+            "DuraÃ§Ã£o invÃ¡lida. Usa 10m, 2h ou 1d.",
+            "Invalid duration. Use 10m, 2h or 1d.",
+        ),
+        (
+            "O prémio deve ter entre 1 e 200 caracteres.",
+            "The prize must be between 1 and 200 characters.",
+        ),
+        (
+            "As sugestões estão desativadas neste servidor. Ativa-as no painel.",
+            "Suggestions are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "Os giveaways estão desativados neste servidor. Ativa-os no painel.",
+            "Giveaways are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "As enquetes estão desativadas neste servidor. Ativa-as no painel.",
+            "Polls are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "Os eventos estão desativados neste servidor. Ativa-os no painel.",
+            "Events are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "Workflow não encontrado neste servidor.",
+            "Workflow not found in this server.",
+        ),
+        (
+            "Não encontrei esse evento neste servidor.",
+            "That event was not found in this server.",
+        ),
+        (
+            "Não encontrei esse evento neste servidor.",
+            "That event was not found in this server.",
+        ),
+        (
+            "Giveaway não encontrado ou já terminado.",
+            "Giveaway not found or already ended.",
+        ),
+        (
+            "Esse membro não está em quarantine.",
+            "That member is not quarantined.",
+        ),
+        (
+            "Configura primeiro `/join-gate` com um cargo de verificação.",
+            "Configure `/join-gate` first with a verification role.",
+        ),
+        (
+            "Configura primeiro `/join-gate` com um cargo de verificaÃ§Ã£o.",
+            "Configure `/join-gate` first with a verification role.",
+        ),
+        (
+            "Ativa primeiro o `/join-gate`; o painel não deve ficar exposto enquanto o gate está desligado.",
+            "Enable `/join-gate` first; do not expose the panel while the gate is disabled.",
+        ),
+        (
+            "Ativa primeiro o `/join-gate`; o painel nÃ£o deve ficar exposto enquanto o gate estÃ¡ desligado.",
+            "Enable `/join-gate` first; do not expose the panel while the gate is disabled.",
+        ),
+        (
+            "Carrega no botão para receber o cargo de membro verificado.",
+            "Click the button to receive the verified member role.",
+        ),
+        (
+            "Carrega no botÃ£o para receber o cargo de membro verificado.",
+            "Click the button to receive the verified member role.",
+        ),
+        (
+            "Painel de verificação publicado neste canal.",
+            "Verification panel posted in this channel.",
+        ),
+        (
+            "Painel de verificaÃ§Ã£o publicado neste canal.",
+            "Verification panel posted in this channel.",
+        ),
+        ("Painel de cargos criado.", "Role panel created."),
+        ("Painel criado.", "Panel created."),
+        ("Comando desconhecido.", "Unknown command."),
+        ("Dados voluntários apagados.", "Voluntary data deleted."),
+        ("Dados voluntÃ¡rios apagados.", "Voluntary data deleted."),
+        ("Ticket criado:", "Ticket created:"),
+        ("Ticket reaberto.", "Ticket reopened."),
+        (
+            "Ticket fechado e arquivado. O canal não foi apagado.",
+            "Ticket closed and archived. The channel was not deleted.",
+        ),
+        (
+            "Ticket fechado e arquivado. O canal nÃ£o foi apagado.",
+            "Ticket closed and archived. The channel was not deleted.",
+        ),
+        (
+            "Este ticket já está aberto ou não existe.",
+            "This ticket is already open or does not exist.",
+        ),
+        (
+            "Este ticket jÃ¡ estÃ¡ aberto ou nÃ£o existe.",
+            "This ticket is already open or does not exist.",
+        ),
+        (
+            "Este canal não é um ticket do Helper.",
+            "This channel is not a Helper ticket.",
+        ),
+        (
+            "Precisas de ajuda? Abre um ticket privado.",
+            "Need help? Open a private ticket.",
+        ),
+        ("Abrir ticket", "Open ticket"),
+        ("Reabrir", "Reopen"),
+        ("Fechar", "Close"),
+        ("Assumir", "Claim"),
+        ("Verificar", "Verify"),
+        ("Participar", "Join"),
+        ("Vota nesta sugestão:", "Vote on this suggestion:"),
+        ("Sugestão", "Suggestion"),
+        ("Sugestão publicada.", "Suggestion published."),
+        ("Giveaway criado.", "Giveaway created."),
+        ("Giveaway terminado.", "Giveaway ended."),
+        ("Poll #", "Poll #"),
+        ("Poll #{} criada.", "Poll #{} created."),
+        ("Evento criado.", "Event created."),
+        ("Evento atualizado.", "Event updated."),
+        ("Evento cancelado.", "Event cancelled."),
+        (
+            "Inscreve-te primeiro com `/event-register`.",
+            "Register first with `/event-register`.",
+        ),
+        (
+            "O teu check-in já está registado.",
+            "Your check-in is already recorded.",
+        ),
+        (
+            "O teu check-in jÃ¡ estÃ¡ registado.",
+            "Your check-in is already recorded.",
+        ),
+        (
+            "Não tens uma inscrição neste evento.",
+            "You are not registered for this event.",
+        ),
+        (
+            "Não tens uma inscriÃ§Ã£o neste evento.",
+            "You are not registered for this event.",
+        ),
+        (
+            "Eventos concluídos ou cancelados não podem ser editados.",
+            "Completed or cancelled events cannot be edited.",
+        ),
+        (
+            "O evento não pode durar mais de 365 dias.",
+            "The event cannot last longer than 365 days.",
+        ),
+        (
+            "A nova data de início tem de estar no futuro.",
+            "The new start date must be in the future.",
+        ),
+        (
+            "O fim tem de ser depois do início.",
+            "The end must be after the start.",
+        ),
+        (
+            "A descrição não pode exceder 1000 caracteres.",
+            "The description cannot exceed 1,000 characters.",
+        ),
+        (
+            "A localização só pode ser alterada em eventos externos e deve ter 1–100 caracteres.",
+            "Location can only be changed for external events and must be 1–100 characters.",
+        ),
+        (
+            "O nome tem de ter entre 1 e 100 caracteres.",
+            "The name must be between 1 and 100 characters.",
+        ),
+        (
+            "O SLA deve estar entre 5 e 1440 minutos.",
+            "SLA must be between 5 and 1,440 minutes.",
+        ),
+        (
+            "A quota de painéis de tickets deste servidor foi atingida.",
+            "This server has reached its ticket panel quota.",
+        ),
+        (
+            "A lotação deve estar entre 1 e 100000.",
+            "Capacity must be between 1 and 100,000.",
+        ),
+        (
+            "A sugestão deve ter entre 3 e 1000 caracteres.",
+            "The suggestion must be between 3 and 1,000 characters.",
+        ),
+        (
+            "Pong — Vozen Helper está online.",
+            "Pong — Vozen Helper is online.",
+        ),
+        ("Vozen Helper público:", "Public Vozen Helper:"),
+        ("Setup guiado:", "Guided setup:"),
+        ("Setup guardado para:", "Setup saved for:"),
+        ("Próximo passo:", "Next step:"),
+        ("Setup:", "Setup:"),
+        ("Módulos:", "Modules:"),
+        ("concluído", "complete"),
+        ("concluÃ­do", "complete"),
+        ("pendente", "pending"),
+        ("nenhum", "none"),
+        ("Painel:", "Dashboard:"),
+        (
+            "O XP card está desativado neste servidor. Ativa-o no painel primeiro.",
+            "The XP card is disabled in this server. Enable it in the dashboard first.",
+        ),
+        ("Plano ", "Plan "),
+        (
+            "Não foi possível consultar o plano agora; o Helper mantém o último snapshot seguro.",
+            "Unable to check the plan right now; Helper is keeping the last safe snapshot.",
+        ),
+        (
+            "NÃ£o foi possÃ­vel consultar o plano agora; o Helper mantém o último snapshot seguro.",
+            "Unable to check the plan right now; Helper is keeping the last safe snapshot.",
+        ),
+        (
+            "Entitlements central ainda não estão configurados nesta instalação.",
+            "Central entitlements are not configured in this installation yet.",
+        ),
+        (
+            "Ainda não existem casos neste servidor.",
+            "There are no cases in this server yet.",
+        ),
+        ("NÃ£o existem casos para", "There are no cases for"),
+        ("Não existem casos para", "There are no cases for"),
+        ("Aviso criado como caso", "Warning created as case"),
+        ("Registo #", "Record #"),
+        ("criado para", "created for"),
+        (
+            "Caso não encontrado neste servidor.",
+            "Case not found in this server.",
+        ),
+        ("NÃ£o existem casos para", "There are no cases for"),
+        ("Sem motivo", "No reason provided"),
+        ("Sem conteúdo", "No content"),
+        ("Sem conteÃºdo", "No content"),
+        (
+            "Não foi possível remover o timeout; confirma as permissões.",
+            "Unable to remove the timeout; check permissions.",
+        ),
+        (
+            "Não foi possível remover o ban.",
+            "Unable to remove the ban.",
+        ),
+        (
+            "Não encontrei mensagens para apagar.",
+            "No messages found to delete.",
+        ),
+        ("Softban concluÃ­do como caso", "Softban completed as case"),
+        ("Softban concluído como caso", "Softban completed as case"),
+        ("Tempban concluído como caso", "Tempban completed as case"),
+        ("expira em", "expires in"),
+        ("Ação ", "Action "),
+        ("Ação concluída como caso", "Action completed as case"),
+        (
+            "Não foi possível executar a ação; confirma as permissões e a hierarquia de cargos.",
+            "Unable to perform the action; check permissions and role hierarchy.",
+        ),
+        (
+            "Não tinhas AFK definido.",
+            "You did not have an AFK status set.",
+        ),
+        ("Tag não encontrada.", "Tag not found."),
+        ("Ainda não existem tags.", "There are no tags yet."),
+        ("Tag `", "Tag `"),
+        ("` eliminada.", "` deleted."),
+        ("Ainda não existem dados de XP.", "There is no XP data yet."),
+        (
+            "Mensagens registadas nos últimos",
+            "Messages recorded in the last",
+        ),
+        ("dias:", "days:"),
+        (
+            "Starboard configurado no canal",
+            "Starboard configured in channel",
+        ),
+        ("Requer 3 ⭐ para publicar.", "Requires 3 ⭐ to publish."),
+        ("Estado inválido:", "Invalid status:"),
+        ("Sugestão #", "Suggestion #"),
+        ("marcada como", "marked as"),
+        (
+            "Sugestão não encontrada neste servidor.",
+            "Suggestion not found in this server.",
+        ),
+        ("Giveaway #", "Giveaway #"),
+        (
+            "Giveaway nÃ£o encontrado, ainda ativo ou sem participantes.",
+            "Giveaway not found, still active or without participants.",
+        ),
+        (
+            "Giveaway não encontrado, ainda ativo ou sem participantes.",
+            "Giveaway not found, still active or without participants.",
+        ),
+        (
+            "Não existem giveaways ativos.",
+            "There are no active giveaways.",
+        ),
+        ("colocado em quarantine como caso", "quarantined as case"),
+        (
+            "Os cargos foram guardados para restauro.",
+            "Roles were saved for restoration.",
+        ),
+        ("Quarantine removida de", "Quarantine removed from"),
+        ("cargo(s) restaurado(s).", "role(s) restored."),
+        (
+            "Join gate desativado; as definições guardadas podem ser reativadas.",
+            "Join gate disabled; saved settings can be re-enabled.",
+        ),
+        ("Lockdown aplicado em", "Lockdown applied to"),
+        ("canal(is) de texto.", "text channel(s)."),
+        ("Motivo:", "Reason:"),
+        ("Lockdown removido de", "Lockdown removed from"),
+        (
+            "overwrites anteriores restaurados quando estavam guardados.",
+            "previous overwrites restored when they were saved.",
+        ),
+        ("Shadow mode ativado:", "Shadow mode enabled:"),
+        ("Shadow mode desativado:", "Shadow mode disabled:"),
+        (
+            "respostas anti-raid/anti-nuke ficam em observação, com casos e alertas, sem contenção automática.",
+            "anti-raid/anti-nuke responses are monitored with cases and alerts, without automatic containment.",
+        ),
+        (
+            "as respostas de segurança configuradas podem aplicar contenção limitada.",
+            "configured security responses may apply limited containment.",
+        ),
+        (
+            "Anti-raid desativado; nenhuma resposta automática a bursts de joins será aplicada.",
+            "Anti-raid disabled; no automatic response to join bursts will be applied.",
+        ),
+        ("Anti-nuke ativado:", "Anti-nuke enabled:"),
+        ("ações destrutivas em", "destructive actions in"),
+        (
+            "ativam contenção e alerta.",
+            "trigger containment and an alert.",
+        ),
+        (
+            "Anti-nuke desativado; os eventos de Audit Log não ativam contenção automática.",
+            "Anti-nuke disabled; Audit Log events do not trigger automatic containment.",
+        ),
+        (
+            "A data de início não é RFC3339 válida.",
+            "The start date is not valid RFC3339.",
+        ),
+        (
+            "A data de fim não é RFC3339 válida.",
+            "The end date is not valid RFC3339.",
+        ),
+        (
+            "O início tem de estar no futuro.",
+            "The start must be in the future.",
+        ),
+        (
+            "A janela do evento é inválida.",
+            "The event window is invalid.",
+        ),
+        (
+            "Não existem eventos agendados neste servidor.",
+            "There are no scheduled events in this server.",
+        ),
+        (
+            "Este evento já terminou ou foi cancelado.",
+            "This event has already ended or was cancelled.",
+        ),
+        ("O evento **", "Event **"),
+        (
+            "** está cheio; ficaste na lista de espera.",
+            "** is full; you were added to the waitlist.",
+        ),
+        (
+            "Inscrição confirmada para **",
+            "Registration confirmed for **",
+        ),
+        (
+            "Já estás inscrito neste evento.",
+            "You are already registered for this event.",
+        ),
+        ("Inscrição removida;", "Registration removed;"),
+        (
+            "foi promovido da lista de espera.",
+            "was promoted from the waitlist.",
+        ),
+        (
+            "Inscrição removida do evento.",
+            "Registration removed from the event.",
+        ),
+        (
+            "** ainda não tem inscrições.",
+            "** has no registrations yet.",
+        ),
+        ("inscrição(ões)", "registration(s)"),
+        (
+            "Não foi possível registar o check-in.",
+            "Unable to record the check-in.",
+        ),
+        (
+            "A quota de workflows deste plano foi atingida",
+            "This plan's workflow quota has been reached",
+        ),
+        (
+            "Consulta `/plan` para saber como aumentar a capacidade da guild.",
+            "Check `/plan` to learn how to increase guild capacity.",
+        ),
+        ("Workflow #", "Workflow #"),
+        (
+            "É executado quando uma mensagem corresponde à condição.",
+            "Runs when a message matches the condition.",
+        ),
+        (
+            "Não existem workflows configurados.",
+            "There are no workflows configured.",
+        ),
+        ("Dry-run: workflow", "Dry run: workflow"),
+        ("não seria executado.", "would not run."),
+        ("correspondeu, mas a action", "matched, but the action"),
+        ("não é suportada.", "is not supported."),
+        (
+            "Este canal não é um ticket do Helper.",
+            "This channel is not a Helper ticket.",
+        ),
+        ("A equipa", "The team"),
+        ("aplicada", "applied"),
+        ("removida", "removed"),
+        ("criado", "created"),
+        ("criada", "created"),
+        ("publicada", "published"),
+        ("encontrado", "found"),
+        ("desconhecido", "unknown"),
+        ("está", "is"),
+        ("estão", "are"),
+        ("pode", "can"),
+        ("podem", "can"),
+        ("deve", "must"),
+        ("devem", "must"),
+        ("tem de", "must"),
+        ("ter de", "must"),
+        ("tens", "you have"),
+        ("teu", "your"),
+        ("tua", "your"),
+        ("foi", "was"),
+        ("foram", "were"),
+        ("últimos", "last"),
+        ("último", "last"),
+        ("mínimo", "minimum"),
+        ("atualizado", "updated"),
+        ("atualizada", "updated"),
+        ("guardado", "saved"),
+        ("guardados", "saved"),
+        ("restauro", "restoration"),
+        ("restaurado", "restored"),
+        ("obrigatório", "required"),
+        ("opções", "options"),
+        ("pergunta", "question"),
+        ("prémio", "prize"),
+        ("vencedores", "winners"),
+        ("Termina", "Ends"),
+        ("Carrega", "Click"),
+        ("Vota", "Vote"),
+        ("registado", "recorded"),
+        ("registada", "recorded"),
+        ("registro", "record"),
+        ("configurado", "configured"),
+        ("configurada", "configured"),
+        ("configura", "configure"),
+        ("desativado", "disabled"),
+        ("desativada", "disabled"),
+        ("ativado", "enabled"),
+        ("ativada", "enabled"),
+        ("segurança", "security"),
+        ("seguranÃ§a", "security"),
+        ("observação", "monitoring"),
+        ("observaÃ§Ã£o", "monitoring"),
+        ("contenção", "containment"),
+        ("contenÃ§Ã£o", "containment"),
+        ("Ativa-as no painel.", "Enable them in the dashboard."),
+        ("Ativa-os no painel.", "Enable them in the dashboard."),
+        ("Ativa-as", "Enable them"),
+        ("Ativa-os", "Enable them"),
+        ("ativado", "enabled"),
+        ("desativado", "disabled"),
+        ("ativada", "enabled"),
+        ("desativada", "disabled"),
+        ("servidor", "server"),
+        ("membro", "member"),
+        ("membros", "members"),
+        ("cargo", "role"),
+        ("cargos", "roles"),
+        ("permissões", "permissions"),
+        ("permissÃµes", "permissions"),
+        ("hierarquia", "hierarchy"),
+        ("canal", "channel"),
+        ("canais", "channels"),
+        ("mensagem", "message"),
+        ("mensagens", "messages"),
+        ("utilizador", "user"),
+        ("utilizadores", "users"),
+        ("razão", "reason"),
+        ("razÃ£o", "reason"),
+        ("equipa", "team"),
+        ("histórico", "history"),
+        ("histÃ³rico", "history"),
+        ("resposta", "response"),
+        ("respostas", "responses"),
+        ("não", "not"),
+        ("nÃ£o", "not"),
+    ];
+    REPLACEMENTS
+        .iter()
+        .fold(input.to_owned(), |text, (from, to)| text.replace(from, to))
 }
 
 fn option_string<'a>(command: &'a CommandInteraction, name: &str) -> Option<&'a str> {
@@ -4444,10 +5034,10 @@ async fn finish_giveaway(http: &serenity::http::Http, store: &Store, id: i64) ->
             .collect::<Vec<_>>()
     };
     let result = if winners.is_empty() {
-        format!("🎁 Giveaway #{} terminou sem participantes.", giveaway.id)
+        format!("🎁 Giveaway #{} ended without participants.", giveaway.id)
     } else {
         format!(
-            "🎁 Giveaway #{} terminou! Prémio: **{}**\nVencedores: {}",
+            "🎁 Giveaway #{} ended! Prize: **{}**\nWinners: {}",
             giveaway.id,
             giveaway.prize,
             winners
@@ -4504,7 +5094,7 @@ async fn reroll_giveaway(
             .say(
                 http,
                 format!(
-                    "ðŸŽ² Giveaway #{} reroll: novo vencedor <@{}> recebeu **{}**.",
+                    "🎲 Giveaway #{} reroll: new winner <@{}> received **{}**.",
                     giveaway.id, winner, giveaway.prize
                 ),
             )
@@ -4811,7 +5401,7 @@ async fn deliver_scheduled_action(
             let _ = ChannelId::new(channel)
                 .say(
                     http,
-                    "⏱️ Este ticket aguarda resposta da equipa de suporte.",
+                    "⏱️ This ticket is waiting for a reply from the support team.",
                 )
                 .await;
         }
@@ -4827,7 +5417,7 @@ async fn deliver_scheduled_action(
         let text = value
             .get("text")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("Tens um lembrete pendente.");
+            .unwrap_or("You have a pending reminder.");
         let content = if action_type == "reminder" {
             format!("<@{target_id}> ⏰ {text}")
         } else {
@@ -4844,13 +5434,29 @@ async fn deliver_scheduled_action(
 #[cfg(test)]
 mod tests {
     use super::{
-        account_age_days, is_destructive_audit_action, join_burst_armed, parse_duration,
-        parse_scheduled_event_window, shadow_mode_enabled,
+        account_age_days, english_bot_text, is_destructive_audit_action, join_burst_armed,
+        parse_duration, parse_scheduled_event_window, shadow_mode_enabled,
     };
     use std::{
         collections::{HashMap, VecDeque},
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn translates_legacy_user_facing_messages_to_english() {
+        assert_eq!(
+            english_bot_text("Olá <@1>. Explica aqui o que precisas."),
+            "Hello <@1>. Tell us what you need."
+        );
+        assert_eq!(
+            english_bot_text("Ticket fechado e arquivado. O canal não foi apagado."),
+            "Ticket closed and archived. The channel was not deleted."
+        );
+        assert_eq!(
+            english_bot_text("Este comando só pode ser usado num servidor."),
+            "This command can only be used in a server."
+        );
+    }
 
     #[test]
     fn duration_parser_is_bounded_and_explicit() {
