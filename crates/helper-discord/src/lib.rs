@@ -14,6 +14,7 @@ use helper_store::{
     RssSubscriptionRecord, Store, TwitchSubscriptionRecord, YouTubeSubscriptionRecord,
 };
 use rand::seq::SliceRandom;
+use reqwest::Client as HttpClient;
 use serenity::{
     all::{
         ButtonStyle, ChannelId, ChannelType, Client, Command, CommandDataOptionValue,
@@ -634,6 +635,24 @@ impl EventHandler for Handler {
             CreateCommand::new("leaderboard").description("Show the XP leaderboard"),
             CreateCommand::new("achievements").description("Show your community achievements"),
             CreateCommand::new("serverstats").description("Show basic server statistics"),
+            CreateCommand::new("search")
+                .description("Search an approved knowledge provider")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "provider",
+                        "wikipedia or anilist",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "query",
+                        "What to search for",
+                    )
+                    .required(true),
+                ),
             CreateCommand::new("emojis").description("List this server's custom emojis"),
             CreateCommand::new("invites").description("Show current server invite usage"),
             CreateCommand::new("balance").description("Show your community balance"),
@@ -3877,6 +3896,111 @@ impl Handler {
                 }
                 if achievements.is_empty() { "No achievements yet. Keep participating to unlock the first one at 100 XP.".to_string() } else { achievements.join("\n") }
             }
+            "search" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "utility.search", None) {
+                    return respond(ctx, command, "Search is disabled in this server. Enable it in the dashboard.").await;
+                }
+                let provider = option_string(command, "provider")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_lowercase();
+                let query = option_string(command, "query")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let max_results = setting_u64(&self.store, &guild_text, "utility.search.max_results", 5)
+                    .clamp(1, 5) as usize;
+                if query.is_empty() || query.len() > 128 {
+                    return respond(ctx, command, "Search text must contain between 1 and 128 characters.").await;
+                }
+                let wikipedia = setting_bool(&self.store, &guild_text, "utility.search.allow_wikipedia", true);
+                let anilist = setting_bool(&self.store, &guild_text, "utility.search.allow_anilist", true);
+                let http = HttpClient::new();
+                match provider.as_str() {
+                    "wikipedia" if wikipedia => {
+                        let response = http
+                            .get("https://en.wikipedia.org/w/api.php")
+                            .query(&[
+                                ("action", "query"),
+                                ("list", "search"),
+                                ("format", "json"),
+                                ("utf8", "1"),
+                                ("srprop", "snippet"),
+                                ("srlimit", &max_results.to_string()),
+                                ("srsearch", &query),
+                            ])
+                            .header("User-Agent", "VozenHelper/0.1 (https://vozen.org)")
+                            .send()
+                            .await?
+                            .error_for_status()?
+                            .json::<serde_json::Value>()
+                            .await?;
+                        let rows = response
+                            .pointer("/query/search")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .take(max_results)
+                                    .filter_map(|item| {
+                                        let title = item.get("title")?.as_str()?;
+                                        let snippet = item
+                                            .get("snippet")
+                                            .and_then(serde_json::Value::as_str)
+                                            .unwrap_or("")
+                                            .replace("<span class=\"searchmatch\">", "")
+                                            .replace("</span>", "");
+                                        Some(format!("**{title}** — {snippet}"))
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        if rows.is_empty() { "No Wikipedia results were found.".to_string() } else { rows.join("\n") }
+                    }
+                    "anilist" if anilist => {
+                        let body = serde_json::json!({
+                            "query": "query ($search: String, $perPage: Int) { Page(perPage: $perPage) { media(search: $search, type: ANIME) { title { romaji english native } siteUrl } } }",
+                            "variables": {"search": query, "perPage": max_results}
+                        });
+                        let response = http
+                            .post("https://graphql.anilist.co")
+                            .header("User-Agent", "VozenHelper/0.1 (https://vozen.org)")
+                            .json(&body)
+                            .send()
+                            .await?
+                            .error_for_status()?
+                            .json::<serde_json::Value>()
+                            .await?;
+                        let rows = response
+                            .pointer("/data/Page/media")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .take(max_results)
+                                    .filter_map(|item| {
+                                        let title = item.get("title")?;
+                                        let display = title
+                                            .get("english")
+                                            .and_then(serde_json::Value::as_str)
+                                            .or_else(|| title.get("romaji").and_then(serde_json::Value::as_str))
+                                            .or_else(|| title.get("native").and_then(serde_json::Value::as_str))?;
+                                        let url = item.get("siteUrl").and_then(serde_json::Value::as_str).unwrap_or("");
+                                        Some(if url.is_empty() { format!("**{display}**") } else { format!("**{display}** — {url}") })
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        if rows.is_empty() { "No AniList results were found.".to_string() } else { rows.join("\n") }
+                    }
+                    "wikipedia" | "anilist" => "That search provider is disabled in this server's settings.".to_string(),
+                    _ => "Choose an approved provider: `wikipedia` or `anilist`.".to_string(),
+                }
+            }
             "serverstats" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
@@ -4055,9 +4179,28 @@ impl Handler {
                 if !(3..=1_000).contains(&text.len()) {
                     return respond(ctx, command, "A sugestão deve ter entre 3 e 1000 caracteres.").await;
                 }
-                let id = self.store.create_suggestion(&guild_id.to_string(), &command.user.id.to_string(), text)?;
-                let message = command.channel_id.send_message(&ctx.http, serenity::all::CreateMessage::new()
-                    .content(format!("**Suggestion #{id}** by <@{}>\n{text}\n\nVote on this suggestion:", command.user.id))
+                let guild_text = guild_id.to_string();
+                if let Some(raw_role) = setting_string(&self.store, &guild_text, "community.suggestions.required_role")
+                    .filter(|value| !value.trim().is_empty())
+                    && let Ok(role_id) = raw_role.parse::<u64>()
+                {
+                    let member = guild_id.member(&ctx.http, command.user.id).await?;
+                    if !member.roles.iter().any(|role| role.get() == role_id) {
+                        return respond(ctx, command, "You need the configured role to submit a suggestion.").await;
+                    }
+                }
+                let id = self.store.create_suggestion(&guild_text, &command.user.id.to_string(), text)?;
+                let author = if setting_bool(&self.store, &guild_text, "community.suggestions.anonymous", false) {
+                    "Anonymous".to_string()
+                } else {
+                    format!("<@{}>", command.user.id)
+                };
+                let target_channel = setting_string(&self.store, &guild_text, "community.suggestions.channel_id")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .map(ChannelId::new)
+                    .unwrap_or(command.channel_id);
+                let message = target_channel.send_message(&ctx.http, serenity::all::CreateMessage::new()
+                    .content(format!("**Suggestion #{id}** by {author}\n{text}\n\nVote on this suggestion:"))
                     .components(vec![CreateActionRow::Buttons(vec![
                         CreateButton::new(format!("suggest:up:{id}")).label("Support").style(ButtonStyle::Success),
                         CreateButton::new(format!("suggest:down:{id}")).label("Against").style(ButtonStyle::Danger),
@@ -4091,17 +4234,23 @@ impl Handler {
                     return respond(ctx, command, "Os giveaways estão desativados neste servidor. Ativa-os no painel.").await;
                 }
                 let prize = option_string(command, "prize").unwrap_or_default().trim();
-                let Some(delay) = parse_duration(option_string(command, "duration").unwrap_or_default()) else {
+                let default_hours = setting_u64(&self.store, &guild_id.to_string(), "community.giveaways.default_duration_hours", 24).clamp(1, 168);
+                let duration = option_string(command, "duration").unwrap_or_default();
+                let Some(delay) = (if duration.trim().is_empty() {
+                    Some((default_hours as i64) * 3_600_000)
+                } else {
+                    parse_duration(duration)
+                }) else {
                     return respond(ctx, command, "Duração inválida. Usa 10m, 2h ou 1d.").await;
                 };
                 if prize.is_empty() || prize.len() > 200 {
                     return respond(ctx, command, "O prémio deve ter entre 1 e 200 caracteres.").await;
                 }
-                let winners = option_i64(command, "winners").unwrap_or(1).clamp(1, 20);
+                let winners = option_i64(command, "winners").unwrap_or_else(|| setting_u64(&self.store, &guild_id.to_string(), "community.giveaways.default_winners", 1) as i64).clamp(1, 20);
                 let required_role = command.data.options.iter().find_map(|option| match option.value {
                     CommandDataOptionValue::Role(role) if option.name == "required_role" => Some(role.to_string()),
                     _ => None,
-                });
+                }).or_else(|| setting_string(&self.store, &guild_id.to_string(), "community.giveaways.required_role").filter(|value| !value.trim().is_empty()));
                 let end_at = chrono::Utc::now().timestamp_millis() + delay;
                 let id = self.store.create_giveaway(&guild_id.to_string(), &command.channel_id.to_string(), prize, winners, end_at, required_role.as_deref(), &command.user.id.to_string())?;
                 let message = command.channel_id.send_message(&ctx.http, serenity::all::CreateMessage::new()
@@ -4155,11 +4304,21 @@ impl Handler {
                 if question.is_empty() || options.len() < 2 {
                     return respond(ctx, command, "Indica uma pergunta e pelo menos duas opções.").await;
                 }
-                let delay = parse_duration(option_string(command, "duration").unwrap_or("1d")).unwrap_or(86_400_000);
+                let poll_duration = option_string(command, "duration").unwrap_or_default();
+                let default_hours = setting_u64(&self.store, &guild_id.to_string(), "management.polls.default_duration_hours", 24).clamp(1, 168);
+                let delay = if poll_duration.trim().is_empty() {
+                    (default_hours as i64) * 3_600_000
+                } else {
+                    parse_duration(poll_duration).unwrap_or((default_hours as i64) * 3_600_000)
+                };
                 let end_at = chrono::Utc::now().timestamp_millis() + delay;
-                let id = self.store.create_poll(&guild_id.to_string(), &command.channel_id.to_string(), question, &options, end_at)?;
+                let poll_channel = setting_string(&self.store, &guild_id.to_string(), "management.polls.channel_id")
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| command.channel_id.to_string());
+                let id = self.store.create_poll(&guild_id.to_string(), &poll_channel, question, &options, end_at)?;
                 let labels = options.iter().enumerate().map(|(index, value)| CreateButton::new(format!("poll:{id}:{index}")).label(format!("{}: {}", index + 1, truncate(value, 70))).style(ButtonStyle::Secondary)).collect::<Vec<_>>();
-                let message = command.channel_id.send_message(&ctx.http, serenity::all::CreateMessage::new()
+                let message_channel = poll_channel.parse::<u64>().map(ChannelId::new).unwrap_or(command.channel_id);
+                let message = message_channel.send_message(&ctx.http, serenity::all::CreateMessage::new()
                     .content(format!("🗳️ **Poll #{id}: {question}**\n{}\nEnds <t:{}:R>", options.iter().enumerate().map(|(i, v)| format!("{}️⃣ {}", i + 1, v)).collect::<Vec<_>>().join("\n"), end_at / 1_000))
                     .components(vec![CreateActionRow::Buttons(labels)])).await?;
                 self.store.set_poll_message(id, &message.id.to_string())?;
@@ -4382,7 +4541,8 @@ impl Handler {
                 let end_raw = option_string(command, "end").unwrap_or_default().trim();
                 let location = option_string(command, "location").unwrap_or_default().trim();
                 let description = option_string(command, "description").unwrap_or_default().trim();
-                let capacity = option_i64(command, "capacity");
+                let default_capacity = setting_u64(&self.store, &guild_id.to_string(), "community.events.default_capacity", 0).min(100_000) as i64;
+                let capacity = option_i64(command, "capacity").or((default_capacity > 0).then_some(default_capacity));
                 if let Some(capacity) = capacity
                     && !(1..=100_000).contains(&capacity)
                 {
@@ -4430,6 +4590,14 @@ impl Handler {
                         &format!("events.capacity.{}", event.id),
                         &capacity.to_string(),
                     )?;
+                }
+                if let Some(channel_id) = setting_string(&self.store, &guild_id.to_string(), "community.events.announcement_channel_id")
+                    .and_then(|value| value.parse::<u64>().ok())
+                {
+                    let _ = ChannelId::new(channel_id).send_message(
+                        &ctx.http,
+                        CreateMessage::new().content(format!("New event **{}** is scheduled for <t:{}:F>.", event.name, start.unix_timestamp())),
+                    ).await;
                 }
                 format!(
                     "Evento nativo #{} criado: **{}** (<t:{}:F>–<t:{}:F>).",
@@ -5015,10 +5183,15 @@ impl Handler {
                     )
                     .await;
                 }
-                let title = option_string(command, "title").unwrap_or("Choose your roles");
+                let title = option_string(command, "title")
+                    .map(str::to_owned)
+                    .or_else(|| setting_string(&self.store, &guild_text, "community.role_panels.title"))
+                    .unwrap_or_else(|| "Choose your roles".to_string());
                 let mut buttons = Vec::new();
                 let mut role_ids = Vec::new();
+                let max_roles = setting_u64(&self.store, &guild_text, "community.role_panels.max_roles", 5).clamp(1, 5) as usize;
                 for name in ["role1", "role2", "role3", "role4", "role5"] {
+                    if role_ids.len() >= max_roles { break; }
                     if let Some(role_id) = command.data.options.iter().find_map(|option| {
                         (option.name == name).then_some(match option.value {
                             CommandDataOptionValue::Role(role) => role,
@@ -5036,12 +5209,17 @@ impl Handler {
                 if buttons.is_empty() {
                     return respond(ctx, command, "Indica pelo menos um cargo válido.").await;
                 }
-                let message = command
-                    .channel_id
+                let panel_channel = setting_string(&self.store, &guild_text, "community.role_panels.channel_id")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .map(ChannelId::new)
+                    .unwrap_or(command.channel_id);
+                let description = setting_string(&self.store, &guild_text, "community.role_panels.description")
+                    .filter(|value| !value.trim().is_empty());
+                let message = panel_channel
                     .send_message(
                         &ctx.http,
                         serenity::all::CreateMessage::new()
-                            .content(title)
+                            .content(if let Some(description) = description { format!("{title}\n{description}") } else { title.clone() })
                             .components(vec![CreateActionRow::Buttons(buttons)]),
                     )
                     .await?;
@@ -5295,6 +5473,19 @@ impl Handler {
             }
             let member = guild_id.member(&ctx.http, component.user.id).await?;
             if member.roles.contains(&role_id) {
+                if !setting_bool(
+                    &self.store,
+                    &guild_id.to_string(),
+                    "community.role_panels.remove_on_unselect",
+                    true,
+                ) {
+                    return respond_component(
+                        ctx,
+                        component,
+                        "This panel keeps selected roles assigned.",
+                    )
+                    .await;
+                }
                 member.remove_role(&ctx.http, role_id).await?;
                 return respond_component(ctx, component, "Cargo removido.").await;
             }

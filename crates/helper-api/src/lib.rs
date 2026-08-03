@@ -3612,7 +3612,7 @@ async fn feature_config(
                     })
                     .unwrap_or_else(|| serde_json::json!({}));
                 let mut issues = validate_feature_config(key, &config);
-                issues.extend(lifecycle_issues(maturity));
+                issues.extend(lifecycle_issues(key, maturity));
                 let enabled = stored
                     .as_ref()
                     .map(|value| value.enabled)
@@ -4118,7 +4118,7 @@ fn validate_feature_config(key: &str, config: &serde_json::Value) -> Vec<Validat
     issues
 }
 
-fn lifecycle_issues(maturity: FeatureMaturity) -> Vec<ValidationIssue> {
+fn lifecycle_issues_legacy(maturity: FeatureMaturity) -> Vec<ValidationIssue> {
     if maturity == FeatureMaturity::Blocked {
         return vec![ValidationIssue {
             path: "feature".into(),
@@ -4128,6 +4128,56 @@ fn lifecycle_issues(maturity: FeatureMaturity) -> Vec<ValidationIssue> {
         }];
     }
     Vec::new()
+}
+
+fn lifecycle_issues(key: &str, maturity: FeatureMaturity) -> Vec<ValidationIssue> {
+    if maturity != FeatureMaturity::Blocked {
+        return Vec::new();
+    }
+    let message = match key {
+        "social.instagram" => {
+            "Blocked until a Meta app, professional account OAuth grant, App Review and deletion callbacks are configured."
+        }
+        "social.reddit" => {
+            "Blocked until Reddit OAuth is configured and commercial API use is approved in writing."
+        }
+        "social.x" => {
+            "Blocked until an X developer app, paid API budget and official OAuth access are configured."
+        }
+        "social.tiktok" => {
+            "Blocked until TikTok Display API review is approved and a creator authorizes the required scopes."
+        }
+        "social.kick" => {
+            "Blocked until an approved Kick developer app and official webhook/API access are available."
+        }
+        "social.bluesky" => {
+            "Blocked until the persistent Bluesky stream consumer, cursor recovery and duplicate protection are enabled."
+        }
+        "growth.monetization" => {
+            "Blocked until Stripe Connect onboarding, KYC, tax, refunds and chargeback support are approved."
+        }
+        "web3.nft_stats" | "web3.nft_queries" | "web3.nft_sales" => {
+            "Blocked until an OpenSea production API key and collection/event policy are configured."
+        }
+        "web3.crypto_stats" | "web3.crypto_queries" => {
+            "Blocked until a CoinGecko API key, quota budget and freshness policy are configured."
+        }
+        "web3.gas_tracker" => {
+            "Blocked until an approved RPC endpoint and network allow-list are configured."
+        }
+        "web3.gating" => {
+            "Blocked until SIWE domain/session settings, RPC endpoints and an approved contract allow-list are configured."
+        }
+        _ => {
+            "Blocked until an official provider, valid credentials and the required legal/security review are available."
+        }
+    };
+    let mut issues = lifecycle_issues_legacy(maturity);
+    if let Some(issue) = issues.first_mut() {
+        issue.code = "dependency_required".into();
+        issue.message = message.into();
+    }
+    issues
 }
 
 fn feature_health_status(
@@ -4220,7 +4270,7 @@ async fn feature_detail(
         .unwrap_or_else(|| serde_json::json!({}));
     let maturity = feature_maturity(&key);
     let mut issues = validate_feature_config(&key, &config);
-    issues.extend(lifecycle_issues(maturity));
+    issues.extend(lifecycle_issues(&key, maturity));
     let revision = stored.as_ref().map(|value| value.revision).unwrap_or(0);
     let enabled = feature_enabled(&state, &claims.guild_id, &key);
     let adapter = feature_adapter(&key).map(|value| value.descriptor());
@@ -4270,7 +4320,7 @@ async fn feature_health(
         .unwrap_or_else(|| serde_json::json!({}));
     let maturity = feature_maturity(&key);
     let mut issues = validate_feature_config(&key, &config);
-    issues.extend(lifecycle_issues(maturity));
+    issues.extend(lifecycle_issues(&key, maturity));
     let enabled = feature_enabled(&state, &claims.guild_id, &key);
     let descriptor = feature_adapter(&key).map(|adapter| adapter.descriptor());
     Ok(Json(serde_json::json!({
@@ -4538,7 +4588,7 @@ async fn test_feature(
         return Err(client_error(StatusCode::NOT_FOUND, "unknown_feature"));
     }
     let mut issues = validate_feature_config(&key, &test.config);
-    issues.extend(lifecycle_issues(feature_maturity(&key)));
+    issues.extend(lifecycle_issues(&key, feature_maturity(&key)));
     let maturity = feature_maturity(&key);
     if !feature_is_configurable(&key) {
         issues.push(ValidationIssue {

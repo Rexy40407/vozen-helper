@@ -14,6 +14,7 @@ import {
   type QuickSetupStepKey,
   type RankCardConfig,
   type RssSubscription,
+  type StudioTemplate,
   type TwitchSubscription,
   type YouTubeSubscription,
 } from './api';
@@ -373,7 +374,7 @@ const additionalFeatures: Feature[] = [
     description: 'Pesquisa conteúdos, vídeos e referências sem trocar de aplicação.',
     category: 'utility',
     capability: 'utility',
-    available: false,
+    available: true,
     enabled: false,
   },
   {
@@ -622,10 +623,8 @@ const defaults: Record<string, FeatureConfig> = {
     levelRoles: [],
   },
   'community.leaderboard': {
-    publicEnabled: false,
-    period: 'all_time',
-    optOut: true,
-    showAvatars: true,
+    maxEntries: 10,
+    public: true,
   },
   'community.starboard': {
     emoji: '⭐',
@@ -747,12 +746,9 @@ const defaults: Record<string, FeatureConfig> = {
     deleteOnLeave: false,
     logChannel: '',
   },
-  'management.templates': {
-    templateName: '',
-    includeFeatures: true,
-    includeRoles: false,
-    includeChannels: false,
-  },
+  // Templates use the dedicated StudioTemplate manager below.  Do not expose
+  // generic JSON switches that are not part of the API's template contract.
+  'management.templates': {},
   'community.role_panels': {
     channel: '',
     panelTitle: 'Escolhe os teus cargos',
@@ -901,18 +897,6 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       fields: [
         { key: 'allowMemberExport', label: 'Permitir exportação pelo membro', kind: 'toggle' },
         { key: 'logChannel', label: 'Canal de registo', kind: 'text', advanced: true },
-      ],
-    },
-  ],
-  'management.templates': [
-    {
-      title: 'Modelo de servidor',
-      description: 'Escolhe o que entra num modelo antes de o exportar.',
-      fields: [
-        { key: 'templateName', label: 'Nome do modelo', kind: 'text' },
-        { key: 'includeFeatures', label: 'Incluir funcionalidades', kind: 'toggle' },
-        { key: 'includeRoles', label: 'Incluir cargos', kind: 'toggle' },
-        { key: 'includeChannels', label: 'Incluir canais', kind: 'toggle' },
       ],
     },
   ],
@@ -1597,6 +1581,7 @@ function App() {
   const [youtubeSubscriptions, setYoutubeSubscriptions] = useState<YouTubeSubscription[]>([]);
   const [rssSubscriptions, setRssSubscriptions] = useState<RssSubscription[]>([]);
   const [twitchSubscriptions, setTwitchSubscriptions] = useState<TwitchSubscription[]>([]);
+  const [studioTemplates, setStudioTemplates] = useState<StudioTemplate[]>([]);
   const [route, setRoute] = useState<Route>(() => parseRoute(window.location.hash));
   const [me, setMe] = useState<Me | null>(null);
   const [guilds, setGuilds] = useState<Guild[]>(demoGuilds);
@@ -1807,6 +1792,13 @@ function App() {
       })
       .finally(() => setDetailLoading(false));
   }, [route.page, route.key, features]);
+  useEffect(() => {
+    if (route.page !== 'detail' || route.key !== 'management.templates' || localPreviewMode) return;
+    void api
+      .studioTemplates()
+      .then((result) => setStudioTemplates(result.templates))
+      .catch(() => setStudioTemplates([]));
+  }, [route.page, route.key]);
   useEffect(() => {
     const subscription = route.key === 'social.youtube' ? youtubeSubscriptions[0] : undefined;
     if (route.page === 'detail' && route.key === 'social.youtube' && subscription) {
@@ -2366,6 +2358,8 @@ function App() {
                 setDetailEnabled(features.find((item) => item.key === route.key)?.enabled ?? false);
               }}
               onTest={() => void testDetail()}
+              templates={studioTemplates}
+              onTemplatesChange={setStudioTemplates}
               saving={status === 'saving'}
               onBack={() => navigate('#/features')}
             />
@@ -3234,6 +3228,8 @@ function FeatureDetail({
   onSave,
   onDiscard,
   onTest,
+  templates,
+  onTemplatesChange,
   saving,
   onBack,
 }: {
@@ -3247,6 +3243,8 @@ function FeatureDetail({
   onSave: () => void;
   onDiscard: () => void;
   onTest: () => void;
+  templates: StudioTemplate[];
+  onTemplatesChange: (templates: StudioTemplate[]) => void;
   saving: boolean;
   onBack: () => void;
 }) {
@@ -3304,6 +3302,13 @@ function FeatureDetail({
       </div>
       <div className="detail-layout">
         <div className="detail-sections">
+          {feature?.key === 'management.templates' && (
+            <TemplateManager
+              templates={templates}
+              onChange={onTemplatesChange}
+              localPreviewMode={localPreviewMode}
+            />
+          )}
           {sections.map((section) => (
             <ConfigSection
               key={section.title}
@@ -3343,6 +3348,127 @@ function FeatureDetail({
     </section>
   );
 }
+
+function TemplateManager({
+  templates,
+  onChange,
+  localPreviewMode,
+}: {
+  templates: StudioTemplate[];
+  onChange: (templates: StudioTemplate[]) => void;
+  localPreviewMode: boolean;
+}) {
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [modules, setModules] = useState<string[]>(['core', 'security', 'support']);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const moduleOptions = [
+    ['core', 'Core'],
+    ['security', 'Protection'],
+    ['support', 'Support'],
+    ['events', 'Events'],
+    ['community', 'Community'],
+    ['automate', 'Automation'],
+    ['insights', 'Insights'],
+    ['studio', 'Studio'],
+  ] as const;
+  async function createTemplate() {
+    if (localPreviewMode || !name.trim() || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await api.createStudioTemplate({
+        name: name.trim(),
+        description: description.trim(),
+        modules,
+        config: {},
+      });
+      onChange([...templates, result.template]);
+      setName('');
+      setDescription('');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not save the template.');
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function removeTemplate(id: string) {
+    if (localPreviewMode || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api.deleteStudioTemplate(id);
+      onChange(templates.filter((template) => template.id !== id));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not delete the template.');
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <section className="config-section card">
+      <div className="section-heading">
+        <div>
+          <small className="eyebrow">REAL SERVER TEMPLATES</small>
+          <h3>Save a reusable server setup</h3>
+          <p>
+            {localPreviewMode
+              ? 'Connect the panel to a Helper API to create templates for a real guild.'
+              : 'Templates are stored for this guild only. Secrets and tokens are never exported.'}
+          </p>
+        </div>
+      </div>
+      <div className="field-grid">
+        <label className="field">
+          <span><b>Template name</b><small>Use a clear name your team will recognise.</small></span>
+          <input value={name} maxLength={80} onChange={(event) => setName(event.target.value)} />
+        </label>
+        <label className="field">
+          <span><b>Description</b><small>Optional context for the next administrator.</small></span>
+          <input value={description} maxLength={500} onChange={(event) => setDescription(event.target.value)} />
+        </label>
+      </div>
+      <div className="template-module-grid" aria-label="Template modules">
+        {moduleOptions.map(([value, label]) => (
+          <label className="toggle-field" key={value}>
+            <span><b>{label}</b></span>
+            <input
+              type="checkbox"
+              checked={modules.includes(value)}
+              onChange={(event) => setModules((current) => event.target.checked ? [...new Set([...current, value])] : current.filter((item) => item !== value))}
+            />
+          </label>
+        ))}
+      </div>
+      <button
+        className="secondary"
+        onClick={() => void createTemplate()}
+        disabled={localPreviewMode || busy || !name.trim()}
+      >
+        {busy ? 'Saving…' : 'Save template'}
+      </button>
+      {error && <p className="tip" role="alert">{error}</p>}
+      {templates.length > 0 && (
+        <div className="template-list">
+          {templates.map((template) => (
+            <div className="template-row" key={template.id}>
+              <div><b>{template.name}</b><small>{template.description || 'No description'} · v{template.version}</small></div>
+              <button
+                className="ghost"
+                onClick={() => void removeTemplate(template.id)}
+                disabled={localPreviewMode || busy}
+              >
+                Delete
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function ConfigSection({
   section,
   config,

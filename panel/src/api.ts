@@ -33,6 +33,16 @@ export type Feature = {
   };
 };
 export type FeatureConfig = Record<string, unknown>;
+export type StudioTemplate = {
+  id: string;
+  name: string;
+  description: string;
+  modules: string[];
+  config: FeatureConfig;
+  version: number;
+  created_at: string;
+  updated_at: string;
+};
 export type YouTubeSubscription = {
   id: number;
   sourceChannelId: string;
@@ -516,6 +526,21 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
     }),
+  studioTemplates: () =>
+    request<{ guildId: string; templates: StudioTemplate[] }>('/api/studio/templates'),
+  createStudioTemplate: (payload: {
+    name: string;
+    description: string;
+    modules: string[];
+    config: FeatureConfig;
+  }) =>
+    request<{ guildId: string; template: StudioTemplate }>('/api/studio/templates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  deleteStudioTemplate: (id: string) =>
+    request<void>(`/api/studio/templates/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   startOAuth: async (guildId = '') => {
     persistSessionBearer(null);
     const verifier =

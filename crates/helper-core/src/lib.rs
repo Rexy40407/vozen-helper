@@ -366,6 +366,254 @@ pub struct ToggleOnlyAdapter {
     pub dependencies: &'static [&'static str],
 }
 
+/// Configuration for interaction-driven community modules.  Keeping these
+/// schemas in the core registry prevents the panel from inventing controls
+/// that the Discord handlers do not understand.
+#[derive(Debug, Clone, Copy)]
+pub struct CommunityInteractionAdapter {
+    pub key: &'static str,
+    pub source: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub schema: &'static str,
+    pub defaults: &'static str,
+    pub dependencies: &'static [&'static str],
+    pub projection: fn(&serde_json::Value) -> Vec<(String, String)>,
+}
+
+fn project_suggestions(config: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(object) = config.as_object() else {
+        return Vec::new();
+    };
+    let mut pairs = Vec::new();
+    if let Some(value) = object.get("channel").and_then(serde_json::Value::as_str) {
+        pairs.push(("community.suggestions.channel_id".into(), value.into()));
+    }
+    if let Some(value) = object.get("anonymous").and_then(serde_json::Value::as_bool) {
+        pairs.push(("community.suggestions.anonymous".into(), value.to_string()));
+    }
+    if let Some(value) = object
+        .get("requiredRole")
+        .and_then(serde_json::Value::as_str)
+    {
+        pairs.push(("community.suggestions.required_role".into(), value.into()));
+    }
+    pairs
+}
+
+fn project_giveaways(config: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(object) = config.as_object() else {
+        return Vec::new();
+    };
+    let mut pairs = Vec::new();
+    if let Some(value) = object
+        .get("defaultDurationHours")
+        .and_then(serde_json::Value::as_i64)
+    {
+        pairs.push((
+            "community.giveaways.default_duration_hours".into(),
+            value.to_string(),
+        ));
+    }
+    if let Some(value) = object
+        .get("defaultWinners")
+        .and_then(serde_json::Value::as_i64)
+    {
+        pairs.push((
+            "community.giveaways.default_winners".into(),
+            value.to_string(),
+        ));
+    }
+    if let Some(value) = object
+        .get("requiredRole")
+        .and_then(serde_json::Value::as_str)
+    {
+        pairs.push(("community.giveaways.required_role".into(), value.into()));
+    }
+    pairs
+}
+
+fn project_polls(config: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(object) = config.as_object() else {
+        return Vec::new();
+    };
+    let mut pairs = Vec::new();
+    if let Some(value) = object
+        .get("defaultDurationHours")
+        .and_then(serde_json::Value::as_i64)
+    {
+        pairs.push((
+            "management.polls.default_duration_hours".into(),
+            value.to_string(),
+        ));
+    }
+    if let Some(value) = object.get("channel").and_then(serde_json::Value::as_str) {
+        pairs.push(("management.polls.channel_id".into(), value.into()));
+    }
+    pairs
+}
+
+fn project_events(config: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(object) = config.as_object() else {
+        return Vec::new();
+    };
+    let mut pairs = Vec::new();
+    if let Some(value) = object
+        .get("defaultCapacity")
+        .and_then(serde_json::Value::as_i64)
+    {
+        pairs.push((
+            "community.events.default_capacity".into(),
+            value.to_string(),
+        ));
+    }
+    if let Some(value) = object
+        .get("announcementChannel")
+        .and_then(serde_json::Value::as_str)
+    {
+        pairs.push((
+            "community.events.announcement_channel_id".into(),
+            value.into(),
+        ));
+    }
+    pairs
+}
+
+fn project_role_panels(config: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(object) = config.as_object() else {
+        return Vec::new();
+    };
+    let mut pairs = Vec::new();
+    for (field, key) in [
+        ("channel", "community.role_panels.channel_id"),
+        ("panelTitle", "community.role_panels.title"),
+        ("panelDescription", "community.role_panels.description"),
+    ] {
+        if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
+            pairs.push((key.into(), value.into()));
+        }
+    }
+    if let Some(value) = object.get("maxRoles").and_then(serde_json::Value::as_i64) {
+        pairs.push(("community.role_panels.max_roles".into(), value.to_string()));
+    }
+    if let Some(value) = object
+        .get("removeOnUnselect")
+        .and_then(serde_json::Value::as_bool)
+    {
+        pairs.push((
+            "community.role_panels.remove_on_unselect".into(),
+            value.to_string(),
+        ));
+    }
+    pairs
+}
+
+fn validate_interaction_config(config: &serde_json::Value, key: &str) -> Vec<ValidationIssue> {
+    let Some(object) = config.as_object() else {
+        return vec![ValidationIssue {
+            path: "config".into(),
+            code: "object_required".into(),
+            message: "The configuration must be an object.".into(),
+            severity: "error".into(),
+        }];
+    };
+    let mut issues = Vec::new();
+    for field in ["channel", "requiredRole", "announcementChannel"] {
+        if object.get(field).is_some_and(|value| {
+            value
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty() && text.parse::<u64>().is_err())
+        }) {
+            issues.push(ValidationIssue {
+                path: field.into(),
+                code: "invalid_discord_id".into(),
+                message: "Choose a valid Discord channel or role.".into(),
+                severity: "error".into(),
+            });
+        }
+    }
+    for field in ["anonymous", "removeOnUnselect"] {
+        if object.get(field).is_some_and(|value| !value.is_boolean()) {
+            issues.push(ValidationIssue {
+                path: field.into(),
+                code: "boolean_required".into(),
+                message: "This option must be true or false.".into(),
+                severity: "error".into(),
+            });
+        }
+    }
+    for (field, min, max) in [
+        ("defaultDurationHours", 1_i64, 168_i64),
+        ("defaultWinners", 1_i64, 20_i64),
+        ("defaultCapacity", 0_i64, 100_000_i64),
+        ("maxRoles", 1_i64, 5_i64),
+    ] {
+        if let Some(value) = object.get(field) {
+            if value.as_i64().is_none() {
+                issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "integer_required".into(),
+                    message: "This value must be an integer.".into(),
+                    severity: "error".into(),
+                });
+            } else if !value
+                .as_i64()
+                .is_some_and(|number| (min..=max).contains(&number))
+            {
+                issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "out_of_range".into(),
+                    message: format!("Value must be between {min} and {max}."),
+                    severity: "error".into(),
+                });
+            }
+        }
+    }
+    if key == "community.role_panels" {
+        for (field, max) in [("panelTitle", 80_usize), ("panelDescription", 1_000_usize)] {
+            if let Some(value) = object.get(field)
+                && (value.as_str().is_none()
+                    || value
+                        .as_str()
+                        .is_some_and(|text| text.chars().count() > max))
+            {
+                issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "invalid_text".into(),
+                    message: format!("Text must be at most {max} characters."),
+                    severity: "error".into(),
+                });
+            }
+        }
+    }
+    issues
+}
+
+impl FeatureAdapter for CommunityInteractionAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: self.key.into(),
+            source: self.source.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::from_str(self.schema)
+                .expect("community adapter schema is valid JSON"),
+            defaults: serde_json::from_str(self.defaults)
+                .expect("community adapter defaults are valid JSON"),
+            dependencies: self
+                .dependencies
+                .iter()
+                .map(|value| (*value).into())
+                .collect(),
+        }
+    }
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        validate_interaction_config(config, self.key)
+    }
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        (self.projection)(config)
+    }
+}
+
 /// Settings for temporary voice rooms.  The command already creates and
 /// cleans up rooms in the Discord runtime; exposing these bounded controls
 /// makes the dashboard publish the same values that command handler reads.
@@ -924,20 +1172,110 @@ impl FeatureAdapter for FeedAdapter {
             }];
         };
         let mut issues = Vec::new();
-        for field in ["feedUrl", "targetChannelId"] {
-            if object
-                .get(field)
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| value.chars().count() > 2_000)
-            {
-                issues.push(ValidationIssue {
-                    path: field.into(),
-                    code: "too_long".into(),
-                    message: "Feed fields must be at most 2000 characters.".into(),
-                    severity: "error".into(),
-                });
-            }
+        let feed_url = object
+            .get("feedUrl")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if feed_url.is_empty() {
+            issues.push(ValidationIssue {
+                path: "feedUrl".into(),
+                code: "required".into(),
+                message: "Choose a public RSS or Atom feed URL.".into(),
+                severity: "error".into(),
+            });
+        } else if feed_url.chars().count() > 2_000
+            || !feed_url.starts_with("https://") && !feed_url.starts_with("http://")
+        {
+            issues.push(ValidationIssue {
+                path: "feedUrl".into(),
+                code: "invalid_url".into(),
+                message:
+                    "The feed URL must use http:// or https:// and be at most 2000 characters."
+                        .into(),
+                severity: "error".into(),
+            });
         }
+        let target_channel = object
+            .get("targetChannelId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if target_channel.is_empty() || target_channel.parse::<u64>().is_err() {
+            issues.push(ValidationIssue {
+                path: "targetChannelId".into(),
+                code: "invalid_discord_id".into(),
+                message: "Choose a real Discord channel for alerts.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(value) = object.get("messageTemplate")
+            && (!value.is_string()
+                || value
+                    .as_str()
+                    .is_some_and(|value| value.chars().count() > 2_000))
+        {
+            issues.push(ValidationIssue {
+                path: "messageTemplate".into(),
+                code: "too_long".into(),
+                message: "Alert messages must be text and at most 2000 characters.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(value) = object.get("mention")
+            && (!value.is_string()
+                || value.as_str().is_some_and(|mention| {
+                    !mention.trim().is_empty()
+                        && mention.trim() != "@here"
+                        && mention.trim() != "@everyone"
+                        && !mention.trim().starts_with("<@&")
+                }))
+        {
+            issues.push(ValidationIssue {
+                path: "mention".into(),
+                code: "invalid_mention".into(),
+                message: "Mention must be empty, @here, @everyone or a role mention.".into(),
+                severity: "error".into(),
+            });
+        }
+        if object
+            .get("intervalSeconds")
+            .is_some_and(|value| value.as_i64().is_none())
+        {
+            issues.push(ValidationIssue {
+                path: "intervalSeconds".into(),
+                code: "integer_required".into(),
+                message: "Polling interval must be an integer in seconds.".into(),
+                severity: "error".into(),
+            });
+        }
+        if object
+            .get("feedUrl")
+            .is_some_and(|value| value.as_str().is_none())
+        {
+            issues.push(ValidationIssue {
+                path: "feedUrl".into(),
+                code: "string_required".into(),
+                message: "Feed URL must be text.".into(),
+                severity: "error".into(),
+            });
+        }
+        if object
+            .get("targetChannelId")
+            .is_some_and(|value| value.as_str().is_none())
+        {
+            issues.push(ValidationIssue {
+                path: "targetChannelId".into(),
+                code: "string_required".into(),
+                message: "Discord channel ID must be text.".into(),
+                severity: "error".into(),
+            });
+        }
+        /*
+         * Keep provider validation bounded here as well as in the provider
+         * client. This means a saved beta feature cannot look healthy when
+         * its subscription is only a half-filled JSON object.
+         */
         if let Some(value) = object.get("intervalSeconds")
             && value
                 .as_i64()
@@ -953,8 +1291,28 @@ impl FeatureAdapter for FeedAdapter {
         issues
     }
 
-    fn runtime_projection(&self, _config: &serde_json::Value) -> Vec<(String, String)> {
-        Vec::new()
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut projection = Vec::new();
+        for (field, key) in [
+            ("feedUrl", "social.feed.url"),
+            ("targetChannelId", "social.feed.target_channel_id"),
+            ("messageTemplate", "social.feed.message_template"),
+            ("mention", "social.feed.mention"),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
+                projection.push((key.into(), value.into()));
+            }
+        }
+        if let Some(value) = object
+            .get("intervalSeconds")
+            .and_then(serde_json::Value::as_i64)
+        {
+            projection.push(("social.feed.interval_seconds".into(), value.to_string()));
+        }
+        projection
     }
 }
 
@@ -3415,40 +3773,55 @@ static ANTI_RAID_ADAPTER: AntiRaidAdapter = AntiRaidAdapter;
 static JOIN_GATE_ADAPTER: JoinGateAdapter = JoinGateAdapter;
 static TICKETS_ADAPTER: TicketsAdapter = TicketsAdapter;
 static WELCOME_ADAPTER: WelcomeAdapter = WelcomeAdapter;
-static SUGGESTIONS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+static SUGGESTIONS_ADAPTER: CommunityInteractionAdapter = CommunityInteractionAdapter {
     key: "community.suggestions",
-    source: "suggestions_adapter_v1",
+    source: "suggestions_adapter_v2",
     title: "Suggestion workflow",
-    description: "Suggestions, voting and moderation commands are enabled for this server.",
+    description: "Route suggestions, control anonymous submissions and require an optional member role.",
+    schema: r#"{"version":1,"source":"suggestions_adapter_v2","sections":[{"title":"Suggestion intake","description":"These options are applied to every new suggestion.","fields":[{"key":"channel","label":"Suggestion channel","kind":"channel"},{"key":"anonymous","label":"Hide author in the public message","kind":"toggle"},{"key":"requiredRole","label":"Required role (optional)","kind":"role"}]}]}"#,
+    defaults: r#"{"channel":"","anonymous":false,"requiredRole":""}"#,
     dependencies: &["send_messages", "interactions"],
+    projection: project_suggestions,
 };
-static GIVEAWAYS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+static GIVEAWAYS_ADAPTER: CommunityInteractionAdapter = CommunityInteractionAdapter {
     key: "community.giveaways",
-    source: "giveaways_adapter_v1",
+    source: "giveaways_adapter_v2",
     title: "Giveaway workflow",
-    description: "Giveaway commands, entries, scheduling and rerolls are enabled for this server.",
+    description: "Set safe defaults for giveaway duration, winners and eligibility.",
+    schema: r#"{"version":1,"source":"giveaways_adapter_v2","sections":[{"title":"Giveaway defaults","description":"Commands can still override these defaults when needed.","fields":[{"key":"defaultDurationHours","label":"Default duration (hours)","kind":"number","min":1,"max":168},{"key":"defaultWinners","label":"Default winners","kind":"number","min":1,"max":20},{"key":"requiredRole","label":"Required role (optional)","kind":"role"}]}]}"#,
+    defaults: r#"{"defaultDurationHours":24,"defaultWinners":1,"requiredRole":""}"#,
     dependencies: &["send_messages", "scheduler", "interactions"],
+    projection: project_giveaways,
 };
-static POLLS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+static POLLS_ADAPTER: CommunityInteractionAdapter = CommunityInteractionAdapter {
     key: "management.polls",
-    source: "polls_adapter_v1",
+    source: "polls_adapter_v2",
     title: "Poll workflow",
-    description: "Poll creation, voting and scheduled closing are enabled for this server.",
+    description: "Set the default poll lifetime and route new polls to a real channel.",
+    schema: r#"{"version":1,"source":"polls_adapter_v2","sections":[{"title":"Poll defaults","description":"The command uses these values when no override is provided.","fields":[{"key":"defaultDurationHours","label":"Default duration (hours)","kind":"number","min":1,"max":168},{"key":"channel","label":"Poll channel (optional)","kind":"channel"}]}]}"#,
+    defaults: r#"{"defaultDurationHours":24,"channel":""}"#,
     dependencies: &["send_messages", "scheduler", "interactions"],
+    projection: project_polls,
 };
-static EVENTS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+static EVENTS_ADAPTER: CommunityInteractionAdapter = CommunityInteractionAdapter {
     key: "community.events",
-    source: "events_adapter_v1",
+    source: "events_adapter_v2",
     title: "Discord events",
-    description: "Native scheduled events, registration, capacity and check-in are enabled for this server.",
+    description: "Set event capacity and an optional announcement channel for native events.",
+    schema: r#"{"version":1,"source":"events_adapter_v2","sections":[{"title":"Event defaults","description":"Capacity is stored with each event; announcements use the selected channel.","fields":[{"key":"defaultCapacity","label":"Default capacity (0 = unlimited)","kind":"number","min":0,"max":100000},{"key":"announcementChannel","label":"Announcement channel (optional)","kind":"channel"}]}]}"#,
+    defaults: r#"{"defaultCapacity":0,"announcementChannel":""}"#,
     dependencies: &["manage_events", "scheduler"],
+    projection: project_events,
 };
-static ROLE_PANELS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+static ROLE_PANELS_ADAPTER: CommunityInteractionAdapter = CommunityInteractionAdapter {
     key: "community.role_panels",
-    source: "role_panels_adapter_v1",
+    source: "role_panels_adapter_v2",
     title: "Role panel workflow",
-    description: "Role panel commands and interaction-based assignment are enabled for this server.",
+    description: "Set safe defaults for role panels and enforce a bounded number of roles.",
+    schema: r#"{"version":1,"source":"role_panels_adapter_v2","sections":[{"title":"Panel defaults","description":"The role panel command applies these values to newly published panels.","fields":[{"key":"channel","label":"Panel channel (optional)","kind":"channel"},{"key":"panelTitle","label":"Panel title","kind":"text","min":1,"max":80},{"key":"panelDescription","label":"Panel description","kind":"textarea","max":1000},{"key":"maxRoles","label":"Maximum roles","kind":"number","min":1,"max":5},{"key":"removeOnUnselect","label":"Remove the role when toggled off","kind":"toggle"}]}]}"#,
+    defaults: r#"{"channel":"","panelTitle":"Choose your roles","panelDescription":"Select the roles that fit you.","maxRoles":5,"removeOnUnselect":true}"#,
     dependencies: &["manage_roles", "interactions"],
+    projection: project_role_panels,
 };
 static CUSTOM_COMMANDS_ADAPTER: CustomCommandsAdapter = CustomCommandsAdapter;
 static AUDIT_ADAPTER: AuditAdapter = AuditAdapter;
@@ -3457,6 +3830,7 @@ static BIRTHDAYS_ADAPTER: BirthdaysAdapter = BirthdaysAdapter;
 static EMOJIS_ADAPTER: EmojisAdapter = EmojisAdapter;
 static ACHIEVEMENTS_ADAPTER: AchievementsAdapter = AchievementsAdapter;
 static INVITE_TRACKER_ADAPTER: InviteTrackerAdapter = InviteTrackerAdapter;
+static SEARCH_ADAPTER: SearchAdapter = SearchAdapter;
 
 static TEMP_CHANNELS_ADAPTER: TempChannelsAdapter = TempChannelsAdapter;
 
@@ -3625,6 +3999,118 @@ impl FeatureAdapter for EconomyAdapter {
             .unwrap_or_default()
     }
 }
+
+/// Bounded search uses only providers with public, documented APIs.  The
+/// adapter deliberately exposes the allow-list so the dashboard cannot turn
+/// the feature into an arbitrary web proxy.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SearchAdapter;
+
+impl SearchAdapter {
+    pub const KEY: &'static str = "utility.search";
+    pub const SOURCE: &'static str = "bounded_search_adapter_v1";
+}
+
+impl FeatureAdapter for SearchAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Approved search sources",
+                    "description": "Search is limited to providers with documented APIs; arbitrary URLs are never fetched.",
+                    "fields": [
+                        {"key":"maxResults","label":"Results per search","kind":"number","min":1,"max":5},
+                        {"key":"allowWikipedia","label":"Wikipedia","kind":"toggle"},
+                        {"key":"allowAniList","label":"AniList","kind":"toggle"}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({
+                "maxResults": 5,
+                "allowWikipedia": true,
+                "allowAniList": true
+            }),
+            dependencies: vec!["outbound_https".into(), "send_messages".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        if let Some(value) = object.get("maxResults")
+            && !value.as_i64().is_some_and(|value| (1..=5).contains(&value))
+        {
+            issues.push(ValidationIssue {
+                path: "maxResults".into(),
+                code: "out_of_range".into(),
+                message: "Results per search must be between 1 and 5.".into(),
+                severity: "error".into(),
+            });
+        }
+        for key in ["allowWikipedia", "allowAniList"] {
+            if object.get(key).is_some_and(|value| !value.is_boolean()) {
+                issues.push(ValidationIssue {
+                    path: key.into(),
+                    code: "boolean_required".into(),
+                    message: "Search provider switches must be true or false.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if object
+            .get("allowWikipedia")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+            && object
+                .get("allowAniList")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+        {
+            issues.push(ValidationIssue {
+                path: "providers".into(),
+                code: "provider_required".into(),
+                message: "Enable at least one approved search provider.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let mut projection = Vec::new();
+        if let Some(value) = config.get("maxResults").and_then(serde_json::Value::as_i64) {
+            projection.push((
+                "utility.search.max_results".into(),
+                value.clamp(1, 5).to_string(),
+            ));
+        }
+        if let Some(value) = config
+            .get("allowWikipedia")
+            .and_then(serde_json::Value::as_bool)
+        {
+            projection.push(("utility.search.allow_wikipedia".into(), value.to_string()));
+        }
+        if let Some(value) = config
+            .get("allowAniList")
+            .and_then(serde_json::Value::as_bool)
+        {
+            projection.push(("utility.search.allow_anilist".into(), value.to_string()));
+        }
+        projection
+    }
+}
 static EMBEDS_ADAPTER: EmbedsAdapter = EmbedsAdapter;
 static ECONOMY_ADAPTER: EconomyAdapter = EconomyAdapter;
 
@@ -3659,6 +4145,7 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         EmojisAdapter::KEY => Some(&EMOJIS_ADAPTER as &dyn FeatureAdapter),
         AchievementsAdapter::KEY => Some(&ACHIEVEMENTS_ADAPTER as &dyn FeatureAdapter),
         InviteTrackerAdapter::KEY => Some(&INVITE_TRACKER_ADAPTER as &dyn FeatureAdapter),
+        SearchAdapter::KEY => Some(&SEARCH_ADAPTER as &dyn FeatureAdapter),
         "utility.temp_channels" => Some(&TEMP_CHANNELS_ADAPTER as &dyn FeatureAdapter),
         "social.youtube" => Some(&YOUTUBE_ADAPTER as &dyn FeatureAdapter),
         "social.rss" => Some(&RSS_ADAPTER as &dyn FeatureAdapter),
@@ -3759,6 +4246,7 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "management.invite_tracker"
         | "utility.emojis"
         | "utility.embeds"
+        | "utility.search"
         | "utility.temp_channels"
         | "community.economy"
         | "studio.rank_card" => FeatureMaturity::Operational,
@@ -3774,7 +4262,6 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "social.tiktok"
         | "social.kick"
         | "social.bluesky"
-        | "utility.search"
         | "growth.monetization"
         | "web3.nft_stats"
         | "web3.nft_queries"
@@ -3868,6 +4355,72 @@ mod tests {
         assert_eq!(keys.len(), 52);
         assert!(is_known_feature("community.leaderboard"));
         assert!(!is_known_feature("community.not_a_real_feature"));
+    }
+
+    #[test]
+    fn every_internal_feature_has_an_adapter_and_external_features_stay_blocked() {
+        let internal = [
+            "protection.antispam",
+            "protection.antiscam",
+            "protection.anti_raid",
+            "protection.join_gate",
+            "community.levels",
+            "community.leaderboard",
+            "community.starboard",
+            "community.suggestions",
+            "community.giveaways",
+            "support.tickets",
+            "support.welcome",
+            "support.welcome_channel",
+            "management.nickname",
+            "management.workflows",
+            "management.polls",
+            "insights.stats",
+            "studio.rank_card",
+            "management.moderation",
+            "management.custom_commands",
+            "management.audit",
+            "management.privacy",
+            "management.templates",
+            "community.role_panels",
+            "community.events",
+            "community.achievements",
+            "management.invite_tracker",
+            "utility.help",
+            "utility.reminders",
+            "utility.emojis",
+            "utility.embeds",
+            "utility.search",
+            "utility.temp_channels",
+            "community.birthdays",
+            "community.economy",
+            "social.podcasts",
+        ];
+        for key in internal {
+            assert!(feature_adapter(key).is_some(), "missing adapter for {key}");
+            assert!(matches!(
+                feature_maturity(key),
+                FeatureMaturity::Operational | FeatureMaturity::Beta
+            ));
+        }
+        for key in [
+            "social.instagram",
+            "social.reddit",
+            "social.x",
+            "social.tiktok",
+            "social.kick",
+            "social.bluesky",
+            "growth.monetization",
+            "web3.nft_stats",
+            "web3.nft_queries",
+            "web3.nft_sales",
+            "web3.crypto_stats",
+            "web3.crypto_queries",
+            "web3.gas_tracker",
+            "web3.gating",
+        ] {
+            assert_eq!(feature_maturity(key), FeatureMaturity::Blocked);
+        }
     }
 
     #[test]
@@ -4004,11 +4557,11 @@ mod tests {
             "community.events",
             "community.role_panels",
         ] {
-            let adapter = feature_adapter(key).expect("toggle-only adapter registered");
+            let adapter = feature_adapter(key).expect("community adapter registered");
             assert!(
                 adapter.descriptor().schema["sections"][0]["fields"]
                     .as_array()
-                    .is_some_and(Vec::is_empty)
+                    .is_some_and(|fields| !fields.is_empty())
             );
             assert!(adapter.validate(&serde_json::json!({})).is_empty());
         }
@@ -4033,6 +4586,16 @@ mod tests {
             let adapter = feature_adapter(key).expect("official provider adapter registered");
             assert!(adapter.descriptor().dependencies.len() >= 2);
         }
+        let rss = feature_adapter("social.rss").expect("rss adapter");
+        let feed_projection = rss.runtime_projection(&serde_json::json!({
+            "feedUrl": "https://example.com/feed.xml",
+            "targetChannelId": "123",
+            "intervalSeconds": 600,
+            "messageTemplate": "New: {title}",
+            "mention": ""
+        }));
+        assert!(feed_projection.contains(&("social.feed.target_channel_id".into(), "123".into())));
+        assert!(feed_projection.contains(&("social.feed.interval_seconds".into(), "600".into())));
     }
 
     #[test]
@@ -4450,6 +5013,31 @@ mod tests {
             emojis
                 .runtime_projection(&serde_json::json!({"maxEntries": 8, "animatedOnly": true}))
                 .contains(&("utility.emojis.animated_only".into(), "true".into()))
+        );
+    }
+
+    #[test]
+    fn bounded_search_adapter_rejects_disabled_provider_set() {
+        let search = feature_adapter("utility.search").expect("search adapter");
+        assert_eq!(search.descriptor().source, "bounded_search_adapter_v1");
+        assert!(
+            search
+                .validate(&serde_json::json!({
+                    "maxResults": 5,
+                    "allowWikipedia": false,
+                    "allowAniList": false
+                }))
+                .iter()
+                .any(|issue| issue.code == "provider_required")
+        );
+        assert!(
+            search
+                .runtime_projection(&serde_json::json!({
+                    "maxResults": 3,
+                    "allowWikipedia": true,
+                    "allowAniList": false
+                }))
+                .contains(&("utility.search.max_results".into(), "3".into()))
         );
     }
 }
