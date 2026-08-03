@@ -3245,6 +3245,11 @@ mod tests {
             );
             assert!(adapter.validate(&serde_json::json!({})).is_empty());
         }
+
+        for key in ["social.youtube", "social.rss", "social.twitch"] {
+            let adapter = feature_adapter(key).expect("official provider adapter registered");
+            assert!(adapter.descriptor().dependencies.len() >= 2);
+        }
     }
 
     #[test]
