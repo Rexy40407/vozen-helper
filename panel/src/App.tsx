@@ -62,6 +62,7 @@ type FieldSpec = {
     | 'textarea'
     | 'tags'
     | 'channel'
+    | 'category'
     | 'channels'
     | 'role'
     | 'roles';
@@ -3408,9 +3409,13 @@ function FieldControl({
   onChange: (key: string, value: unknown) => void;
 }) {
   const normalized = value ?? (field.kind === 'toggle' ? false : field.kind === 'tags' || field.kind === 'channels' || field.kind === 'roles' ? [] : '');
-  const resourceOptions = field.kind === 'channel' || field.kind === 'channels' ? (context?.channels ?? []) : (context?.roles ?? []);
+  const resourceOptions = field.kind === 'category'
+    ? (context?.channels ?? []).filter((option) => option.type === 'category')
+    : field.kind === 'channel' || field.kind === 'channels'
+      ? (context?.channels ?? []).filter((option) => option.type !== 'category')
+      : (context?.roles ?? []);
   const multiple = field.kind === 'channels' || field.kind === 'roles';
-  if (field.kind === 'channel' || field.kind === 'channels' || field.kind === 'role' || field.kind === 'roles')
+  if (field.kind === 'channel' || field.kind === 'category' || field.kind === 'channels' || field.kind === 'role' || field.kind === 'roles')
     return (
       <label className="field">
         <span>
@@ -3425,10 +3430,10 @@ function FieldControl({
             const selected = Array.from(event.currentTarget.selectedOptions).map((option) => option.value);
             onChange(field.key, multiple ? selected : (selected[0] ?? ''));
           }}
-          disabled={!context?.capabilities.channelSelectors && (field.kind === 'channel' || field.kind === 'channels') || !context?.capabilities.roleSelectors && (field.kind === 'role' || field.kind === 'roles')}
+          disabled={!context?.capabilities.channelSelectors && (field.kind === 'channel' || field.kind === 'category' || field.kind === 'channels') || !context?.capabilities.roleSelectors && (field.kind === 'role' || field.kind === 'roles')}
         >
           {!multiple && <option value="">Escolhe um recurso</option>}
-          {resourceOptions.map((option) => <option value={option.id} key={option.id}>{field.kind === 'role' || field.kind === 'roles' ? `@${option.name}` : `#${option.name}`}</option>)}
+          {resourceOptions.map((option) => <option value={option.id} key={option.id}>{field.kind === 'role' || field.kind === 'roles' ? `@${option.name}` : field.kind === 'category' ? `▾ ${option.name}` : `#${option.name}`}</option>)}
         </select>
       </label>
     );

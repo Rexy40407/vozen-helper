@@ -2092,7 +2092,7 @@ async fn guild_context(
         .iter()
         .filter_map(|value| {
             let channel_type = value.get("type").and_then(serde_json::Value::as_i64).unwrap_or(0);
-            if channel_type != 0 && channel_type != 5 {
+            if channel_type != 0 && channel_type != 4 && channel_type != 5 {
                 return None;
             }
             let id = value.get("id").and_then(serde_json::Value::as_str)?;
@@ -2111,7 +2111,7 @@ async fn guild_context(
             Some(serde_json::json!({
                 "id": id,
                 "name": value.get("name").and_then(serde_json::Value::as_str).unwrap_or("channel"),
-                "type": if channel_type == 5 { "announcement" } else { "text" },
+                "type": if channel_type == 4 { "category" } else if channel_type == 5 { "announcement" } else { "text" },
                 "overwritesKnown": overwrites.and_then(serde_json::Value::as_array).is_some(),
                 "overwriteCount": overwrites.and_then(serde_json::Value::as_array).map_or(0, Vec::len),
                 "botPermissions": bot_channel_permissions.map(|bits| bits.to_string()),
