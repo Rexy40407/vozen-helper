@@ -2812,6 +2812,16 @@ static YOUTUBE_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
     description: "Polls the official YouTube Data API and delivers deduplicated new-video alerts.",
     dependencies: &["YOUTUBE_API_KEY", "send_messages", "embed_links"],
 };
+// XP card uses a dedicated endpoint and renderer instead of the generic
+// feature-settings publisher. Registering it here keeps catalogue health
+// truthful while the specialised editor owns its colours and backgrounds.
+static RANK_CARD_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+    key: "studio.rank_card",
+    source: "rank_card_adapter_v1",
+    title: "XP card",
+    description: "Render the curated XP card configuration for Discord.",
+    dependencies: &["attach_files"],
+};
 static RSS_ADAPTER: FeedAdapter = FeedAdapter {
     key: "social.rss",
     source: "rss_atom_adapter_v1",
@@ -2999,6 +3009,7 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         "social.rss" => Some(&RSS_ADAPTER as &dyn FeatureAdapter),
         "social.podcasts" => Some(&PODCASTS_ADAPTER as &dyn FeatureAdapter),
         "social.twitch" => Some(&TWITCH_ADAPTER as &dyn FeatureAdapter),
+        "studio.rank_card" => Some(&RANK_CARD_ADAPTER as &dyn FeatureAdapter),
         EmbedsAdapter::KEY => Some(&EMBEDS_ADAPTER as &dyn FeatureAdapter),
         EconomyAdapter::KEY => Some(&ECONOMY_ADAPTER as &dyn FeatureAdapter),
         _ => None,
