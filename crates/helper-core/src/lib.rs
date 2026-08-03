@@ -1313,6 +1313,92 @@ impl FeatureAdapter for AntiScamAdapter {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WelcomeChannelAdapter;
+
+impl WelcomeChannelAdapter {
+    pub const KEY: &'static str = "support.welcome_channel";
+    pub const SOURCE: &'static str = "welcome_channel_adapter_v1";
+}
+
+impl FeatureAdapter for WelcomeChannelAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Guided welcome channel",
+                    "description": "Post the first steps and server rules when a new member arrives.",
+                    "fields": [
+                        {"key":"channelId","label":"Welcome channel","kind":"channel"},
+                        {"key":"message","label":"Guide message","kind":"textarea","min":1,"max":2000,"help":"Use {member} and {server} as placeholders."}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({
+                "channelId": "",
+                "message": "Welcome {member}! Start with the rules, introduce yourself and check the server channels."
+            }),
+            dependencies: vec!["send_messages".into(), "view_channel".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        if !object
+            .get("channelId")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| value.is_empty() || value.parse::<u64>().is_ok())
+        {
+            issues.push(ValidationIssue {
+                path: "channelId".into(),
+                code: "invalid_channel_id".into(),
+                message: "Choose a valid Discord channel.".into(),
+                severity: "error".into(),
+            });
+        }
+        if !object
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty() && value.chars().count() <= 2_000)
+        {
+            issues.push(ValidationIssue {
+                path: "message".into(),
+                code: "invalid_message".into(),
+                message: "The guide message must contain 1-2000 characters.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut pairs = Vec::new();
+        if let Some(value) = object.get("channelId").and_then(serde_json::Value::as_str) {
+            pairs.push(("support.welcome_channel.channel_id".into(), value.into()));
+        }
+        if let Some(value) = object.get("message").and_then(serde_json::Value::as_str) {
+            pairs.push(("support.welcome_channel.message".into(), value.into()));
+        }
+        pairs
+    }
+}
+
 impl AntiSpamAdapter {
     pub const KEY: &'static str = "protection.antispam";
     pub const SOURCE: &'static str = "anti_spam_adapter_v1";
@@ -1493,6 +1579,7 @@ static STATS_ADAPTER: StatsAdapter = StatsAdapter;
 static HELP_ADAPTER: HelpAdapter = HelpAdapter;
 static MODERATION_ADAPTER: ModerationAdapter = ModerationAdapter;
 static ANTI_SCAM_ADAPTER: AntiScamAdapter = AntiScamAdapter;
+static WELCOME_CHANNEL_ADAPTER: WelcomeChannelAdapter = WelcomeChannelAdapter;
 
 pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
     match key {
@@ -1506,6 +1593,7 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         HelpAdapter::KEY => Some(&HELP_ADAPTER as &dyn FeatureAdapter),
         ModerationAdapter::KEY => Some(&MODERATION_ADAPTER as &dyn FeatureAdapter),
         AntiScamAdapter::KEY => Some(&ANTI_SCAM_ADAPTER as &dyn FeatureAdapter),
+        WelcomeChannelAdapter::KEY => Some(&WELCOME_CHANNEL_ADAPTER as &dyn FeatureAdapter),
         _ => None,
     }
 }
@@ -1580,6 +1668,7 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "community.events"
         | "support.tickets"
         | "support.welcome"
+        | "support.welcome_channel"
         | "management.polls"
         | "management.nickname"
         | "utility.reminders"
@@ -1932,6 +2021,30 @@ mod tests {
         assert_eq!(decision.timeout_seconds, 60);
         assert!(evaluate_scam(&policy, "123", "https://discord.gg/example").should_act);
         assert!(evaluate_scam(&policy, "123", "hello").matched.is_empty());
+    }
+
+    #[test]
+    fn welcome_channel_adapter_projects_a_real_member_join_message() {
+        let adapter = feature_adapter("support.welcome_channel").expect("welcome adapter");
+        assert_eq!(adapter.descriptor().source, "welcome_channel_adapter_v1");
+        assert!(
+            adapter
+                .validate(&serde_json::json!({"channelId": "not-an-id", "message": "Hi"}))
+                .iter()
+                .any(|issue| issue.path == "channelId")
+        );
+        assert!(
+            adapter
+                .runtime_projection(&serde_json::json!({
+                    "channelId": "123",
+                    "message": "Welcome {member}!"
+                }))
+                .contains(&("support.welcome_channel.channel_id".into(), "123".into()))
+        );
+        assert_eq!(
+            feature_maturity("support.welcome_channel"),
+            FeatureMaturity::Operational
+        );
     }
 
     #[test]

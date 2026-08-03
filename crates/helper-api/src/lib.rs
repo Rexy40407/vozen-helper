@@ -2974,7 +2974,7 @@ const FEATURE_DEFINITIONS: &[(&str, &str, &str, &str, &str, bool)] = &[
         "Organiza regras, informação e primeiros passos para quem chega.",
         "management",
         "core",
-        false,
+        true,
     ),
     (
         "management.nickname",

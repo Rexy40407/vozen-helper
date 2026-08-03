@@ -1524,6 +1524,26 @@ impl EventHandler for Handler {
                     .await;
             }
         }
+        if feature_enabled(&self.store, &guild_text, "support.welcome_channel", None)
+            && let Some(channel_id) = setting_u64_optional(
+                &self.store,
+                &guild_text,
+                "support.welcome_channel.channel_id",
+            )
+        {
+            let member_mention = format!("<@{}>", new_member.user.id);
+            let guide = setting_string(
+                &self.store,
+                &guild_text,
+                "support.welcome_channel.message",
+            )
+            .unwrap_or_else(|| {
+                "Welcome {member}! Start with the rules, introduce yourself and check the server channels.".to_string()
+            })
+            .replace("{member}", &member_mention)
+            .replace("{server}", "this server");
+            let _ = ChannelId::new(channel_id).say(&ctx.http, guide).await;
+        }
     }
 
     async fn guild_member_removal(
