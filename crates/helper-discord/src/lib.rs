@@ -641,8 +641,11 @@ impl EventHandler for Handler {
                     CreateCommandOption::new(
                         serenity::all::CommandOptionType::String,
                         "provider",
-                        "wikipedia or anilist",
+                        "wikipedia, anilist or bluesky",
                     )
+                    .add_string_choice("Wikipedia", "wikipedia")
+                    .add_string_choice("AniList", "anilist")
+                    .add_string_choice("Bluesky", "bluesky")
                     .required(true),
                 )
                 .add_option(
@@ -3919,6 +3922,7 @@ impl Handler {
                 }
                 let wikipedia = setting_bool(&self.store, &guild_text, "utility.search.allow_wikipedia", true);
                 let anilist = setting_bool(&self.store, &guild_text, "utility.search.allow_anilist", true);
+                let bluesky = setting_bool(&self.store, &guild_text, "utility.search.allow_bluesky", true);
                 let http = HttpClient::new();
                 match provider.as_str() {
                     "wikipedia" if wikipedia => {
@@ -3997,8 +4001,43 @@ impl Handler {
                             .unwrap_or_default();
                         if rows.is_empty() { "No AniList results were found.".to_string() } else { rows.join("\n") }
                     }
-                    "wikipedia" | "anilist" => "That search provider is disabled in this server's settings.".to_string(),
-                    _ => "Choose an approved provider: `wikipedia` or `anilist`.".to_string(),
+                    "bluesky" if bluesky => {
+                        let response = http
+                            .get("https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts")
+                            .query(&[("q", query.as_str()), ("limit", &max_results.to_string())])
+                            .header("User-Agent", "VozenHelper/0.1 (https://vozen.org)")
+                            .send()
+                            .await?
+                            .error_for_status()?
+                            .json::<serde_json::Value>()
+                            .await?;
+                        let rows = response
+                            .pointer("/posts")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .take(max_results)
+                                    .filter_map(|item| {
+                                        let author = item.pointer("/author/displayName")
+                                            .and_then(serde_json::Value::as_str)
+                                            .or_else(|| item.pointer("/author/handle").and_then(serde_json::Value::as_str))?;
+                                        let record = item.get("record")?;
+                                        let text = record.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
+                                        let uri = item.get("uri").and_then(serde_json::Value::as_str).unwrap_or("");
+                                        Some(if uri.is_empty() {
+                                            format!("**{author}** — {}", truncate(text, 280))
+                                        } else {
+                                            format!("**{author}** — {}\n{}", truncate(text, 280), uri)
+                                        })
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        if rows.is_empty() { "No Bluesky results were found.".to_string() } else { rows.join("\n") }
+                    }
+                    "wikipedia" | "anilist" | "bluesky" => "That search provider is disabled in this server's settings.".to_string(),
+                    _ => "Choose an approved provider: `wikipedia`, `anilist` or `bluesky`.".to_string(),
                 }
             }
             "serverstats" => {
