@@ -4598,6 +4598,20 @@ async fn test_feature(
             severity: "error".into(),
         });
     }
+    // The adapter owns the projection used for a preview.  The HTTP layer
+    // only supplies bounded fixture data and keeps specialised evaluators
+    // (anti-spam/scam) below for their detailed explanations.
+    let adapter_fixture = serde_json::json!({
+        "content": test.content.clone(),
+        "channelId": test.channel_id.clone(),
+        "reactionCount": test.reaction_count,
+        "joinCount": test.join_count,
+        "accountAgeDays": test.account_age_days,
+        "hasAvatar": test.has_avatar,
+        "displayName": test.display_name.clone(),
+    });
+    let adapter_effects =
+        feature_adapter(&key).map(|adapter| adapter.simulate(&test.config, &adapter_fixture));
     let mut anti_spam_decision: Option<AntiSpamDecision> = None;
     let effects = match key.as_str() {
         "protection.antispam" => {
@@ -4722,8 +4736,12 @@ async fn test_feature(
                 )]
             }
         }
-        "community.levels" => vec!["Atribuir XP e verificar uma recompensa de nível".into()],
-        "support.tickets" => vec!["Criar um ticket privado com as permissões configuradas".into()],
+        "community.levels" => adapter_effects
+            .clone()
+            .unwrap_or_else(|| vec!["Atribuir XP e verificar uma recompensa de nível".into()]),
+        "support.tickets" => adapter_effects.clone().unwrap_or_else(|| {
+            vec!["Criar um ticket privado com as permissões configuradas".into()]
+        }),
         "community.starboard" => {
             let count = test.reaction_count.unwrap_or(5);
             let threshold = test
@@ -4741,10 +4759,12 @@ async fn test_feature(
                 )]
             }
         }
-        "management.workflows" => {
+        "management.workflows" => adapter_effects.clone().unwrap_or_else(|| {
             vec!["Executar o fluxo em modo dry-run e registar o resultado".into()]
-        }
-        _ => vec!["Guardar a configuração no contexto deste servidor".into()],
+        }),
+        _ => adapter_effects
+            .clone()
+            .unwrap_or_else(|| vec!["Guardar a configuração no contexto deste servidor".into()]),
     };
     let result = SimulationResult {
         key: key.clone(),
@@ -4761,6 +4781,7 @@ async fn test_feature(
         "maturity": maturity,
         "result": result,
         "decision": anti_spam_decision,
+        "adapterEffects": adapter_effects,
     })))
 }
 
@@ -6322,6 +6343,15 @@ mod tests {
             serde_json::json!(["flood", "duplicate", "mentions"])
         );
         assert_eq!(response["decision"]["timeout_seconds"], 90);
+        assert!(
+            response["adapterEffects"]
+                .as_array()
+                .is_some_and(|effects| effects.iter().any(|effect| {
+                    effect
+                        .as_str()
+                        .is_some_and(|text| text.contains("security.antispam.flood_count"))
+                }))
+        );
         assert!(
             response["result"]["effects"][0]
                 .as_str()

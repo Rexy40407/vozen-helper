@@ -351,6 +351,24 @@ pub trait FeatureAdapter: Sync {
     fn descriptor(&self) -> FeatureAdapterDescriptor;
     fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue>;
     fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)>;
+
+    /// Produce a bounded, side-effect-free preview from the same projection
+    /// that is published to the runtime.  Feature-specific evaluators can
+    /// override this (anti-spam and anti-scam do); the default keeps simple
+    /// adapters honest instead of letting the HTTP layer invent effects.
+    fn simulate(&self, config: &serde_json::Value, _fixture: &serde_json::Value) -> Vec<String> {
+        let projection = self.runtime_projection(config);
+        if projection.is_empty() {
+            return vec![format!(
+                "Validate and apply the {} runtime adapter.",
+                self.descriptor().key
+            )];
+        }
+        projection
+            .into_iter()
+            .map(|(key, value)| format!("Apply runtime setting `{key}` = `{value}`."))
+            .collect()
+    }
 }
 
 /// Adapter for modules whose Discord behaviour is already command/interaction
