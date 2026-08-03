@@ -5653,6 +5653,17 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["guildId"], "guild-a");
         assert_eq!(body["features"].as_array().unwrap().len(), 52);
+        // The catalogue must not regress to the original thirteen-card
+        // allow-list. Providers without credentials remain visible as beta
+        // or blocked, while every adapter-backed internal feature is
+        // discoverable from the same API response.
+        let available_count = body["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["available"].as_bool() == Some(true))
+            .count();
+        assert!(available_count >= 37, "available_count={available_count}");
         let mut keys = body["features"]
             .as_array()
             .unwrap()
