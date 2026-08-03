@@ -3,7 +3,10 @@
 use anyhow::Result;
 use chrono::Utc;
 use helper_contracts::{AntiSpamObservation, AntiSpamPolicy, Plan};
-use helper_core::{Config, anti_spam_policy_from_json, evaluate_anti_spam, quota_limit};
+use helper_core::{
+    Config, anti_spam_policy_from_json, evaluate_anti_spam, evaluate_scam, quota_limit,
+    scam_policy_from_json,
+};
 use helper_modules::{
     EntitlementClient, RssClient, RssItem, TwitchClient, YouTubeClient, YouTubeVideo,
 };
@@ -2053,6 +2056,58 @@ impl EventHandler for Handler {
                                     "<@{}>, please slow down — anti-spam recorded this incident.",
                                     message.author.id
                                 ),
+                            )
+                            .await;
+                    }
+                }
+            }
+        }
+        if feature_enabled(&self.store, &guild_text, "protection.antiscam", None) {
+            let policy = scam_policy_for_store(&self.store, &guild_text);
+            let decision =
+                evaluate_scam(&policy, &message.channel_id.to_string(), &message.content);
+            if !decision.ignored && !decision.matched.is_empty() {
+                let reason = format!("Scam protection matched: {}", decision.matched.join(", "));
+                let _ = self.store.record_case(
+                    &guild_text,
+                    "anti-scam",
+                    &message.author.id.to_string(),
+                    &message.author.id.to_string(),
+                    &reason,
+                    None,
+                );
+                if let Some(raw_channel) =
+                    setting_string(&self.store, &guild_text, "security.antiscam.log_channel")
+                        .filter(|value| !value.trim().is_empty())
+                    && let Ok(channel) = raw_channel.parse::<u64>()
+                {
+                    let _ = ChannelId::new(channel)
+                        .say(
+                            &ctx.http,
+                            format!(
+                                "Scam protection: <@{}> — {} ({})",
+                                message.author.id,
+                                reason,
+                                if decision.should_act {
+                                    "action"
+                                } else {
+                                    "monitoring"
+                                }
+                            ),
+                        )
+                        .await;
+                }
+                if decision.should_act {
+                    let _ = message.delete(&ctx.http).await;
+                    if decision.timeout_seconds > 0 {
+                        let until = (chrono::Utc::now()
+                            + chrono::Duration::seconds(decision.timeout_seconds as i64))
+                        .to_rfc3339();
+                        let _ = guild_id
+                            .edit_member(
+                                &ctx.http,
+                                message.author.id,
+                                serenity::all::EditMember::new().disable_communication_until(until),
                             )
                             .await;
                     }
@@ -5689,6 +5744,27 @@ fn anti_spam_policy_for_store(store: &Store, guild_id: &str) -> AntiSpamPolicy {
         "ignoredChannels": csv("security.antispam.ignored_channels"),
         "ignoredRoles": csv("security.antispam.ignored_roles"),
         "alertOnly": setting_bool(store, guild_id, "security.antispam.alert_only", false),
+    }))
+}
+
+fn scam_policy_for_store(store: &Store, guild_id: &str) -> helper_core::ScamPolicy {
+    let list = |key: &str| {
+        setting_string(store, guild_id, key)
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    scam_policy_from_json(&serde_json::json!({
+        "blockInvites": setting_bool(store, guild_id, "security.antiscam.block_invites", true),
+        "blockedDomains": list("security.antiscam.blocked_domains"),
+        "blockedKeywords": list("security.antiscam.blocked_keywords"),
+        "ignoredChannels": list("security.antiscam.ignored_channels"),
+        "logChannel": setting_string(store, guild_id, "security.antiscam.log_channel").unwrap_or_default(),
+        "timeoutSeconds": setting_u64(store, guild_id, "security.antiscam.timeout_seconds", 300),
+        "alertOnly": setting_bool(store, guild_id, "security.antiscam.alert_only", false),
     }))
 }
 

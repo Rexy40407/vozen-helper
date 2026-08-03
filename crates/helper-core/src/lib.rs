@@ -203,6 +203,146 @@ pub fn anti_spam_policy_from_json(value: &serde_json::Value) -> AntiSpamPolicy {
     policy
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScamPolicy {
+    pub block_invites: bool,
+    pub blocked_domains: Vec<String>,
+    pub blocked_keywords: Vec<String>,
+    pub ignored_channels: Vec<String>,
+    pub alert_only: bool,
+    pub timeout_seconds: u64,
+}
+
+impl Default for ScamPolicy {
+    fn default() -> Self {
+        Self {
+            block_invites: true,
+            blocked_domains: Vec::new(),
+            blocked_keywords: vec![
+                "free nitro".into(),
+                "steam gift".into(),
+                "claim your prize".into(),
+                "verify your wallet".into(),
+            ],
+            ignored_channels: Vec::new(),
+            alert_only: false,
+            timeout_seconds: 300,
+        }
+    }
+}
+
+pub fn scam_policy_from_json(value: &serde_json::Value) -> ScamPolicy {
+    let mut policy = ScamPolicy::default();
+    let Some(object) = value.as_object() else {
+        return policy;
+    };
+    if let Some(value) = object
+        .get("blockInvites")
+        .and_then(serde_json::Value::as_bool)
+    {
+        policy.block_invites = value;
+    }
+    if let Some(value) = object
+        .get("blockedDomains")
+        .and_then(serde_json::Value::as_array)
+    {
+        policy.blocked_domains = value
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(|domain| domain.trim().to_ascii_lowercase())
+            .filter(|domain| !domain.is_empty())
+            .take(100)
+            .collect();
+    }
+    if let Some(value) = object
+        .get("blockedKeywords")
+        .and_then(serde_json::Value::as_array)
+    {
+        policy.blocked_keywords = value
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(|keyword| keyword.trim().to_ascii_lowercase())
+            .filter(|keyword| !keyword.is_empty())
+            .take(100)
+            .collect();
+    }
+    if let Some(value) = object
+        .get("ignoredChannels")
+        .and_then(serde_json::Value::as_array)
+    {
+        policy.ignored_channels = value
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .take(100)
+            .collect();
+    }
+    if let Some(value) = object.get("alertOnly").and_then(serde_json::Value::as_bool) {
+        policy.alert_only = value;
+    }
+    if let Some(value) = object
+        .get("timeoutSeconds")
+        .and_then(serde_json::Value::as_u64)
+    {
+        policy.timeout_seconds = value.clamp(0, 86_400);
+    }
+    policy
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScamDecision {
+    pub ignored: bool,
+    pub matched: Vec<String>,
+    pub should_act: bool,
+    pub timeout_seconds: u64,
+    pub reason: String,
+}
+
+pub fn evaluate_scam(policy: &ScamPolicy, channel_id: &str, content: &str) -> ScamDecision {
+    if policy.ignored_channels.iter().any(|id| id == channel_id) {
+        return ScamDecision {
+            ignored: true,
+            matched: Vec::new(),
+            should_act: false,
+            timeout_seconds: 0,
+            reason: "ignored_channel".into(),
+        };
+    }
+    let lower = content.to_ascii_lowercase();
+    let mut matched = Vec::new();
+    if policy.block_invites
+        && (lower.contains("discord.gg/") || lower.contains("discord.com/invite/"))
+    {
+        matched.push("discord_invite".into());
+    }
+    for domain in &policy.blocked_domains {
+        if lower.contains(domain) {
+            matched.push(format!("domain:{domain}"));
+        }
+    }
+    for keyword in &policy.blocked_keywords {
+        if lower.contains(keyword) {
+            matched.push(format!("keyword:{keyword}"));
+        }
+    }
+    let should_act = !matched.is_empty() && !policy.alert_only;
+    ScamDecision {
+        ignored: false,
+        matched,
+        should_act,
+        timeout_seconds: if should_act {
+            policy.timeout_seconds
+        } else {
+            0
+        },
+        reason: if should_act {
+            "blocked_scam_pattern".into()
+        } else {
+            "scam_pattern_monitoring".into()
+        },
+    }
+}
+
 /// Every configurable feature will eventually implement this contract. The
 /// first adapter is intentionally small: it proves that the API and gateway
 /// can consume one canonical schema/defaults/validator without pulling UI
@@ -1008,6 +1148,171 @@ impl FeatureAdapter for ModerationAdapter {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AntiScamAdapter;
+
+impl AntiScamAdapter {
+    pub const KEY: &'static str = "protection.antiscam";
+    pub const SOURCE: &'static str = "anti_scam_adapter_v1";
+}
+
+impl FeatureAdapter for AntiScamAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Scam protection",
+                    "description": "Detect invite scams, suspicious domains and common social-engineering phrases.",
+                    "fields": [
+                        {"key":"blockInvites","label":"Block unsolicited Discord invites","kind":"toggle"},
+                        {"key":"blockedDomains","label":"Blocked domains","kind":"tags","max":100,"advanced":true},
+                        {"key":"blockedKeywords","label":"Blocked phrases","kind":"tags","max":100,"advanced":true},
+                        {"key":"ignoredChannels","label":"Ignored channels","kind":"channels","max":100,"advanced":true},
+                        {"key":"logChannel","label":"Log channel","kind":"channel","advanced":true},
+                        {"key":"timeoutSeconds","label":"Timeout (seconds)","kind":"number","min":0,"max":86400,"advanced":true},
+                        {"key":"alertOnly","label":"Monitor only","kind":"toggle","advanced":true}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({
+                "blockInvites": true,
+                "blockedDomains": [],
+                "blockedKeywords": ["free nitro", "steam gift", "claim your prize", "verify your wallet"],
+                "ignoredChannels": [],
+                "logChannel": "",
+                "timeoutSeconds": 300,
+                "alertOnly": false
+            }),
+            dependencies: vec!["message_content_intent".into(), "manage_messages".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        for field in ["blockInvites", "alertOnly"] {
+            if object.get(field).is_some_and(|value| !value.is_boolean()) {
+                issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "boolean_required".into(),
+                    message: "This option must be true or false.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        for (field, max, allow_url) in [
+            ("blockedDomains", 100_usize, true),
+            ("blockedKeywords", 100, false),
+            ("ignoredChannels", 100, false),
+        ] {
+            if let Some(value) = object.get(field) {
+                let valid = value.as_array().is_some_and(|items| {
+                    items.len() <= max
+                        && items.iter().all(|item| {
+                            item.as_str().is_some_and(|text| {
+                                let text = text.trim();
+                                !text.is_empty()
+                                    && text.chars().count() <= 200
+                                    && !text.chars().any(char::is_control)
+                                    && (!allow_url || !text.contains('/'))
+                            })
+                        })
+                });
+                if !valid {
+                    issues.push(ValidationIssue {
+                        path: field.into(),
+                        code: "invalid_list".into(),
+                        message: "Use a bounded list of non-empty values.".into(),
+                        severity: "error".into(),
+                    });
+                }
+            }
+        }
+        if let Some(value) = object
+            .get("timeoutSeconds")
+            .and_then(serde_json::Value::as_i64)
+            && !(0..=86_400).contains(&value)
+        {
+            issues.push(ValidationIssue {
+                path: "timeoutSeconds".into(),
+                code: "out_of_range".into(),
+                message: "Timeout must be between 0 and 86400 seconds.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(value) = object.get("logChannel")
+            && !value
+                .as_str()
+                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok())
+        {
+            issues.push(ValidationIssue {
+                path: "logChannel".into(),
+                code: "invalid_channel_id".into(),
+                message: "Choose a valid Discord channel for protection logs.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut pairs = Vec::new();
+        if let Some(value) = object
+            .get("blockInvites")
+            .and_then(serde_json::Value::as_bool)
+        {
+            pairs.push(("security.antiscam.block_invites".into(), value.to_string()));
+        }
+        if let Some(value) = object.get("alertOnly").and_then(serde_json::Value::as_bool) {
+            pairs.push(("security.antiscam.alert_only".into(), value.to_string()));
+        }
+        if let Some(value) = object.get("logChannel").and_then(serde_json::Value::as_str) {
+            pairs.push(("security.antiscam.log_channel".into(), value.to_string()));
+        }
+        if let Some(value) = object
+            .get("timeoutSeconds")
+            .and_then(serde_json::Value::as_i64)
+        {
+            pairs.push((
+                "security.antiscam.timeout_seconds".into(),
+                value.to_string(),
+            ));
+        }
+        for (field, setting) in [
+            ("blockedDomains", "security.antiscam.blocked_domains"),
+            ("blockedKeywords", "security.antiscam.blocked_keywords"),
+            ("ignoredChannels", "security.antiscam.ignored_channels"),
+        ] {
+            if let Some(values) = object.get(field).and_then(serde_json::Value::as_array) {
+                pairs.push((
+                    setting.into(),
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ));
+            }
+        }
+        pairs
+    }
+}
+
 impl AntiSpamAdapter {
     pub const KEY: &'static str = "protection.antispam";
     pub const SOURCE: &'static str = "anti_spam_adapter_v1";
@@ -1187,6 +1492,7 @@ static PRIVACY_ADAPTER: PrivacyAdapter = PrivacyAdapter;
 static STATS_ADAPTER: StatsAdapter = StatsAdapter;
 static HELP_ADAPTER: HelpAdapter = HelpAdapter;
 static MODERATION_ADAPTER: ModerationAdapter = ModerationAdapter;
+static ANTI_SCAM_ADAPTER: AntiScamAdapter = AntiScamAdapter;
 
 pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
     match key {
@@ -1199,6 +1505,7 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         StatsAdapter::KEY => Some(&STATS_ADAPTER as &dyn FeatureAdapter),
         HelpAdapter::KEY => Some(&HELP_ADAPTER as &dyn FeatureAdapter),
         ModerationAdapter::KEY => Some(&MODERATION_ADAPTER as &dyn FeatureAdapter),
+        AntiScamAdapter::KEY => Some(&ANTI_SCAM_ADAPTER as &dyn FeatureAdapter),
         _ => None,
     }
 }
@@ -1261,7 +1568,8 @@ pub fn evaluate_anti_spam(
 pub fn feature_maturity(key: &str) -> FeatureMaturity {
     match key {
         // These adapters are wired to the current Rust runtime.
-        "protection.anti_raid"
+        "protection.antiscam"
+        | "protection.anti_raid"
         | "protection.join_gate"
         | "protection.antispam"
         | "community.levels"
@@ -1591,6 +1899,39 @@ mod tests {
             feature_maturity("management.moderation"),
             FeatureMaturity::Operational
         );
+    }
+
+    #[test]
+    fn scam_policy_is_bounded_and_explainable() {
+        let adapter = feature_adapter("protection.antiscam").expect("anti-scam adapter");
+        assert_eq!(adapter.descriptor().source, "anti_scam_adapter_v1");
+        assert!(
+            adapter
+                .validate(&serde_json::json!({"blockedDomains": ["bad/domain"]}))
+                .iter()
+                .any(|issue| issue.path == "blockedDomains")
+        );
+        let policy = scam_policy_from_json(&serde_json::json!({
+            "blockInvites": true,
+            "blockedDomains": ["example.invalid"],
+            "blockedKeywords": ["free coins"],
+            "timeoutSeconds": 60
+        }));
+        let decision = evaluate_scam(
+            &policy,
+            "123",
+            "Claim your free coins at https://example.invalid now",
+        );
+        assert!(decision.should_act);
+        assert!(
+            decision
+                .matched
+                .iter()
+                .any(|value| value.starts_with("domain:"))
+        );
+        assert_eq!(decision.timeout_seconds, 60);
+        assert!(evaluate_scam(&policy, "123", "https://discord.gg/example").should_act);
+        assert!(evaluate_scam(&policy, "123", "hello").matched.is_empty());
     }
 
     #[test]
