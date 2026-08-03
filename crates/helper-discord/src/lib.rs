@@ -2097,41 +2097,101 @@ impl EventHandler for Handler {
 
     async fn message_update(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _old: Option<serenity::all::Message>,
-        _new: Option<serenity::all::Message>,
+        new: Option<serenity::all::Message>,
         event: MessageUpdateEvent,
     ) {
         let Some(guild_id) = event.guild_id else {
             return;
         };
         let guild_text = guild_id.to_string();
-        if !feature_enabled(&self.store, &guild_text, "management.audit", None) {
-            return;
-        }
         let author_id = event
             .author
             .as_ref()
             .map(|author| author.id.to_string())
+            .or_else(|| new.as_ref().map(|message| message.author.id.to_string()))
             .unwrap_or_else(|| "unknown".into());
         let author_tag = event.author.as_ref().map(|author| author.tag());
-        let detail = serde_json::json!({
-            "messageId": event.id.to_string(),
-            "channelId": event.channel_id.to_string(),
-            "contentAvailable": event.content.is_some(),
-            "embedsChanged": event.embeds.is_some(),
-            "attachmentsChanged": event.attachments.is_some(),
-            "editedTimestamp": event.edited_timestamp.as_ref().map(ToString::to_string),
-        })
-        .to_string();
-        let _ = self.store.record_activity(
-            &guild_text,
-            "message_edit",
-            &author_id,
-            author_tag.as_deref(),
-            Some(&author_id),
-            &detail,
+        if feature_enabled(&self.store, &guild_text, "management.audit", None) {
+            let detail = serde_json::json!({
+                "messageId": event.id.to_string(),
+                "channelId": event.channel_id.to_string(),
+                "contentAvailable": event.content.is_some(),
+                "embedsChanged": event.embeds.is_some(),
+                "attachmentsChanged": event.attachments.is_some(),
+                "editedTimestamp": event.edited_timestamp.as_ref().map(ToString::to_string),
+            })
+            .to_string();
+            let _ = self.store.record_activity(
+                &guild_text,
+                "message_edit",
+                &author_id,
+                author_tag.as_deref(),
+                Some(&author_id),
+                &detail,
+            );
+        }
+
+        // Edited messages must pass the same scam evaluator as new messages.
+        // Discord may omit the content from the gateway event, so only act
+        // when a bounded content value is actually available.
+        let Some(content) = event
+            .content
+            .as_deref()
+            .or_else(|| new.as_ref().map(|message| message.content.as_str()))
+        else {
+            return;
+        };
+        if !feature_enabled(&self.store, &guild_text, "protection.antiscam", None) {
+            return;
+        }
+        let policy = scam_policy_for_store(&self.store, &guild_text);
+        let decision = evaluate_scam(&policy, &event.channel_id.to_string(), content);
+        if decision.ignored || decision.matched.is_empty() {
+            return;
+        }
+        let reason = format!(
+            "Scam protection matched after edit: {}",
+            decision.matched.join(", ")
         );
+        let _ = self.store.record_case(
+            &guild_text,
+            "anti-scam",
+            &author_id,
+            &author_id,
+            &reason,
+            None,
+        );
+        if let Some(raw_channel) =
+            setting_string(&self.store, &guild_text, "security.antiscam.log_channel")
+                .filter(|value| !value.trim().is_empty())
+            && let Ok(channel) = raw_channel.parse::<u64>()
+        {
+            let _ = ChannelId::new(channel)
+                .say(
+                    &ctx.http,
+                    format!("Scam protection: <@{author_id}> — {reason} (edited message)"),
+                )
+                .await;
+        }
+        if decision.should_act {
+            let _ = event.channel_id.delete_message(&ctx.http, event.id).await;
+            if decision.timeout_seconds > 0
+                && let Ok(user_id) = author_id.parse::<u64>()
+            {
+                let until = (chrono::Utc::now()
+                    + chrono::Duration::seconds(decision.timeout_seconds as i64))
+                .to_rfc3339();
+                let _ = guild_id
+                    .edit_member(
+                        &ctx.http,
+                        serenity::all::UserId::new(user_id),
+                        serenity::all::EditMember::new().disable_communication_until(until),
+                    )
+                    .await;
+            }
+        }
     }
 
     async fn reaction_remove(&self, ctx: Context, reaction: serenity::all::Reaction) {
