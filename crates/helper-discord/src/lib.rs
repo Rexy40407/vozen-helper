@@ -2553,7 +2553,23 @@ impl Handler {
         }
         let content = match command.data.name.as_str() {
             "ping" => "Pong — Vozen Helper está online.".to_string(),
-            "help" => "Vozen Helper público: Core, Studio, Security, Support, Events, Community, Automate e Insights. Usa /dashboard para configurar o servidor.".to_string(),
+            "help" => {
+                let guild_text = command.guild_id.map(|guild_id| guild_id.to_string());
+                let show_modules = guild_text.as_deref().is_none_or(|guild_id| {
+                    setting_bool(&self.store, guild_id, "utility.help.show_modules", true)
+                });
+                let show_dashboard = guild_text.as_deref().is_none_or(|guild_id| {
+                    setting_bool(&self.store, guild_id, "utility.help.show_dashboard", true)
+                });
+                let mut message = "Vozen Helper: Core, Studio, Security, Support, Events, Community, Automate and Insights.".to_string();
+                if show_modules {
+                    message.push_str(" Use /modules to see what is enabled.");
+                }
+                if show_dashboard {
+                    message.push_str(" Use /dashboard to configure your server.");
+                }
+                message
+            }
             "setup" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
@@ -2639,15 +2655,44 @@ impl Handler {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando sÃ³ pode ser usado num servidor.").await;
                 };
+                let guild_text = guild_id.to_string();
+                let allow_export = setting_bool(
+                    &self.store,
+                    &guild_text,
+                    "management.privacy.allow_member_export",
+                    true,
+                );
+                let allow_erase = setting_bool(
+                    &self.store,
+                    &guild_text,
+                    "management.privacy.allow_member_erase",
+                    true,
+                );
+                let max_export_bytes = setting_u64(
+                    &self.store,
+                    &guild_text,
+                    "management.privacy.max_export_bytes",
+                    1_000_000,
+                )
+                .clamp(65_536, 10_000_000) as usize;
                 let subcommand = command.data.options.first().map(|option| option.name.as_str());
                 match subcommand {
                     Some("erase") => {
-                        let result = self.store.purge_user(&guild_id.to_string(), &command.user.id.to_string())?;
+                        if !allow_erase {
+                            return respond(ctx, command, "Member erasure is disabled in this server.").await;
+                        }
+                        let result = self.store.purge_user(&guild_text, &command.user.id.to_string())?;
                         format!("Dados voluntÃ¡rios apagados. Registos de moderaÃ§Ã£o, infraÃ§Ãµes e quarantine foram mantidos por auditoria. Resultado: {result}")
                     }
                     _ => {
-                        let export = self.store.export_user(&guild_id.to_string(), &command.user.id.to_string())?;
+                        if !allow_export {
+                            return respond(ctx, command, "Member data exports are disabled in this server.").await;
+                        }
+                        let export = self.store.export_user(&guild_text, &command.user.id.to_string())?;
                         let bytes = serde_json::to_vec_pretty(&export)?;
+                        if bytes.len() > max_export_bytes {
+                            return respond(ctx, command, "Your export is larger than this server's configured limit.").await;
+                        }
                         let dm = command.user.create_dm_channel(&ctx.http).await;
                         match dm {
                             Ok(channel) => {
@@ -3019,7 +3064,23 @@ impl Handler {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
-                let rows = self.store.stats_for(&guild_id.to_string(), 7)?;
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "insights.stats", None) {
+                    return respond(
+                        ctx,
+                        command,
+                        "Server statistics are disabled in this server. Enable them in the dashboard.",
+                    )
+                    .await;
+                }
+                let window_days = setting_u64(
+                    &self.store,
+                    &guild_text,
+                    "insights.stats.window_days",
+                    7,
+                )
+                .clamp(1, 30) as u32;
+                let rows = self.store.stats_for(&guild_text, window_days)?;
                 let messages: i64 = rows.iter().map(|(_, messages, _, _)| messages).sum();
                 format!("Mensagens registadas nos últimos {} dias: {}.", rows.len(), messages)
             }
@@ -4053,13 +4114,24 @@ impl Handler {
                     true,
                 )
             });
+        let public_stats = command.data.name == "serverstats"
+            && command.guild_id.is_some_and(|guild_id| {
+                setting_bool(
+                    &self.store,
+                    &guild_id.to_string(),
+                    "insights.stats.public",
+                    false,
+                )
+            });
         command
             .create_response(
                 ctx,
                 CreateInteractionResponse::Message(
                     CreateInteractionResponseMessage::new()
                         .content(english_bot_text(&content))
-                        .ephemeral(command.data.name != "ping" && !public_leaderboard),
+                        .ephemeral(
+                            command.data.name != "ping" && !(public_leaderboard || public_stats),
+                        ),
                 ),
             )
             .await?;

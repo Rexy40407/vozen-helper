@@ -654,6 +654,269 @@ impl FeatureAdapter for WorkflowAdapter {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PrivacyAdapter;
+
+impl PrivacyAdapter {
+    pub const KEY: &'static str = "management.privacy";
+    pub const SOURCE: &'static str = "privacy_adapter_v1";
+}
+
+impl FeatureAdapter for PrivacyAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Member data controls",
+                    "description": "Choose which self-service privacy requests members can make.",
+                    "fields": [
+                        {"key":"allowMemberExport","label":"Allow member exports","kind":"toggle","help":"Members can request their own JSON export through /privacy data."},
+                        {"key":"allowMemberErase","label":"Allow member erasure","kind":"toggle","help":"Voluntary profile data is erased; moderation audit records stay retained."},
+                        {"key":"maxExportBytes","label":"Maximum export size","kind":"number","min":65536,"max":10000000,"help":"Protects DMs and storage from oversized exports."}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({"allowMemberExport": true, "allowMemberErase": true, "maxExportBytes": 1000000}),
+            dependencies: vec!["direct_messages".into(), "manager_session".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        for field in ["allowMemberExport", "allowMemberErase"] {
+            if object.get(field).is_some_and(|value| !value.is_boolean()) {
+                issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "boolean_required".into(),
+                    message: "This privacy option must be true or false.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if let Some(value) = object.get("maxExportBytes") {
+            if let Some(value) = value.as_i64() {
+                if !(65_536..=10_000_000).contains(&value) {
+                    issues.push(ValidationIssue {
+                        path: "maxExportBytes".into(),
+                        code: "out_of_range".into(),
+                        message: "Export size must be between 65536 and 10000000 bytes.".into(),
+                        severity: "error".into(),
+                    });
+                }
+            } else {
+                issues.push(ValidationIssue {
+                    path: "maxExportBytes".into(),
+                    code: "integer_required".into(),
+                    message: "Export size must be an integer.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut projection = Vec::new();
+        for (field, key) in [
+            (
+                "allowMemberExport",
+                "management.privacy.allow_member_export",
+            ),
+            ("allowMemberErase", "management.privacy.allow_member_erase"),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_bool) {
+                projection.push((key.into(), value.to_string()));
+            }
+        }
+        if let Some(value) = object
+            .get("maxExportBytes")
+            .and_then(serde_json::Value::as_i64)
+        {
+            projection.push((
+                "management.privacy.max_export_bytes".into(),
+                value.to_string(),
+            ));
+        }
+        projection
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StatsAdapter;
+
+impl StatsAdapter {
+    pub const KEY: &'static str = "insights.stats";
+    pub const SOURCE: &'static str = "stats_adapter_v1";
+}
+
+impl FeatureAdapter for StatsAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Server statistics",
+                    "description": "Control the period and visibility of /serverstats.",
+                    "fields": [
+                        {"key":"windowDays","label":"Reporting window (days)","kind":"number","min":1,"max":30,"help":"Number of recent daily snapshots included."},
+                        {"key":"public","label":"Show publicly","kind":"toggle","help":"When disabled, only the requesting member sees the summary."}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({"windowDays": 7, "public": false}),
+            dependencies: vec!["message_events".into(), "scheduler".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        if let Some(value) = object.get("windowDays") {
+            if let Some(value) = value.as_i64() {
+                if !(1..=30).contains(&value) {
+                    issues.push(ValidationIssue {
+                        path: "windowDays".into(),
+                        code: "out_of_range".into(),
+                        message: "Reporting window must be between 1 and 30 days.".into(),
+                        severity: "error".into(),
+                    });
+                }
+            } else {
+                issues.push(ValidationIssue {
+                    path: "windowDays".into(),
+                    code: "integer_required".into(),
+                    message: "Reporting window must be an integer.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if object
+            .get("public")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "public".into(),
+                code: "boolean_required".into(),
+                message: "Public visibility must be true or false.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut projection = Vec::new();
+        if let Some(value) = object.get("windowDays").and_then(serde_json::Value::as_i64) {
+            projection.push(("insights.stats.window_days".into(), value.to_string()));
+        }
+        if let Some(value) = object.get("public").and_then(serde_json::Value::as_bool) {
+            projection.push(("insights.stats.public".into(), value.to_string()));
+        }
+        projection
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HelpAdapter;
+
+impl HelpAdapter {
+    pub const KEY: &'static str = "utility.help";
+    pub const SOURCE: &'static str = "help_adapter_v1";
+}
+
+impl FeatureAdapter for HelpAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Help message",
+                    "description": "Choose the links and module list shown by /help.",
+                    "fields": [
+                        {"key":"showModules","label":"Show module list","kind":"toggle","help":"Include the enabled module summary in the response."},
+                        {"key":"showDashboard","label":"Include dashboard link","kind":"toggle","help":"Append the dashboard URL for server managers."}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({"showModules": true, "showDashboard": true}),
+            dependencies: vec!["send_messages".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        ["showModules", "showDashboard"]
+            .into_iter()
+            .filter(|field| object.get(*field).is_some_and(|value| !value.is_boolean()))
+            .map(|field| ValidationIssue {
+                path: field.into(),
+                code: "boolean_required".into(),
+                message: "This help option must be true or false.".into(),
+                severity: "error".into(),
+            })
+            .collect()
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        [
+            ("showModules", "utility.help.show_modules"),
+            ("showDashboard", "utility.help.show_dashboard"),
+        ]
+        .into_iter()
+        .filter_map(|(field, key)| {
+            object
+                .get(field)
+                .and_then(serde_json::Value::as_bool)
+                .map(|value| (key.into(), value.to_string()))
+        })
+        .collect()
+    }
+}
+
 impl AntiSpamAdapter {
     pub const KEY: &'static str = "protection.antispam";
     pub const SOURCE: &'static str = "anti_spam_adapter_v1";
@@ -829,6 +1092,9 @@ static NICKNAME_ADAPTER: NicknameAdapter = NicknameAdapter;
 static REMINDER_ADAPTER: ReminderAdapter = ReminderAdapter;
 static LEADERBOARD_ADAPTER: LeaderboardAdapter = LeaderboardAdapter;
 static WORKFLOW_ADAPTER: WorkflowAdapter = WorkflowAdapter;
+static PRIVACY_ADAPTER: PrivacyAdapter = PrivacyAdapter;
+static STATS_ADAPTER: StatsAdapter = StatsAdapter;
+static HELP_ADAPTER: HelpAdapter = HelpAdapter;
 
 pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
     match key {
@@ -837,6 +1103,9 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         ReminderAdapter::KEY => Some(&REMINDER_ADAPTER as &dyn FeatureAdapter),
         LeaderboardAdapter::KEY => Some(&LEADERBOARD_ADAPTER as &dyn FeatureAdapter),
         WorkflowAdapter::KEY => Some(&WORKFLOW_ADAPTER as &dyn FeatureAdapter),
+        PrivacyAdapter::KEY => Some(&PRIVACY_ADAPTER as &dyn FeatureAdapter),
+        StatsAdapter::KEY => Some(&STATS_ADAPTER as &dyn FeatureAdapter),
+        HelpAdapter::KEY => Some(&HELP_ADAPTER as &dyn FeatureAdapter),
         _ => None,
     }
 }
@@ -915,6 +1184,9 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "utility.reminders"
         | "community.leaderboard"
         | "management.workflows"
+        | "management.privacy"
+        | "insights.stats"
+        | "utility.help"
         | "studio.rank_card" => FeatureMaturity::Operational,
         "social.youtube" | "social.rss" | "social.twitch" => FeatureMaturity::Beta,
         // Providers without an approved adapter or credentials must never be
@@ -1198,6 +1470,53 @@ mod tests {
         );
         assert_eq!(
             feature_maturity("management.workflows"),
+            FeatureMaturity::Operational
+        );
+    }
+
+    #[test]
+    fn privacy_stats_and_help_adapters_expose_bounded_runtime_options() {
+        let privacy = feature_adapter("management.privacy").expect("privacy adapter");
+        assert_eq!(privacy.descriptor().source, "privacy_adapter_v1");
+        assert!(privacy
+            .validate(&serde_json::json!({"maxExportBytes": 1, "allowMemberExport": true, "allowMemberErase": true}))
+            .iter()
+            .any(|issue| issue.path == "maxExportBytes"));
+        assert!(
+            privacy
+                .runtime_projection(&serde_json::json!({
+                    "maxExportBytes": 500_000,
+                    "allowMemberExport": false,
+                    "allowMemberErase": true
+                }))
+                .contains(&(
+                    "management.privacy.allow_member_export".into(),
+                    "false".into()
+                ))
+        );
+
+        let stats = feature_adapter("insights.stats").expect("stats adapter");
+        assert_eq!(stats.descriptor().source, "stats_adapter_v1");
+        assert!(
+            stats
+                .validate(&serde_json::json!({"windowDays": 31, "public": false}))
+                .iter()
+                .any(|issue| issue.path == "windowDays")
+        );
+        assert_eq!(
+            feature_maturity("insights.stats"),
+            FeatureMaturity::Operational
+        );
+
+        let help = feature_adapter("utility.help").expect("help adapter");
+        assert_eq!(help.descriptor().source, "help_adapter_v1");
+        assert!(
+            help.validate(&serde_json::json!({"showModules": "yes", "showDashboard": true}))
+                .iter()
+                .any(|issue| issue.path == "showModules")
+        );
+        assert_eq!(
+            feature_maturity("utility.help"),
             FeatureMaturity::Operational
         );
     }
