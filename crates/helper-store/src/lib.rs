@@ -4180,8 +4180,10 @@ mod tests {
         store.register_temp_channel("g", "c", "u").unwrap();
         store.register_temp_channel("g", "c", "u").unwrap();
         assert_eq!(store.temp_channel("c").unwrap().unwrap().owner_id, "u");
+        assert_eq!(store.active_temp_channels("g").unwrap(), 1);
         assert!(store.remove_temp_channel("c").unwrap());
         assert!(store.temp_channel("c").unwrap().is_none());
+        assert_eq!(store.active_temp_channels("g").unwrap(), 0);
         assert!(!store.remove_temp_channel("c").unwrap());
     }
 }
