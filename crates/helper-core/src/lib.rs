@@ -2646,6 +2646,8 @@ impl FeatureAdapter for AntiRaidAdapter {
                     "fields": [
                         {"key":"joinThreshold","label":"Joins before containment","kind":"number","min":2,"max":100},
                         {"key":"windowSeconds","label":"Window (seconds)","kind":"number","min":3,"max":60},
+                        {"key":"incidentMinutes","label":"Containment duration (minutes)","kind":"number","min":1,"max":120},
+                        {"key":"verification","label":"Verification level","kind":"select","options":[["medium","Medium"],["high","High"],["very_high","Very high"]]},
                         {"key":"alertChannel","label":"Alert channel","kind":"channel","advanced":true},
                         {"key":"alertOnly","label":"Monitor only","kind":"toggle","advanced":true}
                     ]
@@ -2654,6 +2656,8 @@ impl FeatureAdapter for AntiRaidAdapter {
             defaults: serde_json::json!({
                 "joinThreshold": 10,
                 "windowSeconds": 10,
+                "incidentMinutes": 10,
+                "verification": "high",
                 "alertChannel": "",
                 "alertOnly": false
             }),
@@ -2671,7 +2675,11 @@ impl FeatureAdapter for AntiRaidAdapter {
             }];
         };
         let mut issues = Vec::new();
-        for (field, min, max) in [("joinThreshold", 2_i64, 100_i64), ("windowSeconds", 3, 60)] {
+        for (field, min, max) in [
+            ("joinThreshold", 2_i64, 100_i64),
+            ("windowSeconds", 3, 60),
+            ("incidentMinutes", 1, 120),
+        ] {
             if let Some(value) = object.get(field).and_then(serde_json::Value::as_i64)
                 && !(min..=max).contains(&value)
             {
@@ -2706,6 +2714,18 @@ impl FeatureAdapter for AntiRaidAdapter {
                 severity: "error".into(),
             });
         }
+        if object.get("verification").is_some_and(|value| {
+            !value
+                .as_str()
+                .is_some_and(|value| matches!(value, "medium" | "high" | "very_high"))
+        }) {
+            issues.push(ValidationIssue {
+                path: "verification".into(),
+                code: "invalid_choice".into(),
+                message: "Choose medium, high or very high verification.".into(),
+                severity: "error".into(),
+            });
+        }
         issues
     }
 
@@ -2717,6 +2737,7 @@ impl FeatureAdapter for AntiRaidAdapter {
         for (field, setting) in [
             ("joinThreshold", "security.anti_raid.joins"),
             ("windowSeconds", "security.anti_raid.window_seconds"),
+            ("incidentMinutes", "security.anti_raid.incident_minutes"),
         ] {
             if let Some(value) = object.get(field).and_then(serde_json::Value::as_i64) {
                 pairs.push((setting.into(), value.to_string()));
@@ -2730,6 +2751,12 @@ impl FeatureAdapter for AntiRaidAdapter {
         }
         if let Some(value) = object.get("alertOnly").and_then(serde_json::Value::as_bool) {
             pairs.push(("security.anti_raid.alert_only".into(), value.to_string()));
+        }
+        if let Some(value) = object
+            .get("verification")
+            .and_then(serde_json::Value::as_str)
+        {
+            pairs.push(("security.anti_raid.verification".into(), value.into()));
         }
         pairs
     }
@@ -2757,11 +2784,16 @@ impl FeatureAdapter for JoinGateAdapter {
                     "description": "Hold accounts below the configured age behind a verification role.",
                     "fields": [
                         {"key":"minimumAccountDays","label":"Minimum account age (days)","kind":"number","min":0,"max":365},
-                        {"key":"verifiedRole","label":"Verification role","kind":"role"}
+                        {"key":"requireAvatar","label":"Require a profile avatar","kind":"toggle"},
+                        {"key":"action","label":"Action for suspicious accounts","kind":"select","options":[["quarantine","Quarantine"],["alert","Alert only"]]},
+                        {"key":"verifiedRole","label":"Quarantine role","kind":"role"},
+                        {"key":"autoRole","label":"Role for verified members","kind":"role"},
+                        {"key":"blockedNamePatterns","label":"Blocked name patterns","kind":"tags","advanced":true},
+                        {"key":"logChannel","label":"Log channel","kind":"channel","advanced":true}
                     ]
                 }]
             }),
-            defaults: serde_json::json!({"minimumAccountDays": 0, "verifiedRole": ""}),
+            defaults: serde_json::json!({"minimumAccountDays": 0, "requireAvatar": false, "action": "quarantine", "verifiedRole": "", "autoRole": "", "blockedNamePatterns": [], "logChannel": ""}),
             dependencies: vec!["guild_members_intent".into(), "manage_roles".into()],
         }
     }
@@ -2800,6 +2832,72 @@ impl FeatureAdapter for JoinGateAdapter {
                 severity: "error".into(),
             });
         }
+        if object.get("autoRole").is_some_and(|value| {
+            !value
+                .as_str()
+                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok())
+        }) {
+            issues.push(ValidationIssue {
+                path: "autoRole".into(),
+                code: "invalid_role_id".into(),
+                message: "Choose a valid Discord role.".into(),
+                severity: "error".into(),
+            });
+        }
+        if object.get("logChannel").is_some_and(|value| {
+            !value
+                .as_str()
+                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok())
+        }) {
+            issues.push(ValidationIssue {
+                path: "logChannel".into(),
+                code: "invalid_channel_id".into(),
+                message: "Choose a valid Discord channel.".into(),
+                severity: "error".into(),
+            });
+        }
+        if object
+            .get("requireAvatar")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "requireAvatar".into(),
+                code: "boolean_required".into(),
+                message: "Require avatar must be true or false.".into(),
+                severity: "error".into(),
+            });
+        }
+        if object.get("action").is_some_and(|value| {
+            !value
+                .as_str()
+                .is_some_and(|value| matches!(value, "quarantine" | "alert"))
+        }) {
+            issues.push(ValidationIssue {
+                path: "action".into(),
+                code: "invalid_choice".into(),
+                message: "Choose quarantine or alert.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(patterns) = object.get("blockedNamePatterns") {
+            let valid = patterns.as_array().is_some_and(|values| {
+                values.len() <= 20
+                    && values.iter().all(|value| {
+                        value.as_str().is_some_and(|pattern| {
+                            let length = pattern.chars().count();
+                            (1..=64).contains(&length) && !pattern.chars().any(char::is_control)
+                        })
+                    })
+            });
+            if !valid {
+                issues.push(ValidationIssue {
+                    path: "blockedNamePatterns".into(),
+                    code: "invalid_patterns".into(),
+                    message: "Use up to 20 name patterns, each 1-64 characters.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
         issues
     }
 
@@ -2819,6 +2917,37 @@ impl FeatureAdapter for JoinGateAdapter {
             .and_then(serde_json::Value::as_str)
         {
             pairs.push(("security.join_gate.role_id".into(), value.into()));
+        }
+        if let Some(value) = object
+            .get("requireAvatar")
+            .and_then(serde_json::Value::as_bool)
+        {
+            pairs.push((
+                "security.join_gate.require_avatar".into(),
+                value.to_string(),
+            ));
+        }
+        if let Some(value) = object.get("action").and_then(serde_json::Value::as_str) {
+            pairs.push(("security.join_gate.action".into(), value.into()));
+        }
+        if let Some(value) = object.get("autoRole").and_then(serde_json::Value::as_str) {
+            pairs.push(("security.join_gate.auto_role_id".into(), value.into()));
+        }
+        if let Some(value) = object.get("logChannel").and_then(serde_json::Value::as_str) {
+            pairs.push(("security.join_gate.log_channel".into(), value.into()));
+        }
+        if let Some(values) = object
+            .get("blockedNamePatterns")
+            .and_then(serde_json::Value::as_array)
+        {
+            pairs.push((
+                "security.join_gate.blocked_name_patterns".into(),
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ));
         }
         pairs
     }
@@ -3948,9 +4077,23 @@ mod tests {
             raid.runtime_projection(&serde_json::json!({
                 "joinThreshold": 20,
                 "windowSeconds": 15,
+                "incidentMinutes": 30,
+                "verification": "very_high",
                 "alertOnly": true
             }))
             .contains(&("security.anti_raid.joins".into(), "20".into()))
+        );
+        assert!(
+            raid.runtime_projection(
+                &serde_json::json!({"incidentMinutes": 30, "verification": "very_high"})
+            )
+            .contains(&("security.anti_raid.incident_minutes".into(), "30".into()))
+        );
+        assert!(
+            raid.runtime_projection(
+                &serde_json::json!({"incidentMinutes": 30, "verification": "very_high"})
+            )
+            .contains(&("security.anti_raid.verification".into(), "very_high".into()))
         );
         let gate = feature_adapter("protection.join_gate").expect("join gate adapter");
         assert_eq!(gate.descriptor().source, "join_gate_adapter_v1");
@@ -3960,11 +4103,18 @@ mod tests {
                 .any(|issue| issue.path == "minimumAccountDays")
         );
         assert!(
-            gate.runtime_projection(
-                &serde_json::json!({"minimumAccountDays": 7, "verifiedRole": "123"})
-            )
+            gate.runtime_projection(&serde_json::json!({
+                "minimumAccountDays": 7,
+                "verifiedRole": "123",
+                "requireAvatar": true,
+                "action": "quarantine",
+                "autoRole": "456",
+                "blockedNamePatterns": ["spam"],
+                "logChannel": "789"
+            }))
             .contains(&("security.join_gate.role_id".into(), "123".into()))
         );
+        assert!(gate.runtime_projection(&serde_json::json!({"requireAvatar": true, "action": "alert", "autoRole": "456", "blockedNamePatterns": ["spam"], "logChannel": "789"})).contains(&("security.join_gate.require_avatar".into(), "true".into())));
     }
 
     #[test]

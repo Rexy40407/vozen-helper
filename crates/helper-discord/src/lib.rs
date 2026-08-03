@@ -1490,6 +1490,33 @@ impl EventHandler for Handler {
         let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let _ = self.store.record_join(&guild_id.to_string(), &day);
         let guild_text = guild_id.to_string();
+        // Anti-raid containment is temporary; an expiry prevents a restart
+        // from leaving the join gate latched forever. Manual gates are not
+        // touched because only an anti-raid latch sets this marker.
+        let now = chrono::Utc::now().timestamp();
+        let mut raid_latched = setting_bool(
+            &self.store,
+            &guild_text,
+            "security.anti_raid.latch_active",
+            false,
+        );
+        if raid_latched
+            && self
+                .store
+                .get_setting(&guild_text, "security.anti_raid.gate_until")
+                .ok()
+                .flatten()
+                .and_then(|value| value.parse::<i64>().ok())
+                .is_some_and(|until| until <= now)
+        {
+            raid_latched = false;
+            let _ = self
+                .store
+                .set_setting(&guild_text, "security.anti_raid.latch_active", "false");
+            let _ = self
+                .store
+                .set_setting(&guild_text, "security.join_gate.enabled", "false");
+        }
         let anti_raid_enabled = self
             .store
             .get_setting(&guild_text, "security.anti_raid.enabled")
@@ -1539,9 +1566,28 @@ impl EventHandler for Handler {
                 // Bounded response: latch the existing gate and alert moderators.
                 // Shadow mode records and alerts but deliberately does not contain.
                 if !shadow_mode {
+                    raid_latched = true;
                     let _ =
                         self.store
                             .set_setting(&guild_text, "security.join_gate.enabled", "true");
+                    let incident_minutes = self
+                        .store
+                        .get_setting(&guild_text, "security.anti_raid.incident_minutes")
+                        .ok()
+                        .flatten()
+                        .and_then(|value| value.parse::<i64>().ok())
+                        .unwrap_or(10)
+                        .clamp(1, 120);
+                    let _ = self.store.set_setting(
+                        &guild_text,
+                        "security.anti_raid.gate_until",
+                        &(now + incident_minutes * 60).to_string(),
+                    );
+                    let _ = self.store.set_setting(
+                        &guild_text,
+                        "security.anti_raid.latch_active",
+                        "true",
+                    );
                 }
                 let reason = format!(
                     "Anti-raid: {threshold} joins dentro de {window_seconds}s; {}",
@@ -1598,13 +1644,6 @@ impl EventHandler for Handler {
             .flatten()
             .is_some_and(|value| value == "true");
         if gate_enabled {
-            if let Ok(Some(raw_role)) = self
-                .store
-                .get_setting(&guild_text, "security.join_gate.role_id")
-                && let Ok(role_id) = raw_role.parse::<u64>()
-            {
-                let _ = new_member.add_role(&ctx.http, RoleId::new(role_id)).await;
-            }
             let minimum_age = self
                 .store
                 .get_setting(&guild_text, "security.join_gate.min_age_days")
@@ -1617,10 +1656,71 @@ impl EventHandler for Handler {
                 chrono::Utc::now().timestamp(),
                 new_member.user.created_at().unix_timestamp(),
             );
+            let raid_verification = if raid_latched {
+                self.store
+                    .get_setting(&guild_text, "security.anti_raid.verification")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "high".to_string())
+            } else {
+                "medium".to_string()
+            };
+            let minimum_age = if raid_verification == "very_high" {
+                minimum_age.max(7)
+            } else {
+                minimum_age
+            };
+            let require_avatar = setting_bool(
+                &self.store,
+                &guild_text,
+                "security.join_gate.require_avatar",
+                false,
+            ) || (raid_latched
+                && matches!(raid_verification.as_str(), "high" | "very_high"));
+            let display_name = new_member
+                .user
+                .global_name
+                .as_deref()
+                .unwrap_or(&new_member.user.name)
+                .to_lowercase();
+            let blocked_patterns = self
+                .store
+                .get_setting(&guild_text, "security.join_gate.blocked_name_patterns")
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+                .lines()
+                .map(str::trim)
+                .filter(|pattern| !pattern.is_empty())
+                .map(str::to_lowercase)
+                .collect::<Vec<_>>();
+            let mut gate_reasons = Vec::new();
             if account_age_days < minimum_age {
-                let reason = format!(
-                    "Join gate: account is {account_age_days} day(s) old; configured minimum is {minimum_age}"
-                );
+                gate_reasons.push(format!("account age {account_age_days}d < {minimum_age}d"));
+            }
+            if require_avatar && new_member.user.avatar.is_none() {
+                gate_reasons.push("profile avatar is required".to_string());
+            }
+            if let Some(pattern) = blocked_patterns
+                .iter()
+                .find(|pattern| display_name.contains(pattern.as_str()))
+            {
+                gate_reasons.push(format!("display name matches `{pattern}`"));
+            }
+            if !gate_reasons.is_empty() {
+                let action = self
+                    .store
+                    .get_setting(&guild_text, "security.join_gate.action")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "quarantine".to_string());
+                if action == "quarantine"
+                    && let Some(role_id) =
+                        setting_u64_optional(&self.store, &guild_text, "security.join_gate.role_id")
+                {
+                    let _ = new_member.add_role(&ctx.http, RoleId::new(role_id)).await;
+                }
+                let reason = format!("Join gate: {}", gate_reasons.join(", "));
                 let _ = self.store.record_case(
                     &guild_text,
                     "join_gate",
@@ -1629,9 +1729,18 @@ impl EventHandler for Handler {
                     &reason,
                     None,
                 );
-                if let Ok(guild) = guild_id.to_partial_guild(&ctx.http).await
-                    && let Some(channel_id) = guild.system_channel_id
-                {
+                let log_channel = setting_u64_optional(
+                    &self.store,
+                    &guild_text,
+                    "security.join_gate.log_channel",
+                )
+                .map(ChannelId::new);
+                let fallback_channel = guild_id
+                    .to_partial_guild(&ctx.http)
+                    .await
+                    .ok()
+                    .and_then(|guild| guild.system_channel_id);
+                if let Some(channel_id) = log_channel.or(fallback_channel) {
                     let _ = channel_id
                         .say(
                             &ctx.http,
@@ -1642,6 +1751,10 @@ impl EventHandler for Handler {
                         )
                         .await;
                 }
+            } else if let Some(role_id) =
+                setting_u64_optional(&self.store, &guild_text, "security.join_gate.auto_role_id")
+            {
+                let _ = new_member.add_role(&ctx.http, RoleId::new(role_id)).await;
             }
         }
         if feature_enabled(&self.store, &guild_text, "support.welcome", None) {

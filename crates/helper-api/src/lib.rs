@@ -18,7 +18,8 @@ use helper_contracts::{
 };
 use helper_core::{
     Capability, FEATURE_SCHEMA_VERSION, anti_spam_policy_from_json, evaluate_anti_spam,
-    feature_adapter, feature_is_configurable, feature_maturity, is_known_feature, quota_limit,
+    evaluate_scam, feature_adapter, feature_is_configurable, feature_maturity, is_known_feature,
+    quota_limit, scam_policy_from_json,
 };
 use helper_modules::{EntitlementClient, RssClient, TwitchClient, YouTubeClient};
 use helper_store::{
@@ -4212,6 +4213,20 @@ struct FeatureTestRequest {
     config: serde_json::Value,
     #[serde(default)]
     fixture: Option<AntiSpamObservation>,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    channel_id: Option<String>,
+    #[serde(default)]
+    reaction_count: Option<u64>,
+    #[serde(default)]
+    join_count: Option<u64>,
+    #[serde(default)]
+    account_age_days: Option<i64>,
+    #[serde(default)]
+    has_avatar: Option<bool>,
+    #[serde(default)]
+    display_name: Option<String>,
 }
 
 async fn test_feature(
@@ -4265,14 +4280,119 @@ async fn test_feature(
             anti_spam_decision = Some(decision);
             effects
         }
+        "protection.antiscam" => {
+            let content = test
+                .content
+                .as_deref()
+                .unwrap_or("Claim your free Nitro at https://discord.gg/example");
+            let channel_id = test.channel_id.as_deref().unwrap_or("preview-channel");
+            let decision = evaluate_scam(&scam_policy_from_json(&test.config), channel_id, content);
+            if decision.ignored {
+                vec!["Ignore the message because this channel is exempt.".into()]
+            } else if decision.matched.is_empty() {
+                vec!["No scam pattern matched; keep the message.".into()]
+            } else if decision.should_act {
+                vec![format!(
+                    "Match {} and apply the configured action (timeout: {}s).",
+                    decision.matched.join(", "),
+                    decision.timeout_seconds
+                )]
+            } else {
+                vec![format!(
+                    "Match {} in monitor-only mode; do not modify the message.",
+                    decision.matched.join(", ")
+                )]
+            }
+        }
         "protection.anti_raid" => {
-            vec!["Registar uma entrada anormal e aplicar a resposta escolhida".into()]
+            let joins = test.join_count.unwrap_or(10);
+            let threshold = test
+                .config
+                .get("joinThreshold")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(10);
+            if joins >= threshold {
+                vec![format!(
+                    "Contain the burst ({joins} joins reached the {threshold}-join threshold) for {} minutes.",
+                    test.config
+                        .get("incidentMinutes")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(10)
+                )]
+            } else {
+                vec![format!(
+                    "Keep monitoring: {joins}/{threshold} joins in the current window."
+                )]
+            }
         }
         "protection.join_gate" => {
-            vec!["Colocar uma conta suspeita em verificação/quarentena".into()]
+            let account_age_days = test.account_age_days.unwrap_or(30);
+            let minimum_age = test
+                .config
+                .get("minimumAccountDays")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            let require_avatar = test
+                .config
+                .get("requireAvatar")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let has_avatar = test.has_avatar.unwrap_or(true);
+            let name = test.display_name.as_deref().unwrap_or("Preview member");
+            let blocked_name = test
+                .config
+                .get("blockedNamePatterns")
+                .and_then(serde_json::Value::as_array)
+                .map(|patterns| {
+                    patterns
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .any(|pattern| {
+                            name.to_ascii_lowercase()
+                                .contains(&pattern.to_ascii_lowercase())
+                        })
+                })
+                .unwrap_or(false);
+            let mut reasons = Vec::new();
+            if account_age_days < minimum_age {
+                reasons.push(format!(
+                    "account age {account_age_days}d is below {minimum_age}d"
+                ));
+            }
+            if require_avatar && !has_avatar {
+                reasons.push("profile avatar is required".to_string());
+            }
+            if blocked_name {
+                reasons.push("display name matches a blocked pattern".to_string());
+            }
+            if reasons.is_empty() {
+                vec!["Allow the member and apply the configured auto-role, if any.".into()]
+            } else {
+                vec![format!(
+                    "Apply the configured join-gate action because {}.",
+                    reasons.join("; ")
+                )]
+            }
         }
         "community.levels" => vec!["Atribuir XP e verificar uma recompensa de nível".into()],
         "support.tickets" => vec!["Criar um ticket privado com as permissões configuradas".into()],
+        "community.starboard" => {
+            let count = test.reaction_count.unwrap_or(5);
+            let threshold = test
+                .config
+                .get("threshold")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(5);
+            if count >= threshold {
+                vec![format!(
+                    "Create or update the starboard mirror ({count}/{threshold} reactions)."
+                )]
+            } else {
+                vec![format!(
+                    "Keep the original message below the board threshold ({count}/{threshold})."
+                )]
+            }
+        }
         "management.workflows" => {
             vec!["Executar o fluxo em modo dry-run e registar o resultado".into()]
         }
@@ -5911,6 +6031,67 @@ mod tests {
                 .iter()
                 .any(|issue| issue["path"] == "permissions.send_messages")
         );
+    }
+
+    #[tokio::test]
+    async fn protection_simulations_use_real_policy_inputs() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+
+        let cases = [
+            (
+                "protection.antiscam",
+                serde_json::json!({
+                    "config": {"blockedKeywords":["free nitro"], "alertOnly":false},
+                    "content": "Claim your free Nitro now",
+                    "channel_id": "general"
+                }),
+                "timeout",
+            ),
+            (
+                "protection.join_gate",
+                serde_json::json!({
+                    "config": {"minimumAccountDays":7, "requireAvatar":true, "blockedNamePatterns":["raid"]},
+                    "account_age_days": 1,
+                    "has_avatar": false,
+                    "display_name": "raid account"
+                }),
+                "join-gate",
+            ),
+            (
+                "community.starboard",
+                serde_json::json!({"config":{"threshold":5}, "reaction_count":3}),
+                "below",
+            ),
+        ];
+        for (key, payload, expected) in cases {
+            let response = router(state(store.clone()))
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/config/features/{key}/simulate"))
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(payload.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{key}");
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                    .unwrap();
+            assert!(
+                body["result"]["effects"][0]
+                    .as_str()
+                    .unwrap()
+                    .to_ascii_lowercase()
+                    .contains(expected),
+                "{key}: {body}"
+            );
+        }
     }
 
     #[tokio::test]
