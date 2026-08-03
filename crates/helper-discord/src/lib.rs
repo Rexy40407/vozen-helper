@@ -4707,6 +4707,7 @@ impl Handler {
                 }
                 let title = option_string(command, "title").unwrap_or("Choose your roles");
                 let mut buttons = Vec::new();
+                let mut role_ids = Vec::new();
                 for name in ["role1", "role2", "role3", "role4", "role5"] {
                     if let Some(role_id) = command.data.options.iter().find_map(|option| {
                         (option.name == name).then_some(match option.value {
@@ -4714,6 +4715,7 @@ impl Handler {
                             _ => return None,
                         })
                     }) {
+                        role_ids.push(role_id.get());
                         buttons.push(
                             CreateButton::new(format!("role:toggle:{}", role_id.get()))
                                 .label(format!("Role {}", buttons.len() + 1))
@@ -4739,7 +4741,8 @@ impl Handler {
                     &serde_json::json!({
                         "channel_id": command.channel_id,
                         "message_id": message.id,
-                        "title": title
+                        "title": title,
+                        "role_ids": role_ids,
                     })
                     .to_string(),
                 )?;
@@ -4934,6 +4937,52 @@ impl Handler {
                 .ok()
                 .map(RoleId::new)
                 .ok_or_else(|| anyhow::anyhow!("invalid role button"))?;
+            let panel_key = format!("community.role_panel.{}", component.message.id);
+            let panel = self
+                .store
+                .get_setting(&guild_id.to_string(), &panel_key)?
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+            let configured = panel
+                .as_ref()
+                .and_then(|value| value.get("role_ids"))
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|roles| {
+                    roles
+                        .iter()
+                        .any(|value| value.as_u64().is_some_and(|id| id == role_id.get()))
+                });
+            if !configured {
+                return respond_component(ctx, component, "This role panel is no longer valid.")
+                    .await;
+            }
+            let roles = guild_id.roles(&ctx.http).await?;
+            let Some(role) = roles.get(&role_id) else {
+                return respond_component(ctx, component, "That role no longer exists.").await;
+            };
+            if role.managed {
+                return respond_component(
+                    ctx,
+                    component,
+                    "Managed Discord roles cannot be assigned.",
+                )
+                .await;
+            }
+            let bot_user = ctx.http.get_current_user().await?;
+            let bot_member = guild_id.member(&ctx.http, bot_user.id).await?;
+            let bot_top_position = bot_member
+                .roles
+                .iter()
+                .filter_map(|id| roles.get(id).map(|item| item.position))
+                .max()
+                .unwrap_or(0);
+            if role.position >= bot_top_position {
+                return respond_component(
+                    ctx,
+                    component,
+                    "That role is above the Helper's highest role.",
+                )
+                .await;
+            }
             let member = guild_id.member(&ctx.http, component.user.id).await?;
             if member.roles.contains(&role_id) {
                 member.remove_role(&ctx.http, role_id).await?;
