@@ -2023,6 +2023,46 @@ impl EventHandler for Handler {
         }
     }
 
+    async fn message_delete(
+        &self,
+        ctx: Context,
+        _channel_id: ChannelId,
+        deleted_message_id: serenity::all::MessageId,
+        guild_id: Option<serenity::all::GuildId>,
+    ) {
+        let Some(guild_id) = guild_id else {
+            return;
+        };
+        let guild_text = guild_id.to_string();
+        let Ok(Some(entry)) = self
+            .store
+            .star_entry(&guild_text, &deleted_message_id.to_string())
+        else {
+            return;
+        };
+        if let Some(board_id) =
+            setting_string(&self.store, &guild_text, "community.starboard.channel_id")
+                .and_then(|value| value.parse::<u64>().ok())
+            && let Ok(starboard_message_id) = entry.starboard_message_id.parse::<u64>()
+        {
+            let _ = ChannelId::new(board_id)
+                .delete_message(
+                    &ctx.http,
+                    serenity::all::MessageId::new(starboard_message_id),
+                )
+                .await;
+        }
+        let _ = self
+            .store
+            .delete_star_entry(&guild_text, &deleted_message_id.to_string());
+    }
+
+    async fn reaction_remove(&self, ctx: Context, reaction: serenity::all::Reaction) {
+        // The board reconciler reads the current reaction users, so the same
+        // path safely handles additions, removals and Discord retries.
+        self.reaction_add(ctx, reaction).await;
+    }
+
     async fn message(&self, ctx: Context, message: serenity::all::Message) {
         if message.author.bot {
             return;
