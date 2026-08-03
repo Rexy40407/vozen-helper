@@ -3826,6 +3826,9 @@ fn feature_health_status(
     if maturity == FeatureMaturity::Blocked {
         return "dependency_down";
     }
+    if !provider_dependencies_ready(key) {
+        return "dependency_down";
+    }
     if feature_adapter(key).is_none() {
         return "degraded";
     }
@@ -3835,6 +3838,31 @@ fn feature_health_status(
     "ready"
 }
 
+fn provider_dependencies_ready(key: &str) -> bool {
+    match key {
+        "social.youtube" => std::env::var("YOUTUBE_API_KEY")
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty()),
+        "social.twitch" => {
+            [
+                "TWITCH_CLIENT_ID",
+                "TWITCH_CLIENT_SECRET",
+                "TWITCH_EVENTSUB_SECRET",
+            ]
+            .into_iter()
+            .all(|name| {
+                std::env::var(name)
+                    .ok()
+                    .is_some_and(|value| !value.trim().is_empty())
+            }) && (std::env::var("TWITCH_EVENTSUB_CALLBACK_URL")
+                .ok()
+                .or_else(|| std::env::var("TWITCH_CALLBACK_URL").ok())
+                .is_some_and(|value| !value.trim().is_empty()))
+        }
+        _ => true,
+    }
+}
+
 fn feature_is_operational(
     key: &str,
     maturity: FeatureMaturity,
@@ -3842,6 +3870,7 @@ fn feature_is_operational(
 ) -> bool {
     maturity != FeatureMaturity::Blocked
         && feature_adapter(key).is_some()
+        && provider_dependencies_ready(key)
         && issues.iter().all(|issue| issue.severity != "error")
 }
 
