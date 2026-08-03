@@ -1510,12 +1510,23 @@ impl EventHandler for Handler {
                 .is_some_and(|until| until <= now)
         {
             raid_latched = false;
+            let previous_gate = self
+                .store
+                .get_setting(&guild_text, "security.anti_raid.previous_gate_enabled")
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "false".to_string());
             let _ = self
                 .store
                 .set_setting(&guild_text, "security.anti_raid.latch_active", "false");
-            let _ = self
-                .store
-                .set_setting(&guild_text, "security.join_gate.enabled", "false");
+            let _ =
+                self.store
+                    .set_setting(&guild_text, "security.join_gate.enabled", &previous_gate);
+            let _ = self.store.set_setting(
+                &guild_text,
+                "security.anti_raid.previous_gate_enabled",
+                "false",
+            );
         }
         let anti_raid_enabled = self
             .store
@@ -1567,6 +1578,17 @@ impl EventHandler for Handler {
                 // Shadow mode records and alerts but deliberately does not contain.
                 if !shadow_mode {
                     raid_latched = true;
+                    let gate_was_enabled = setting_bool(
+                        &self.store,
+                        &guild_text,
+                        "security.join_gate.enabled",
+                        false,
+                    );
+                    let _ = self.store.set_setting(
+                        &guild_text,
+                        "security.anti_raid.previous_gate_enabled",
+                        &gate_was_enabled.to_string(),
+                    );
                     let _ =
                         self.store
                             .set_setting(&guild_text, "security.join_gate.enabled", "true");
