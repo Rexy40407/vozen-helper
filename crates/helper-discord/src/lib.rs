@@ -1,7 +1,7 @@
 //! Discord gateway boundary. Handlers stay thin and delegate to core/modules.
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{Datelike, Utc};
 use helper_contracts::{AntiSpamObservation, AntiSpamPolicy, Plan};
 use helper_core::{
     Config, anti_spam_policy_from_json, evaluate_anti_spam, evaluate_scam, quota_limit,
@@ -18,7 +18,7 @@ use serenity::{
     all::{
         ButtonStyle, ChannelId, ChannelType, Client, Command, CommandDataOptionValue,
         CommandInteraction, Context, CreateActionRow, CreateAttachment, CreateButton,
-        CreateChannel, CreateCommand, CreateCommandOption, CreateInteractionResponse,
+        CreateChannel, CreateCommand, CreateCommandOption, CreateEmbed, CreateInteractionResponse,
         CreateInteractionResponseMessage, CreateMessage, EditChannel, EventHandler, GatewayIntents,
         Interaction, PermissionOverwrite, PermissionOverwriteType, Permissions, Ready, RoleId,
     },
@@ -183,6 +183,7 @@ impl EventHandler for Handler {
             let store = self.store.clone();
             let http = ctx.http.clone();
             tokio::spawn(async move {
+                let mut last_birthday_day: Option<(i32, u32, u32)> = None;
                 loop {
                     if let Ok(actions) =
                         store.due_scheduled_actions(chrono::Utc::now().timestamp_millis(), 100)
@@ -199,6 +200,16 @@ impl EventHandler for Handler {
                             )
                             .await;
                         }
+                    }
+                    let birthday_now = chrono::Utc::now();
+                    let birthday_day = (
+                        birthday_now.year(),
+                        birthday_now.month(),
+                        birthday_now.day(),
+                    );
+                    if last_birthday_day != Some(birthday_day) {
+                        let _ = deliver_birthday_announcements(&http, &store, birthday_day).await;
+                        last_birthday_day = Some(birthday_day);
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
@@ -225,6 +236,7 @@ impl EventHandler for Handler {
                 });
             }
         }
+
         let commands = vec![
             CreateCommand::new("ping").description("Check Helper latency"),
             CreateCommand::new("help").description("Show Helper modules"),
@@ -561,6 +573,25 @@ impl EventHandler for Handler {
                     .required(true),
                 ),
             CreateCommand::new("tags").description("List saved tags"),
+            CreateCommand::new("birthday-set")
+                .description("Save your birthday day and month")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "month",
+                        "Month (1-12)",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "day",
+                        "Day (1-31)",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("birthday-remove").description("Remove your saved birthday"),
             CreateCommand::new("tag-set")
                 .description("Create or update a tag")
                 .add_option(
@@ -600,7 +631,32 @@ impl EventHandler for Handler {
                     .required(false),
                 ),
             CreateCommand::new("leaderboard").description("Show the XP leaderboard"),
+            CreateCommand::new("achievements").description("Show your community achievements"),
             CreateCommand::new("serverstats").description("Show basic server statistics"),
+            CreateCommand::new("emojis").description("List this server's custom emojis"),
+            CreateCommand::new("invites").description("Show current server invite usage"),
+            CreateCommand::new("balance").description("Show your community balance"),
+            CreateCommand::new("daily").description("Claim your daily community reward"),
+            CreateCommand::new("temp-channel")
+                .description("Create a temporary voice channel for yourself"),
+            CreateCommand::new("embed")
+                .description("Publish a safe embed in this channel (staff)")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "title",
+                        "Embed title",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "description",
+                        "Embed description",
+                    )
+                    .required(true),
+                ),
             CreateCommand::new("starboard-set")
                 .description("Configure the starboard channel (staff)")
                 .add_option(
@@ -1295,6 +1351,35 @@ impl EventHandler for Handler {
         }
     }
 
+    async fn voice_state_update(
+        &self,
+        ctx: Context,
+        old: Option<serenity::all::VoiceState>,
+        new: serenity::all::VoiceState,
+    ) {
+        let Some(guild_id) = new
+            .guild_id
+            .or_else(|| old.as_ref().and_then(|state| state.guild_id))
+        else {
+            return;
+        };
+        let Some(old_channel_id) = old.and_then(|state| state.channel_id) else {
+            return;
+        };
+        let channel_id = old_channel_id.to_string();
+        let Ok(Some(record)) = self.store.temp_channel(&channel_id) else {
+            return;
+        };
+        if new.user_id.to_string() != record.owner_id {
+            return;
+        }
+        if let Err(error) = old_channel_id.delete(&ctx.http).await {
+            warn!(%guild_id, %old_channel_id, %error, "failed to remove ownerless temporary voice channel");
+        } else if let Err(error) = self.store.remove_temp_channel(&channel_id) {
+            warn!(%guild_id, %old_channel_id, %error, "failed to remove temporary channel record");
+        }
+    }
+
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         match interaction {
             Interaction::Command(command) => {
@@ -1600,6 +1685,9 @@ impl EventHandler for Handler {
         guild_id: serenity::all::GuildId,
     ) {
         let guild_text = guild_id.to_string();
+        if !feature_enabled(&self.store, &guild_text, "management.audit", None) {
+            return;
+        }
         let enabled = self
             .store
             .get_setting(&guild_text, "security.anti_nuke.enabled")
@@ -2192,6 +2280,7 @@ pub async fn run(config: &Config) -> Result<()> {
         | GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::GUILD_MESSAGE_REACTIONS
         | GatewayIntents::GUILD_INVITES
+        | GatewayIntents::GUILD_VOICE_STATES
         | GatewayIntents::GUILD_WEBHOOKS
         | GatewayIntents::AUTO_MODERATION_CONFIGURATION
         | GatewayIntents::AUTO_MODERATION_EXECUTION
@@ -2640,6 +2729,56 @@ impl Handler {
                 "Manual moderation is disabled in this server. Enable Moderation in the dashboard first.",
             )
             .await;
+        }
+        if command.data.name == "embed" {
+            let Some(guild_id) = command.guild_id else {
+                return respond(ctx, command, "This command can only be used in a server.").await;
+            };
+            let guild_text = guild_id.to_string();
+            if !feature_enabled(&self.store, &guild_text, "utility.embeds", None) {
+                return respond(
+                    ctx,
+                    command,
+                    "Embeds are disabled in this server. Enable them in the dashboard.",
+                )
+                .await;
+            }
+            let title = option_string(command, "title")
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let max_description = setting_u64(
+                &self.store,
+                &guild_text,
+                "utility.embeds.max_description",
+                2_000,
+            )
+            .clamp(1, 4_000) as usize;
+            let description = option_string(command, "description")
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if title.is_empty()
+                || title.chars().count() > 256
+                || description.is_empty()
+                || description.chars().count() > max_description
+            {
+                return respond(
+                    ctx,
+                    command,
+                    "The title or description is outside the configured limits.",
+                )
+                .await;
+            }
+            command
+                .channel_id
+                .send_message(
+                    &ctx.http,
+                    CreateMessage::new()
+                        .embed(CreateEmbed::new().title(title).description(description)),
+                )
+                .await?;
+            return respond(ctx, command, "Embed published.").await;
         }
         let content = match command.data.name.as_str() {
             "ping" => "Pong — Vozen Helper está online.".to_string(),
@@ -3103,10 +3242,43 @@ impl Handler {
                 )?;
                 format!("Lembrete #{id} agendado.")
             }
+            "birthday-set" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "community.birthdays", None) {
+                    return respond(ctx, command, "Birthdays are disabled in this server. Enable them in the dashboard.").await;
+                }
+                let month = option_i64(command, "month").unwrap_or_default();
+                let day = option_i64(command, "day").unwrap_or_default();
+                if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+                    return respond(ctx, command, "Use a month from 1-12 and a day from 1-31.").await;
+                }
+                self.store.set_birthday(&guild_text, &command.user.id.to_string(), month as u32, day as u32)?;
+                "Birthday saved privately as day and month. You can remove it at any time.".to_string()
+            }
+            "birthday-remove" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "community.birthdays", None) {
+                    return respond(ctx, command, "Birthdays are disabled in this server. Enable them in the dashboard.").await;
+                }
+                if self.store.remove_birthday(&guild_text, &command.user.id.to_string())? {
+                    "Your birthday was removed.".to_string()
+                } else {
+                    "You do not have a birthday saved in this server.".to_string()
+                }
+            }
             "tag" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
+                if !feature_enabled(&self.store, &guild_id.to_string(), "management.custom_commands", None) {
+                    return respond(ctx, command, "Custom commands are disabled in this server. Enable them in the dashboard.").await;
+                }
                 let name = option_string(command, "name").unwrap_or_default().to_lowercase();
                 match self.store.get_tag(&guild_id.to_string(), &name)? {
                     Some(tag) => tag.content.replace("{user}", &format!("<@{}>", command.user.id)),
@@ -3117,27 +3289,45 @@ impl Handler {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
-                let names = self.store.list_tags(&guild_id.to_string(), 100)?;
+                if !feature_enabled(&self.store, &guild_id.to_string(), "management.custom_commands", None) {
+                    return respond(ctx, command, "Custom commands are disabled in this server. Enable them in the dashboard.").await;
+                }
+                let max_tags = setting_u64(&self.store, &guild_id.to_string(), "management.custom_commands.max_tags", 100).clamp(1, 100) as u32;
+                let names = self.store.list_tags(&guild_id.to_string(), max_tags)?;
                 if names.is_empty() { "Ainda não existem tags.".to_string() } else { names.join(", ") }
             }
             "tag-set" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
-                let name = option_string(command, "name").unwrap_or_default().to_lowercase();
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "management.custom_commands", None) {
+                    return respond(ctx, command, "Custom commands are disabled in this server. Enable them in the dashboard.").await;
+                }
+                let name = option_string(command, "name").unwrap_or_default().trim().to_lowercase();
                 let content = option_string(command, "content").unwrap_or_default();
-                if !(1..=32).contains(&name.len()) || content.len() > 1_000 {
+                let max_response_length = setting_u64(&self.store, &guild_text, "management.custom_commands.max_response_length", 1_000).clamp(1, 2_000) as usize;
+                if !(1..=32).contains(&name.len()) || content.is_empty() || content.len() > max_response_length {
                     return respond(ctx, command, "Nome ou conteúdo inválido.").await;
                 }
-                self.store.upsert_tag(&guild_id.to_string(), &name, content, &command.user.id.to_string())?;
+                let existing = self.store.get_tag(&guild_text, &name)?.is_some();
+                let max_tags = setting_u64(&self.store, &guild_text, "management.custom_commands.max_tags", 100).clamp(1, 100) as u32;
+                if !existing && self.store.list_tags(&guild_text, max_tags.saturating_add(1))?.len() as u64 >= max_tags as u64 {
+                    return respond(ctx, command, "This server has reached its custom command limit.").await;
+                }
+                self.store.upsert_tag(&guild_text, &name, content, &command.user.id.to_string())?;
                 format!("Tag `{name}` guardada.")
             }
             "tag-delete" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
-                let name = option_string(command, "name").unwrap_or_default().to_lowercase();
-                if self.store.delete_tag(&guild_id.to_string(), &name)? { format!("Tag `{name}` eliminada.") } else { "Tag não encontrada.".to_string() }
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "management.custom_commands", None) {
+                    return respond(ctx, command, "Custom commands are disabled in this server. Enable them in the dashboard.").await;
+                }
+                let name = option_string(command, "name").unwrap_or_default().trim().to_lowercase();
+                if self.store.delete_tag(&guild_text, &name)? { format!("Tag `{name}` eliminada.") } else { "Tag não encontrada.".to_string() }
             }
             "rank" => return self.send_rank_card(ctx, command).await,
             "leaderboard" => {
@@ -3163,6 +3353,21 @@ impl Handler {
                 let rows = self.store.top_levels(&guild_text, max_entries)?;
                 if rows.is_empty() { "Ainda não existem dados de XP.".to_string() } else { rows.into_iter().enumerate().map(|(index, row)| format!("{}. <@{}> — {} XP", index + 1, row.user_id, row.xp)).collect::<Vec<_>>().join("\n") }
             }
+            "achievements" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "community.achievements", None) {
+                    return respond(ctx, command, "Achievements are disabled in this server. Enable them in the dashboard.").await;
+                }
+                let xp = self.store.level_for(&guild_text, &command.user.id.to_string())?;
+                let mut achievements = Vec::new();
+                for (threshold, label) in [(100_i64, "First steps"), (1_000, "Regular"), (10_000, "Community pillar")] {
+                    if xp >= threshold { achievements.push(format!("✅ {label} ({threshold} XP)")); }
+                }
+                if achievements.is_empty() { "No achievements yet. Keep participating to unlock the first one at 100 XP.".to_string() } else { achievements.join("\n") }
+            }
             "serverstats" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
@@ -3186,6 +3391,91 @@ impl Handler {
                 let rows = self.store.stats_for(&guild_text, window_days)?;
                 let messages: i64 = rows.iter().map(|(_, messages, _, _)| messages).sum();
                 format!("Mensagens registadas nos últimos {} dias: {}.", rows.len(), messages)
+            }
+            "emojis" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "utility.emojis", None) {
+                    return respond(ctx, command, "Emoji inventory is disabled in this server. Enable it in the dashboard.").await;
+                }
+                let emojis = guild_id.emojis(&ctx.http).await?;
+                if emojis.is_empty() { "No custom emojis are configured in this server.".to_string() } else {
+                    emojis.into_iter().take(50).map(|emoji| format!("{} `<:{}:{}>`", if emoji.animated { "🎞️" } else { "😀" }, emoji.name, emoji.id)).collect::<Vec<_>>().join("\n")
+                }
+            }
+            "invites" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "management.invite_tracker", None) {
+                    return respond(ctx, command, "Invite tracking is disabled in this server. Enable it in the dashboard.").await;
+                }
+                let mut invites = guild_id.invites(&ctx.http).await?;
+                invites.sort_by_key(|invite| std::cmp::Reverse(invite.uses));
+                if invites.is_empty() { "No active invites were found. The bot needs Manage Server to read them.".to_string() } else {
+                    invites
+                        .into_iter()
+                        .take(10)
+                        .map(|invite| {
+                            let inviter = invite
+                                .inviter
+                                .map(|user| user.name)
+                                .unwrap_or_else(|| "Discord system".into());
+                            format!("`{}` — {} uses — {}", invite.code, invite.uses, inviter)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            }
+            "balance" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "community.economy", None) {
+                    return respond(ctx, command, "Economy is disabled in this server. Enable it in the dashboard.").await;
+                }
+                let account = self.store.economy_account(&guild_text, &command.user.id.to_string())?;
+                format!("Your balance is **{}** credits.", account.balance)
+            }
+            "daily" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "community.economy", None) {
+                    return respond(ctx, command, "Economy is disabled in this server. Enable it in the dashboard.").await;
+                }
+                let reward = setting_u64(&self.store, &guild_text, "community.economy.daily_reward", 100).clamp(1, 10_000) as i64;
+                match self.store.claim_daily(&guild_text, &command.user.id.to_string(), reward)? {
+                    Some(account) => format!("Daily reward claimed: **{}** credits. Your balance is **{}**.", reward, account.balance),
+                    None => "You already claimed your daily reward. Try again after the 24-hour cooldown.".to_string(),
+                }
+            }
+            "temp-channel" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "utility.temp_channels", None) {
+                    return respond(ctx, command, "Temporary channels are disabled in this server. Enable them in the dashboard.").await;
+                }
+                let channel = guild_id
+                    .create_channel(
+                        &ctx.http,
+                        CreateChannel::new(format!("{}'s room", command.user.name))
+                            .kind(serenity::all::ChannelType::Voice),
+                    )
+                    .await?;
+                self.store.register_temp_channel(
+                    &guild_text,
+                    &channel.id.to_string(),
+                    &command.user.id.to_string(),
+                )?;
+                format!("Temporary voice channel created: <#{}>. It will be removed when everyone leaves.", channel.id)
             }
             "starboard-set" => {
                 let Some(guild_id) = command.guild_id else {
@@ -3514,6 +3804,11 @@ impl Handler {
                     &guild_text,
                     "security.anti_nuke.window_seconds",
                     &window_seconds.to_string(),
+                )?;
+                self.store.set_setting(
+                    &guild_text,
+                    "feature.management.audit",
+                    if enabled { "true" } else { "false" },
                 )?;
                 if enabled {
                     format!("Anti-nuke ativado: {actions} ações destrutivas em {window_seconds}s ativam contenção e alerta.")
@@ -5624,6 +5919,9 @@ fn required_permission(command: &str) -> Option<Permissions> {
         "event-create" | "event-edit" | "event-cancel" | "event-attendees" => {
             Some(Permissions::CREATE_EVENTS)
         }
+        "invites" => Some(Permissions::MANAGE_GUILD),
+        "temp-channel" => Some(Permissions::MANAGE_CHANNELS),
+        "embed" => Some(Permissions::MANAGE_MESSAGES),
         "tag-set" | "tag-delete" | "giveaway-start" | "giveaway-end" | "gstart" | "gend"
         | "greroll" | "starboard-set" | "workflow-create" | "workflow-dry-run"
         | "workflow-toggle" | "workflow-delete" => Some(Permissions::MANAGE_GUILD),
@@ -5809,6 +6107,37 @@ fn parse_scheduled_event_window(
         return Err("event_too_long");
     }
     Ok((start, end))
+}
+
+async fn deliver_birthday_announcements(
+    http: &serenity::http::Http,
+    store: &Store,
+    date: (i32, u32, u32),
+) -> Result<()> {
+    let (year, month, day) = date;
+    let birthdays = store.due_birthdays(month, day, year, 500)?;
+    for birthday in birthdays {
+        if !feature_enabled(store, &birthday.guild_id, "community.birthdays", None) {
+            continue;
+        }
+        let Some(channel_id) =
+            setting_string(store, &birthday.guild_id, "community.birthdays.channel_id")
+                .and_then(|value| value.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        let template = setting_string(store, &birthday.guild_id, "community.birthdays.message")
+            .unwrap_or_else(|| "Happy birthday, {user}! 🎉".into());
+        let content = template.replace("{user}", &format!("<@{}>", birthday.user_id));
+        if ChannelId::new(channel_id)
+            .send_message(http, CreateMessage::new().content(content))
+            .await
+            .is_ok()
+        {
+            let _ = store.mark_birthday_announced(&birthday.guild_id, &birthday.user_id, year);
+        }
+    }
+    Ok(())
 }
 
 async fn deliver_scheduled_action(

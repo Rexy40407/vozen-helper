@@ -366,6 +366,349 @@ pub struct ToggleOnlyAdapter {
     pub dependencies: &'static [&'static str],
 }
 
+/// Adapter for the tag-backed custom command module.  Tags are the bounded,
+/// user-authored responses exposed by `/tag` and `/tag-set`; the adapter keeps
+/// the limits in the same source of truth as the runtime instead of leaving
+/// them as hard-coded command constants.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CustomCommandsAdapter;
+
+impl CustomCommandsAdapter {
+    pub const KEY: &'static str = "management.custom_commands";
+    pub const SOURCE: &'static str = "custom_commands_adapter_v1";
+}
+
+impl FeatureAdapter for CustomCommandsAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Custom command limits",
+                    "description": "Saved responses are deliberately bounded and never execute code.",
+                    "fields": [
+                        {"key":"maxTags","label":"Maximum saved commands","kind":"number","min":1,"max":100,"help":"The maximum number of saved responses this server can keep."},
+                        {"key":"maxResponseLength","label":"Maximum response length","kind":"number","min":1,"max":2000,"help":"Responses longer than this are rejected before they can be sent."}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({"maxTags": 100, "maxResponseLength": 1000}),
+            dependencies: vec!["message_content".into(), "send_messages".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        for (field, min, max, label) in [
+            ("maxTags", 1_i64, 100_i64, "Maximum saved commands"),
+            (
+                "maxResponseLength",
+                1_i64,
+                2_000_i64,
+                "Maximum response length",
+            ),
+        ] {
+            if let Some(value) = object.get(field) {
+                if let Some(value) = value.as_i64() {
+                    if !(min..=max).contains(&value) {
+                        issues.push(ValidationIssue {
+                            path: field.into(),
+                            code: "out_of_range".into(),
+                            message: format!("{label} must be between {min} and {max}."),
+                            severity: "error".into(),
+                        });
+                    }
+                } else {
+                    issues.push(ValidationIssue {
+                        path: field.into(),
+                        code: "integer_required".into(),
+                        message: format!("{label} must be an integer."),
+                        severity: "error".into(),
+                    });
+                }
+            }
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut projection = Vec::new();
+        if let Some(value) = object.get("maxTags").and_then(serde_json::Value::as_i64) {
+            projection.push((
+                "management.custom_commands.max_tags".into(),
+                value.to_string(),
+            ));
+        }
+        if let Some(value) = object
+            .get("maxResponseLength")
+            .and_then(serde_json::Value::as_i64)
+        {
+            projection.push((
+                "management.custom_commands.max_response_length".into(),
+                value.to_string(),
+            ));
+        }
+        projection
+    }
+}
+
+/// The audit feature controls the existing destructive-action guard and its
+/// shadow mode.  Keeping these projections here makes the panel toggle and
+/// the `/anti-nuke` command operate on the same persisted settings.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AuditAdapter;
+
+impl AuditAdapter {
+    pub const KEY: &'static str = "management.audit";
+    pub const SOURCE: &'static str = "audit_adapter_v1";
+}
+
+impl FeatureAdapter for AuditAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Destructive action protection",
+                    "description": "Record audit events and contain repeated destructive changes.",
+                    "fields": [
+                        {"key":"threshold","label":"Actions before containment","kind":"number","min":2,"max":25},
+                        {"key":"windowSeconds","label":"Detection window (seconds)","kind":"number","min":3,"max":60},
+                        {"key":"shadowMode","label":"Shadow mode","kind":"toggle","help":"Record and alert without automatic containment."}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({"threshold": 3, "windowSeconds": 10, "shadowMode": false}),
+            dependencies: vec!["guild_moderation".into(), "view_audit_log".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        for (field, min, max, label) in [
+            ("threshold", 2_i64, 25_i64, "Threshold"),
+            ("windowSeconds", 3_i64, 60_i64, "Window"),
+        ] {
+            if let Some(value) = object.get(field) {
+                if let Some(value) = value.as_i64() {
+                    if !(min..=max).contains(&value) {
+                        issues.push(ValidationIssue {
+                            path: field.into(),
+                            code: "out_of_range".into(),
+                            message: format!("{label} must be between {min} and {max}."),
+                            severity: "error".into(),
+                        });
+                    }
+                } else {
+                    issues.push(ValidationIssue {
+                        path: field.into(),
+                        code: "integer_required".into(),
+                        message: format!("{label} must be an integer."),
+                        severity: "error".into(),
+                    });
+                }
+            }
+        }
+        if object
+            .get("shadowMode")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "shadowMode".into(),
+                code: "boolean_required".into(),
+                message: "Shadow mode must be true or false.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut projection = Vec::new();
+        if let Some(value) = object.get("threshold").and_then(serde_json::Value::as_i64) {
+            projection.push(("security.anti_nuke.actions".into(), value.to_string()));
+        }
+        if let Some(value) = object
+            .get("windowSeconds")
+            .and_then(serde_json::Value::as_i64)
+        {
+            projection.push((
+                "security.anti_nuke.window_seconds".into(),
+                value.to_string(),
+            ));
+        }
+        if let Some(value) = object
+            .get("shadowMode")
+            .and_then(serde_json::Value::as_bool)
+        {
+            projection.push(("security.shadow_mode".into(), value.to_string()));
+        }
+        projection
+    }
+}
+
+/// Import/export already exists in the durable store.  This adapter exposes
+/// the capability with no invented JSON controls; the API gates those routes
+/// by this feature toggle and keeps resource mapping/validation server-side.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TemplatesAdapter;
+
+impl TemplatesAdapter {
+    pub const KEY: &'static str = "management.templates";
+    pub const SOURCE: &'static str = "templates_adapter_v1";
+}
+
+impl FeatureAdapter for TemplatesAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({"version": FEATURE_SCHEMA_VERSION, "source": Self::SOURCE, "sections": [{"title":"Portable templates", "description":"Save and transfer validated server configuration without copying secrets.", "fields": []}]}),
+            defaults: serde_json::json!({}),
+            dependencies: vec!["manager_session".into()],
+        }
+    }
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        if config.is_object() {
+            Vec::new()
+        } else {
+            vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }]
+        }
+    }
+    fn runtime_projection(&self, _config: &serde_json::Value) -> Vec<(String, String)> {
+        Vec::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BirthdaysAdapter;
+
+impl BirthdaysAdapter {
+    pub const KEY: &'static str = "community.birthdays";
+    pub const SOURCE: &'static str = "birthdays_adapter_v1";
+}
+
+impl FeatureAdapter for BirthdaysAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Birthday announcements",
+                    "description": "Store only day and month and announce birthdays once per year.",
+                    "fields": [
+                        {"key":"channel","label":"Announcement channel","kind":"channel"},
+                        {"key":"message","label":"Announcement message","kind":"text","min":1,"max":1000,"help":"Use {user} for the member mention."}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({"channel":"", "message":"Happy birthday, {user}! 🎉"}),
+            dependencies: vec![
+                "guild_members".into(),
+                "send_messages".into(),
+                "scheduler".into(),
+            ],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        if object
+            .get("channel")
+            .is_some_and(|value| value.as_str().is_none())
+        {
+            issues.push(ValidationIssue {
+                path: "channel".into(),
+                code: "string_required".into(),
+                message: "Choose an announcement channel.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(message) = object.get("message") {
+            if let Some(message) = message.as_str() {
+                if !(1..=1000).contains(&message.chars().count()) {
+                    issues.push(ValidationIssue {
+                        path: "message".into(),
+                        code: "out_of_range".into(),
+                        message: "Birthday message must be between 1 and 1000 characters.".into(),
+                        severity: "error".into(),
+                    });
+                }
+            } else {
+                issues.push(ValidationIssue {
+                    path: "message".into(),
+                    code: "string_required".into(),
+                    message: "Birthday message must be text.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut projection = Vec::new();
+        if let Some(value) = object.get("channel").and_then(serde_json::Value::as_str) {
+            projection.push(("community.birthdays.channel_id".into(), value.into()));
+        }
+        if let Some(value) = object.get("message").and_then(serde_json::Value::as_str) {
+            projection.push(("community.birthdays.message".into(), value.into()));
+        }
+        projection
+    }
+}
+
 impl FeatureAdapter for ToggleOnlyAdapter {
     fn descriptor(&self) -> FeatureAdapterDescriptor {
         FeatureAdapterDescriptor {
@@ -2336,6 +2679,163 @@ static ROLE_PANELS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
     description: "Role panel commands and interaction-based assignment are enabled for this server.",
     dependencies: &["manage_roles", "interactions"],
 };
+static CUSTOM_COMMANDS_ADAPTER: CustomCommandsAdapter = CustomCommandsAdapter;
+static AUDIT_ADAPTER: AuditAdapter = AuditAdapter;
+static TEMPLATES_ADAPTER: TemplatesAdapter = TemplatesAdapter;
+static BIRTHDAYS_ADAPTER: BirthdaysAdapter = BirthdaysAdapter;
+static EMOJIS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+    key: "utility.emojis",
+    source: "emojis_adapter_v1",
+    title: "Emoji inventory",
+    description: "Lists the server's custom emojis and their current availability.",
+    dependencies: &["manage_expressions"],
+};
+static ACHIEVEMENTS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+    key: "community.achievements",
+    source: "achievements_adapter_v1",
+    title: "Community achievements",
+    description: "Awards bounded milestones from the existing XP and activity ledger.",
+    dependencies: &["message_content", "levels"],
+};
+static INVITE_TRACKER_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+    key: "management.invite_tracker",
+    source: "invite_tracker_adapter_v1",
+    title: "Invite overview",
+    description: "Reads the current Discord invite usage and exposes it to staff.",
+    dependencies: &["manage_guild", "guild_invites"],
+};
+
+static TEMP_CHANNELS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+    key: "utility.temp_channels",
+    source: "temp_channels_adapter_v1",
+    title: "Temporary voice channels",
+    description: "Creates bounded voice rooms and removes them after everyone leaves.",
+    dependencies: &["manage_channels", "voice_states"],
+};
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EmbedsAdapter;
+
+impl EmbedsAdapter {
+    pub const KEY: &'static str = "utility.embeds";
+    pub const SOURCE: &'static str = "embeds_adapter_v1";
+}
+
+impl FeatureAdapter for EmbedsAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({"version": FEATURE_SCHEMA_VERSION, "source": Self::SOURCE, "sections": [{"title":"Safe embed publishing", "description":"Publish a bounded embed from a slash command; mentions are disabled by default.", "fields":[{"key":"maxDescription","label":"Maximum description length","kind":"number","min":1,"max":4000}]}]}),
+            defaults: serde_json::json!({"maxDescription": 2000}),
+            dependencies: vec!["send_messages".into(), "embed_links".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        match object.get("maxDescription") {
+            Some(value)
+                if value
+                    .as_i64()
+                    .is_some_and(|value| (1..=4000).contains(&value)) =>
+            {
+                Vec::new()
+            }
+            Some(value) if value.as_i64().is_some() => vec![ValidationIssue {
+                path: "maxDescription".into(),
+                code: "out_of_range".into(),
+                message: "Maximum description length must be between 1 and 4000.".into(),
+                severity: "error".into(),
+            }],
+            Some(_) => vec![ValidationIssue {
+                path: "maxDescription".into(),
+                code: "integer_required".into(),
+                message: "Maximum description length must be an integer.".into(),
+                severity: "error".into(),
+            }],
+            None => Vec::new(),
+        }
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        config
+            .get("maxDescription")
+            .and_then(serde_json::Value::as_i64)
+            .map(|value| vec![("utility.embeds.max_description".into(), value.to_string())])
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EconomyAdapter;
+
+impl EconomyAdapter {
+    pub const KEY: &'static str = "community.economy";
+    pub const SOURCE: &'static str = "economy_adapter_v1";
+}
+
+impl FeatureAdapter for EconomyAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({"version": FEATURE_SCHEMA_VERSION, "source": Self::SOURCE, "sections":[{"title":"Daily reward", "description":"A bounded daily reward backed by an auditable balance ledger.", "fields":[{"key":"dailyReward","label":"Daily reward","kind":"number","min":1,"max":10000}]}]}),
+            defaults: serde_json::json!({"dailyReward": 100}),
+            dependencies: vec!["scheduler".into()],
+        }
+    }
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        match object.get("dailyReward") {
+            Some(value)
+                if value
+                    .as_i64()
+                    .is_some_and(|value| (1..=10_000).contains(&value)) =>
+            {
+                Vec::new()
+            }
+            Some(value) if value.as_i64().is_some() => vec![ValidationIssue {
+                path: "dailyReward".into(),
+                code: "out_of_range".into(),
+                message: "Daily reward must be between 1 and 10000.".into(),
+                severity: "error".into(),
+            }],
+            Some(_) => vec![ValidationIssue {
+                path: "dailyReward".into(),
+                code: "integer_required".into(),
+                message: "Daily reward must be an integer.".into(),
+                severity: "error".into(),
+            }],
+            None => Vec::new(),
+        }
+    }
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        config
+            .get("dailyReward")
+            .and_then(serde_json::Value::as_i64)
+            .map(|value| vec![("community.economy.daily_reward".into(), value.to_string())])
+            .unwrap_or_default()
+    }
+}
+static EMBEDS_ADAPTER: EmbedsAdapter = EmbedsAdapter;
+static ECONOMY_ADAPTER: EconomyAdapter = EconomyAdapter;
 
 pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
     match key {
@@ -2361,6 +2861,16 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         "management.polls" => Some(&POLLS_ADAPTER as &dyn FeatureAdapter),
         "community.events" => Some(&EVENTS_ADAPTER as &dyn FeatureAdapter),
         "community.role_panels" => Some(&ROLE_PANELS_ADAPTER as &dyn FeatureAdapter),
+        CustomCommandsAdapter::KEY => Some(&CUSTOM_COMMANDS_ADAPTER as &dyn FeatureAdapter),
+        AuditAdapter::KEY => Some(&AUDIT_ADAPTER as &dyn FeatureAdapter),
+        TemplatesAdapter::KEY => Some(&TEMPLATES_ADAPTER as &dyn FeatureAdapter),
+        BirthdaysAdapter::KEY => Some(&BIRTHDAYS_ADAPTER as &dyn FeatureAdapter),
+        "utility.emojis" => Some(&EMOJIS_ADAPTER as &dyn FeatureAdapter),
+        "community.achievements" => Some(&ACHIEVEMENTS_ADAPTER as &dyn FeatureAdapter),
+        "management.invite_tracker" => Some(&INVITE_TRACKER_ADAPTER as &dyn FeatureAdapter),
+        "utility.temp_channels" => Some(&TEMP_CHANNELS_ADAPTER as &dyn FeatureAdapter),
+        EmbedsAdapter::KEY => Some(&EMBEDS_ADAPTER as &dyn FeatureAdapter),
+        EconomyAdapter::KEY => Some(&ECONOMY_ADAPTER as &dyn FeatureAdapter),
         _ => None,
     }
 }
@@ -2445,6 +2955,16 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "insights.stats"
         | "utility.help"
         | "management.moderation"
+        | "management.custom_commands"
+        | "management.audit"
+        | "management.templates"
+        | "community.birthdays"
+        | "community.achievements"
+        | "management.invite_tracker"
+        | "utility.emojis"
+        | "utility.embeds"
+        | "utility.temp_channels"
+        | "community.economy"
         | "studio.rank_card" => FeatureMaturity::Operational,
         "social.youtube" | "social.rss" | "social.twitch" => FeatureMaturity::Beta,
         // Providers without an approved adapter or credentials must never be
@@ -2685,6 +3205,7 @@ mod tests {
             "management.polls",
             "community.events",
             "community.role_panels",
+            "utility.temp_channels",
         ] {
             let adapter = feature_adapter(key).expect("toggle-only adapter registered");
             assert!(
@@ -2694,6 +3215,57 @@ mod tests {
             );
             assert!(adapter.validate(&serde_json::json!({})).is_empty());
         }
+    }
+
+    #[test]
+    fn custom_commands_audit_and_templates_have_real_contracts() {
+        let custom = feature_adapter("management.custom_commands").expect("custom command adapter");
+        assert_eq!(custom.descriptor().defaults["maxTags"], 100);
+        assert!(
+            custom
+                .validate(&serde_json::json!({"maxTags": 0}))
+                .iter()
+                .any(|issue| issue.path == "maxTags")
+        );
+        assert!(
+            custom
+                .runtime_projection(&serde_json::json!({"maxTags": 12, "maxResponseLength": 700}))
+                .contains(&("management.custom_commands.max_tags".into(), "12".into()))
+        );
+
+        let audit = feature_adapter("management.audit").expect("audit adapter");
+        assert_eq!(audit.descriptor().defaults["threshold"], 3);
+        let audit_projection = audit.runtime_projection(&serde_json::json!({
+            "threshold": 5,
+            "windowSeconds": 20,
+            "shadowMode": true
+        }));
+        assert!(audit_projection.contains(&("security.anti_nuke.actions".into(), "5".into())));
+        assert!(audit_projection.contains(&("security.shadow_mode".into(), "true".into())));
+
+        let templates = feature_adapter("management.templates").expect("templates adapter");
+        assert!(templates.validate(&serde_json::json!({})).is_empty());
+        assert_eq!(
+            feature_maturity("management.templates"),
+            FeatureMaturity::Operational
+        );
+
+        let birthdays = feature_adapter("community.birthdays").expect("birthdays adapter");
+        assert!(
+            birthdays
+                .runtime_projection(&serde_json::json!({"channel":"123", "message":"Happy {user}"}))
+                .contains(&("community.birthdays.channel_id".into(), "123".into()))
+        );
+        assert!(
+            birthdays
+                .validate(&serde_json::json!({"message": ""}))
+                .iter()
+                .any(|issue| issue.path == "message")
+        );
+        assert_eq!(
+            feature_maturity("community.birthdays"),
+            FeatureMaturity::Operational
+        );
     }
 
     #[test]

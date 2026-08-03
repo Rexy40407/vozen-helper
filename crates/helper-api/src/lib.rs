@@ -2926,7 +2926,7 @@ const FEATURE_DEFINITIONS: &[(&str, &str, &str, &str, &str, bool)] = &[
         "Mostra a progressão da comunidade com privacidade configurável.",
         "community",
         "community",
-        false,
+        true,
     ),
     (
         "community.starboard",
@@ -3078,7 +3078,7 @@ const FEATURE_DEFINITIONS: &[(&str, &str, &str, &str, &str, bool)] = &[
         "Cria metas e celebra marcos da comunidade.",
         "community",
         "community",
-        false,
+        true,
     ),
     (
         "management.invite_tracker",
@@ -3086,7 +3086,7 @@ const FEATURE_DEFINITIONS: &[(&str, &str, &str, &str, &str, bool)] = &[
         "Percebe quem trouxe novos membros para o servidor.",
         "management",
         "insights",
-        false,
+        true,
     ),
     (
         "utility.help",
@@ -3110,7 +3110,7 @@ const FEATURE_DEFINITIONS: &[(&str, &str, &str, &str, &str, bool)] = &[
         "Organiza e melhora a utilização de emojis personalizados.",
         "utility",
         "community",
-        false,
+        true,
     ),
     (
         "utility.embeds",
@@ -3118,7 +3118,7 @@ const FEATURE_DEFINITIONS: &[(&str, &str, &str, &str, &str, bool)] = &[
         "Cria mensagens ricas para regras, anúncios e informação útil.",
         "utility",
         "community",
-        false,
+        true,
     ),
     (
         "utility.search",
@@ -3134,7 +3134,7 @@ const FEATURE_DEFINITIONS: &[(&str, &str, &str, &str, &str, bool)] = &[
         "Cria canais de voz que desaparecem quando deixam de ser usados.",
         "utility",
         "community",
-        false,
+        true,
     ),
     (
         "social.twitch",
@@ -3222,7 +3222,7 @@ const FEATURE_DEFINITIONS: &[(&str, &str, &str, &str, &str, bool)] = &[
         "Celebra aniversários automaticamente, com privacidade configurável.",
         "community",
         "community",
-        false,
+        true,
     ),
     (
         "community.economy",
@@ -3230,7 +3230,7 @@ const FEATURE_DEFINITIONS: &[(&str, &str, &str, &str, &str, bool)] = &[
         "Cria uma economia virtual com recompensas e progressão.",
         "community",
         "community",
-        false,
+        true,
     ),
     (
         "growth.monetization",
@@ -4680,6 +4680,9 @@ async fn studio_templates(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_auth(&state, &headers)?;
+    if !feature_enabled(&state, &claims.guild_id, "management.templates") {
+        return Err(client_error(StatusCode::FORBIDDEN, "feature_disabled"));
+    }
     let templates = state
         .store
         .settings_with_prefix(&claims.guild_id, TEMPLATE_PREFIX)
@@ -4699,6 +4702,9 @@ async fn studio_template(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_auth(&state, &headers)?;
+    if !feature_enabled(&state, &claims.guild_id, "management.templates") {
+        return Err(client_error(StatusCode::FORBIDDEN, "feature_disabled"));
+    }
     if !valid_template_id(&id) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template_id"));
     }
@@ -4720,6 +4726,9 @@ async fn create_studio_template(
     Json(input): Json<StudioTemplateInput>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    if !feature_enabled(&state, &claims.guild_id, "management.templates") {
+        return Err(client_error(StatusCode::FORBIDDEN, "feature_disabled"));
+    }
     if !validate_template_input(&input) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template"));
     }
@@ -4758,6 +4767,9 @@ async fn update_studio_template(
     Json(input): Json<StudioTemplateInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    if !feature_enabled(&state, &claims.guild_id, "management.templates") {
+        return Err(client_error(StatusCode::FORBIDDEN, "feature_disabled"));
+    }
     if !valid_template_id(&id) || !validate_template_input(&input) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template"));
     }
@@ -4801,6 +4813,9 @@ async fn delete_studio_template(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    if !feature_enabled(&state, &claims.guild_id, "management.templates") {
+        return Err(client_error(StatusCode::FORBIDDEN, "feature_disabled"));
+    }
     if !valid_template_id(&id) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template_id"));
     }
@@ -5143,6 +5158,9 @@ async fn privacy_export(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_auth(&state, &headers)?;
+    if !feature_enabled(&state, &claims.guild_id, "management.privacy") {
+        return Err(client_error(StatusCode::FORBIDDEN, "feature_disabled"));
+    }
     let export = state
         .store
         .export_guild(&claims.guild_id)
@@ -5155,6 +5173,9 @@ async fn privacy_receipt(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_auth(&state, &headers)?;
+    if !feature_enabled(&state, &claims.guild_id, "management.privacy") {
+        return Err(client_error(StatusCode::FORBIDDEN, "feature_disabled"));
+    }
     Ok(Json(serde_json::json!({
         "version": 1,
         "source": "helper_runtime_metadata_v1",
@@ -5207,6 +5228,9 @@ async fn privacy_delete(
         return Err(client_error(StatusCode::UNAUTHORIZED, "bearer_required"));
     }
     let claims = require_auth(&state, &headers)?;
+    if !feature_enabled(&state, &claims.guild_id, "management.privacy") {
+        return Err(client_error(StatusCode::FORBIDDEN, "feature_disabled"));
+    }
     if request.confirmation.trim() != claims.guild_id {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
@@ -5230,6 +5254,9 @@ async fn import_config(
     Json(document): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    if !feature_enabled(&state, &claims.guild_id, "management.templates") {
+        return Err(client_error(StatusCode::FORBIDDEN, "feature_disabled"));
+    }
     let summary = state
         .store
         .import_guild_config(&claims.guild_id, &document)

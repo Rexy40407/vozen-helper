@@ -238,6 +238,31 @@ pub struct TagRecord {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct BirthdayRecord {
+    pub guild_id: String,
+    pub user_id: String,
+    pub month: u32,
+    pub day: u32,
+    pub last_announced_year: Option<i32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EconomyAccount {
+    pub guild_id: String,
+    pub user_id: String,
+    pub balance: i64,
+    pub last_daily_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TempChannelRecord {
+    pub guild_id: String,
+    pub channel_id: String,
+    pub owner_id: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct LevelRecord {
     pub guild_id: String,
     pub user_id: String,
@@ -347,6 +372,7 @@ pub struct ConfigImportSummary {
     pub settings: usize,
     pub tags: usize,
     pub workflows: usize,
+    pub birthdays: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -376,6 +402,7 @@ impl Store {
     pub fn migrate(&self) -> Result<()> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute_batch("CREATE TABLE IF NOT EXISTS helper_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS helper_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, guild_id TEXT NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, revoked_at TEXT); CREATE TABLE IF NOT EXISTS helper_session_guilds (session_id TEXT NOT NULL, guild_id TEXT NOT NULL, name TEXT NOT NULL, permissions TEXT, PRIMARY KEY(session_id,guild_id)); CREATE TABLE IF NOT EXISTS helper_oauth_states (state_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, used_at INTEGER); CREATE TABLE IF NOT EXISTS helper_entitlements (subject_id TEXT PRIMARY KEY, payload TEXT NOT NULL, fetched_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS helper_usage (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, quota_key TEXT NOT NULL, period TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,user_id,quota_key,period)); CREATE TABLE IF NOT EXISTS cases (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, type TEXT NOT NULL, target_id TEXT NOT NULL, moderator_id TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', duration_ms INTEGER, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_cases_guild_time ON cases(guild_id, created_at DESC); CREATE TABLE IF NOT EXISTS settings (guild_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(guild_id,key)); CREATE TABLE IF NOT EXISTS activity_log (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, type TEXT NOT NULL, user_id TEXT NOT NULL, user_tag TEXT, actor_id TEXT, detail TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_activity_guild_time ON activity_log(guild_id, created_at DESC); CREATE TABLE IF NOT EXISTS scheduled_actions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, type TEXT NOT NULL, target_id TEXT NOT NULL, execute_at INTEGER NOT NULL, payload TEXT NOT NULL DEFAULT '', case_id INTEGER); CREATE INDEX IF NOT EXISTS idx_scheduled_due ON scheduled_actions(execute_at); CREATE TABLE IF NOT EXISTS infractions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, target_id TEXT NOT NULL, weight INTEGER NOT NULL DEFAULT 1, source TEXT NOT NULL DEFAULT 'manual', created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS afk (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', since INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE TABLE IF NOT EXISTS tags (guild_id TEXT NOT NULL, name TEXT NOT NULL, content TEXT NOT NULL, author_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(guild_id,name)); CREATE TABLE IF NOT EXISTS levels (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, xp INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,user_id)); CREATE TABLE IF NOT EXISTS stats (guild_id TEXT NOT NULL, date TEXT NOT NULL, messages INTEGER NOT NULL DEFAULT 0, joins INTEGER NOT NULL DEFAULT 0, leaves INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,date));")?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS birthdays (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, month INTEGER NOT NULL, day INTEGER NOT NULL, last_announced_year INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE INDEX IF NOT EXISTS idx_birthdays_day ON birthdays(month,day,last_announced_year); CREATE TABLE IF NOT EXISTS economy_accounts (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, balance INTEGER NOT NULL DEFAULT 0, last_daily_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE INDEX IF NOT EXISTS idx_economy_guild_balance ON economy_accounts(guild_id,balance DESC); CREATE TABLE IF NOT EXISTS temp_channels (guild_id TEXT NOT NULL, channel_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_temp_channels_guild ON temp_channels(guild_id);")?;
         let oauth_verifier_exists: i64 = conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('helper_oauth_states') WHERE name='code_verifier'",
             [],
@@ -764,6 +791,14 @@ impl Store {
                 "DELETE FROM levels WHERE guild_id=?2 AND user_id=?1",
             ),
             (
+                "birthdays",
+                "DELETE FROM birthdays WHERE guild_id=?2 AND user_id=?1",
+            ),
+            (
+                "economy_accounts",
+                "DELETE FROM economy_accounts WHERE guild_id=?2 AND user_id=?1",
+            ),
+            (
                 "tags",
                 "DELETE FROM tags WHERE guild_id=?2 AND author_id=?1",
             ),
@@ -830,6 +865,159 @@ impl Store {
         Ok(conn.execute(
             "DELETE FROM tags WHERE guild_id=?1 AND name=?2",
             params![guild_id, name],
+        )? > 0)
+    }
+
+    pub fn set_birthday(&self, guild_id: &str, user_id: &str, month: u32, day: u32) -> Result<()> {
+        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+            bail!("invalid_birthday");
+        }
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT INTO birthdays(guild_id,user_id,month,day,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?5) ON CONFLICT(guild_id,user_id) DO UPDATE SET month=excluded.month,day=excluded.day,last_announced_year=NULL,updated_at=excluded.updated_at",
+            params![guild_id, user_id, month, day, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_birthday(&self, guild_id: &str, user_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "DELETE FROM birthdays WHERE guild_id=?1 AND user_id=?2",
+            params![guild_id, user_id],
+        )? > 0)
+    }
+
+    pub fn due_birthdays(
+        &self,
+        month: u32,
+        day: u32,
+        year: i32,
+        limit: u32,
+    ) -> Result<Vec<BirthdayRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT guild_id,user_id,month,day,last_announced_year FROM birthdays WHERE month=?1 AND day=?2 AND (last_announced_year IS NULL OR last_announced_year<>?3) LIMIT ?4")?;
+        let rows = stmt.query_map(
+            params![month, day, year, i64::from(limit.min(500))],
+            |row| {
+                Ok(BirthdayRecord {
+                    guild_id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    month: row.get(2)?,
+                    day: row.get(3)?,
+                    last_announced_year: row.get(4)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn mark_birthday_announced(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        year: i32,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute("UPDATE birthdays SET last_announced_year=?3,updated_at=?4 WHERE guild_id=?1 AND user_id=?2 AND (last_announced_year IS NULL OR last_announced_year<>?3)", params![guild_id, user_id, year, Utc::now().timestamp_millis()])? > 0)
+    }
+
+    pub fn economy_account(&self, guild_id: &str, user_id: &str) -> Result<EconomyAccount> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let now = Utc::now().timestamp_millis();
+        conn.execute(
+            "INSERT OR IGNORE INTO economy_accounts(guild_id,user_id,balance,created_at,updated_at) VALUES(?1,?2,0,?3,?3)",
+            params![guild_id, user_id, now],
+        )?;
+        Ok(conn.query_row(
+            "SELECT guild_id,user_id,balance,last_daily_at FROM economy_accounts WHERE guild_id=?1 AND user_id=?2",
+            params![guild_id, user_id],
+            |row| {
+                Ok(EconomyAccount {
+                    guild_id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    balance: row.get(2)?,
+                    last_daily_at: row.get(3)?,
+                })
+            },
+        )?)
+    }
+
+    /// Atomically claim a daily reward. `None` means the account has already
+    /// claimed within the bounded 24-hour cooldown window.
+    pub fn claim_daily(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        reward: i64,
+    ) -> Result<Option<EconomyAccount>> {
+        let reward = reward.clamp(1, 10_000);
+        let now = Utc::now().timestamp_millis();
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let existing: Option<(i64, Option<i64>)> = tx
+            .query_row(
+                "SELECT balance,last_daily_at FROM economy_accounts WHERE guild_id=?1 AND user_id=?2",
+                params![guild_id, user_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (balance, last_daily_at) = existing.unwrap_or((0, None));
+        if last_daily_at.is_some_and(|last| now.saturating_sub(last) < 86_400_000) {
+            return Ok(None);
+        }
+        let next_balance = balance.saturating_add(reward);
+        tx.execute(
+            "INSERT INTO economy_accounts(guild_id,user_id,balance,last_daily_at,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?5) ON CONFLICT(guild_id,user_id) DO UPDATE SET balance=excluded.balance,last_daily_at=excluded.last_daily_at,updated_at=excluded.updated_at",
+            params![guild_id, user_id, next_balance, now, now],
+        )?;
+        tx.commit()?;
+        Ok(Some(EconomyAccount {
+            guild_id: guild_id.into(),
+            user_id: user_id.into(),
+            balance: next_balance,
+            last_daily_at: Some(now),
+        }))
+    }
+
+    pub fn register_temp_channel(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        owner_id: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT OR REPLACE INTO temp_channels(guild_id,channel_id,owner_id,created_at) VALUES(?1,?2,?3,?4)",
+            params![guild_id, channel_id, owner_id, Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn temp_channel(&self, channel_id: &str) -> Result<Option<TempChannelRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT guild_id,channel_id,owner_id,created_at FROM temp_channels WHERE channel_id=?1",
+                [channel_id],
+                |row| {
+                    Ok(TempChannelRecord {
+                        guild_id: row.get(0)?,
+                        channel_id: row.get(1)?,
+                        owner_id: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn remove_temp_channel(&self, channel_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "DELETE FROM temp_channels WHERE channel_id=?1",
+            [channel_id],
         )? > 0)
     }
 
@@ -1636,6 +1824,22 @@ impl Store {
             tags.push(row?);
         }
 
+        let mut birthdays = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT user_id,month,day,created_at,updated_at FROM birthdays WHERE guild_id=?1 ORDER BY user_id",
+        )?;
+        for row in stmt.query_map([guild_id], |row| {
+            Ok(serde_json::json!({
+                "userId": row.get::<_, String>(0)?,
+                "month": row.get::<_, u32>(1)?,
+                "day": row.get::<_, u32>(2)?,
+                "createdAt": row.get::<_, i64>(3)?,
+                "updatedAt": row.get::<_, i64>(4)?,
+            }))
+        })? {
+            birthdays.push(row?);
+        }
+
         let mut workflows = Vec::new();
         let mut stmt = conn.prepare(
             "SELECT id,name,trigger,condition,action,payload,enabled,created_at FROM workflows WHERE guild_id=?1 ORDER BY id",
@@ -1662,6 +1866,7 @@ impl Store {
             "settings": settings,
             "tags": tags,
             "workflows": workflows,
+            "birthdays": birthdays,
         }))
     }
 
@@ -1691,6 +1896,8 @@ impl Store {
             "SELECT 'afk' AS kind, reason, since FROM afk WHERE guild_id=?1 AND user_id=?2
              UNION ALL SELECT 'level' AS kind, CAST(xp AS TEXT), 0 FROM levels WHERE guild_id=?1 AND user_id=?2
              UNION ALL SELECT 'tag' AS kind, name, created_at FROM tags WHERE guild_id=?1 AND author_id=?2
+             UNION ALL SELECT 'birthday' AS kind, printf('%02d-%02d', month, day), created_at FROM birthdays WHERE guild_id=?1 AND user_id=?2
+             UNION ALL SELECT 'economy' AS kind, CAST(balance AS TEXT), created_at FROM economy_accounts WHERE guild_id=?1 AND user_id=?2
              ORDER BY kind",
         )?;
         for row in stmt.query_map(params![guild_id, user_id], |row| {
@@ -1789,6 +1996,14 @@ impl Store {
                 "DELETE FROM levels WHERE guild_id=?2 AND user_id=?1",
             ),
             (
+                "birthdays",
+                "DELETE FROM birthdays WHERE guild_id=?2 AND user_id=?1",
+            ),
+            (
+                "economy_accounts",
+                "DELETE FROM economy_accounts WHERE guild_id=?2 AND user_id=?1",
+            ),
+            (
                 "tags",
                 "DELETE FROM tags WHERE guild_id=?2 AND author_id=?1",
             ),
@@ -1842,7 +2057,16 @@ impl Store {
             .get("workflows")
             .and_then(serde_json::Value::as_array)
             .ok_or_else(|| anyhow!("invalid_workflows"))?;
-        if settings.len() > 200 || tags.len() > 100 || workflows.len() > 100 {
+        let birthdays = object
+            .get("birthdays")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if settings.len() > 200
+            || tags.len() > 100
+            || workflows.len() > 100
+            || birthdays.len() > 500
+        {
             bail!("config_limits_exceeded");
         }
 
@@ -1946,6 +2170,31 @@ impl Store {
             parsed_workflows.push((name, condition, payload, enabled));
         }
 
+        let mut parsed_birthdays = Vec::with_capacity(birthdays.len());
+        for item in &birthdays {
+            let user_id = item
+                .get("userId")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("invalid_birthday_user"))?
+                .trim()
+                .to_string();
+            let month = item
+                .get("month")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| anyhow!("invalid_birthday_month"))?;
+            let day = item
+                .get("day")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| anyhow!("invalid_birthday_day"))?;
+            if !(1..=64).contains(&user_id.len())
+                || !(1..=12).contains(&month)
+                || !(1..=31).contains(&day)
+            {
+                bail!("invalid_birthday");
+            }
+            parsed_birthdays.push((user_id, month as u32, day as u32));
+        }
+
         let conn = self.conn.lock().expect("store mutex poisoned");
         let tx = conn.unchecked_transaction()?;
         for (key, value) in &parsed_settings {
@@ -1970,11 +2219,18 @@ impl Store {
                 params![guild_id, name, condition, payload, i64::from(*enabled), Utc::now().timestamp_millis()],
             )?;
         }
+        for (user_id, month, day) in &parsed_birthdays {
+            tx.execute(
+                "INSERT INTO birthdays(guild_id,user_id,month,day,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?5) ON CONFLICT(guild_id,user_id) DO UPDATE SET month=excluded.month,day=excluded.day,last_announced_year=NULL,updated_at=excluded.updated_at",
+                params![guild_id, user_id, month, day, Utc::now().timestamp_millis()],
+            )?;
+        }
         tx.commit()?;
         Ok(ConfigImportSummary {
             settings: parsed_settings.len(),
             tags: parsed_tags.len(),
             workflows: parsed_workflows.len(),
+            birthdays: parsed_birthdays.len(),
         })
     }
 
@@ -2000,6 +2256,9 @@ impl Store {
             "DELETE FROM afk WHERE guild_id=?1",
             "DELETE FROM tags WHERE guild_id=?1",
             "DELETE FROM levels WHERE guild_id=?1",
+            "DELETE FROM birthdays WHERE guild_id=?1",
+            "DELETE FROM economy_accounts WHERE guild_id=?1",
+            "DELETE FROM temp_channels WHERE guild_id=?1",
             "DELETE FROM stats WHERE guild_id=?1",
             "DELETE FROM tickets WHERE guild_id=?1",
             "DELETE FROM quarantine WHERE guild_id=?1",
@@ -3347,6 +3606,7 @@ mod tests {
             .set_setting("g1", "automation.webhook_secret", "must-not-export")
             .unwrap();
         store.upsert_tag("g1", "rules", "be kind", "u1").unwrap();
+        store.set_birthday("g1", "u1", 8, 3).unwrap();
         store
             .create_workflow("g1", "hello", "message", "hi", "reply", "Hello")
             .unwrap();
@@ -3363,6 +3623,7 @@ mod tests {
         assert!(!export.to_string().contains("must-not-export"));
         assert_eq!(export["tags"][0]["name"], "rules");
         assert_eq!(export["workflows"][0]["name"], "hello");
+        assert_eq!(export["birthdays"][0]["userId"], "u1");
 
         store.purge_guild("g1").unwrap();
         assert!(store.recent_cases("g1", 10).unwrap().is_empty());
@@ -3385,6 +3646,7 @@ mod tests {
         store
             .upsert_tag("source", "rules", "be kind", "u1")
             .unwrap();
+        store.set_birthday("source", "u1", 8, 3).unwrap();
         store
             .create_workflow("source", "hello", "message", "hi", "reply", "Hello")
             .unwrap();
@@ -3394,6 +3656,7 @@ mod tests {
         assert_eq!(imported.settings, 1);
         assert_eq!(imported.tags, 1);
         assert_eq!(imported.workflows, 1);
+        assert_eq!(imported.birthdays, 1);
         assert_eq!(
             store.get_setting("target", "welcome.channel").unwrap(),
             Some("10".into())
@@ -3413,6 +3676,11 @@ mod tests {
                 .is_some()
         );
 
+        assert_eq!(
+            store.export_guild("target").unwrap()["birthdays"][0]["userId"],
+            "u1"
+        );
+
         let mut secret = export;
         secret["settings"] = serde_json::json!([{
             "key": "webhook_secret",
@@ -3427,6 +3695,7 @@ mod tests {
         store.set_afk("g1", "u1", "away").unwrap();
         store.add_xp("g1", "u1", 42).unwrap();
         store.upsert_tag("g1", "mine", "hello", "u1").unwrap();
+        store.set_birthday("g1", "u1", 8, 3).unwrap();
         let suggestion = store.create_suggestion("g1", "u1", "feature").unwrap();
         store.vote_suggestion(suggestion, "u2", 1).unwrap();
         store
@@ -3452,6 +3721,7 @@ mod tests {
         );
         assert!(store.recent_cases("g1", 10).unwrap().len() == 1);
         assert!(store.get_tag("g1", "mine").unwrap().is_none());
+        assert!(store.due_birthdays(8, 3, 2026, 10).unwrap().is_empty());
         assert!(store.get_afk("g1", "u1").unwrap().is_none());
         assert_eq!(store.suggestion_votes(suggestion).unwrap(), (0, 0));
     }
@@ -3619,6 +3889,7 @@ mod tests {
         store.set_afk("g", "u", "away").unwrap();
         store.add_xp("g", "u", 42).unwrap();
         store.upsert_tag("g", "mine", "hello", "u").unwrap();
+        store.set_birthday("g", "u", 8, 3).unwrap();
         let suggestion = store.create_suggestion("g", "u", "remove me").unwrap();
         store.vote_suggestion(suggestion, "u", 1).unwrap();
         store.register_event("g", "event-1", "u").unwrap();
@@ -3629,12 +3900,49 @@ mod tests {
         assert_eq!(deleted["levels"], 1);
         assert_eq!(deleted["afk"], 1);
         assert_eq!(deleted["tags"], 1);
+        assert_eq!(deleted["birthdays"], 1);
         assert_eq!(deleted["suggestions"], 1);
         assert_eq!(deleted["event_registrations"], 1);
         assert_eq!(store.level_for("g", "u").unwrap(), 0);
         assert!(store.get_afk("g", "u").unwrap().is_none());
         assert!(store.get_tag("g", "mine").unwrap().is_none());
+        assert!(store.due_birthdays(8, 3, 2026, 10).unwrap().is_empty());
         assert_eq!(store.suggestion_votes(suggestion).unwrap(), (0, 0));
         assert_eq!(store.recent_cases("g", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn birthdays_are_idempotent_per_year() {
+        let store = Store::open(":memory:").unwrap();
+        store.set_birthday("g", "u", 8, 3).unwrap();
+        assert_eq!(store.due_birthdays(8, 3, 2026, 10).unwrap().len(), 1);
+        assert!(store.mark_birthday_announced("g", "u", 2026).unwrap());
+        assert!(store.due_birthdays(8, 3, 2026, 10).unwrap().is_empty());
+        assert_eq!(store.due_birthdays(8, 3, 2027, 10).unwrap().len(), 1);
+        assert!(store.remove_birthday("g", "u").unwrap());
+        assert!(store.due_birthdays(8, 3, 2027, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn economy_daily_is_atomic_and_rate_limited() {
+        let store = Store::open(":memory:").unwrap();
+        assert_eq!(store.economy_account("g", "u").unwrap().balance, 0);
+        let first = store.claim_daily("g", "u", 250).unwrap().unwrap();
+        assert_eq!(first.balance, 250);
+        assert!(store.claim_daily("g", "u", 250).unwrap().is_none());
+        assert_eq!(store.economy_account("g", "u").unwrap().balance, 250);
+        store.purge_user("g", "u").unwrap();
+        assert_eq!(store.economy_account("g", "u").unwrap().balance, 0);
+    }
+
+    #[test]
+    fn temporary_channels_are_idempotent_and_removable() {
+        let store = Store::open(":memory:").unwrap();
+        store.register_temp_channel("g", "c", "u").unwrap();
+        store.register_temp_channel("g", "c", "u").unwrap();
+        assert_eq!(store.temp_channel("c").unwrap().unwrap().owner_id, "u");
+        assert!(store.remove_temp_channel("c").unwrap());
+        assert!(store.temp_channel("c").unwrap().is_none());
+        assert!(!store.remove_temp_channel("c").unwrap());
     }
 }

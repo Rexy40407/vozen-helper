@@ -144,7 +144,7 @@ const demoFeatures: Feature[] = [
     description: 'Mostra a progressão da comunidade com privacidade configurável.',
     category: 'community',
     capability: 'community',
-    available: false,
+    available: true,
     enabled: false,
   },
   {
@@ -317,7 +317,7 @@ const additionalFeatures: Feature[] = [
     description: 'Cria metas e celebra marcos da comunidade.',
     category: 'community',
     capability: 'community',
-    available: false,
+    available: true,
     enabled: false,
   },
   {
@@ -326,7 +326,7 @@ const additionalFeatures: Feature[] = [
     description: 'Percebe quem trouxe novos membros para o servidor.',
     category: 'management',
     capability: 'insights',
-    available: false,
+    available: true,
     enabled: false,
   },
   {
@@ -353,7 +353,7 @@ const additionalFeatures: Feature[] = [
     description: 'Organiza e melhora a utilização de emojis personalizados.',
     category: 'utility',
     capability: 'community',
-    available: false,
+    available: true,
     enabled: false,
   },
   {
@@ -362,7 +362,7 @@ const additionalFeatures: Feature[] = [
     description: 'Cria mensagens ricas para regras, anúncios e informação útil.',
     category: 'utility',
     capability: 'community',
-    available: false,
+    available: true,
     enabled: false,
   },
   {
@@ -380,7 +380,7 @@ const additionalFeatures: Feature[] = [
     description: 'Cria canais de voz que desaparecem quando deixam de ser usados.',
     category: 'utility',
     capability: 'community',
-    available: false,
+    available: true,
     enabled: false,
   },
   {
@@ -481,7 +481,7 @@ const additionalFeatures: Feature[] = [
     description: 'Celebra aniversários automaticamente, com privacidade configurável.',
     category: 'community',
     capability: 'community',
-    available: false,
+    available: true,
     enabled: false,
   },
   {
@@ -490,7 +490,7 @@ const additionalFeatures: Feature[] = [
     description: 'Cria uma economia virtual com recompensas e progressão.',
     category: 'community',
     capability: 'community',
-    available: false,
+    available: true,
     enabled: false,
   },
   {
