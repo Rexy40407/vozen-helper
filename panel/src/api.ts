@@ -25,6 +25,12 @@ export type Feature = {
   configurable?: boolean;
   config_schema_version?: number;
   configSchemaVersion?: number;
+  health?: {
+    status?: 'ready' | 'degraded' | 'misconfigured' | 'dependency_down' | 'disabled';
+    operational: boolean;
+    adapter?: string | null;
+    dependencies?: string[];
+  };
 };
 export type FeatureConfig = Record<string, unknown>;
 export type YouTubeSubscription = {
@@ -99,9 +105,14 @@ export type FeatureDetail = {
   maturity?: Feature['maturity'];
   configurable?: boolean;
   health?: {
+    status?: 'ready' | 'degraded' | 'misconfigured' | 'dependency_down' | 'disabled';
     operational: boolean;
+    adapter?: string | null;
+    dependencies?: string[];
     issues?: Array<{ path: string; code: string; message: string; severity: string }>;
   };
+  adapter?: string | null;
+  dependencies?: string[];
 };
 export type GuildContext = {
   guildId: string;
@@ -258,6 +269,20 @@ export const api = {
     }),
   feature: (key: string) =>
     request<FeatureDetail>(`/api/config/features/${encodeURIComponent(key)}`),
+  featureHealth: (key: string) =>
+    request<FeatureDetail['health']>(`/api/config/features/${encodeURIComponent(key)}/health`),
+  featurePreflight: (key: string, config: FeatureConfig, enabled = true) =>
+    request<{
+      operation: string;
+      guildId: string;
+      ok: boolean;
+      issues: Array<{ path: string; code: string; message: string; severity: string }>;
+      checks: Record<string, boolean>;
+    }>(`/api/config/features/${encodeURIComponent(key)}/preflight`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config, enabled }),
+    }),
   saveFeature: (key: string, enabled: boolean, config: FeatureConfig, expectedRevision?: number) =>
     request<FeatureDetail>(`/api/config/features/${encodeURIComponent(key)}`, {
       method: 'PUT',

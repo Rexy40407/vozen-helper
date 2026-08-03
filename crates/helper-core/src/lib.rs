@@ -2,7 +2,8 @@
 
 use anyhow::{Context, Result};
 use helper_contracts::{
-    AntiSpamDecision, AntiSpamObservation, AntiSpamPolicy, FeatureMaturity, Plan,
+    AntiSpamDecision, AntiSpamObservation, AntiSpamPolicy, FeatureAdapterDescriptor,
+    FeatureMaturity, Plan, ValidationIssue,
 };
 use serde::Deserialize;
 use std::{env, net::IpAddr, path::PathBuf, str::FromStr};
@@ -200,6 +201,195 @@ pub fn anti_spam_policy_from_json(value: &serde_json::Value) -> AntiSpamPolicy {
         policy.alert_only = value;
     }
     policy
+}
+
+/// Every configurable feature will eventually implement this contract. The
+/// first adapter is intentionally small: it proves that the API and gateway
+/// can consume one canonical schema/defaults/validator without pulling UI
+/// concerns into the Discord crate.
+pub trait FeatureAdapter: Sync {
+    fn descriptor(&self) -> FeatureAdapterDescriptor;
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue>;
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AntiSpamAdapter;
+
+impl AntiSpamAdapter {
+    pub const KEY: &'static str = "protection.antispam";
+    pub const SOURCE: &'static str = "anti_spam_adapter_v1";
+
+    fn schema() -> serde_json::Value {
+        serde_json::json!({
+            "version": FEATURE_SCHEMA_VERSION,
+            "source": Self::SOURCE,
+            "sections": [
+                {
+                    "title": "Resposta automática",
+                    "description": "Deteta padrões de flood, repetição e menções com limites seguros.",
+                    "fields": [
+                        {"key":"floodCount","label":"Mensagens no intervalo","kind":"number","min":3,"max":30,"help":"Número de mensagens do mesmo membro antes de sinalizar."},
+                        {"key":"windowSeconds","label":"Janela de tempo (segundos)","kind":"number","min":3,"max":60,"help":"As mensagens antigas saem automaticamente desta janela."},
+                        {"key":"duplicateLimit","label":"Repetições iguais","kind":"number","min":2,"max":12,"help":"Quantas mensagens iguais acionam a regra."},
+                        {"key":"timeoutSeconds","label":"Timeout inicial (segundos)","kind":"number","min":0,"max":86400,"help":"Usa 0 para apenas registar o incidente."}
+                    ]
+                },
+                {
+                    "title": "Exceções e alertas",
+                    "description": "Escolhe recursos reais do servidor para evitar falsos positivos e receber contexto.",
+                    "fields": [
+                        {"key":"mentionLimit","label":"Limite de menções por mensagem","kind":"number","min":1,"max":30,"advanced":true},
+                        {"key":"ignoredChannels","label":"Canais ignorados","kind":"channels","help":"Mensagens nestes canais não entram no avaliador.","advanced":true},
+                        {"key":"ignoredRoles","label":"Cargos ignorados","kind":"roles","help":"Membros com um destes cargos não entram no avaliador.","advanced":true},
+                        {"key":"logChannel","label":"Canal de registo","kind":"channel","help":"O Helper publica aqui o motivo e o modo da decisão.","advanced":true},
+                        {"key":"alertOnly","label":"Apenas alertar, sem aplicar castigo","kind":"toggle","help":"Mantém a deteção e auditoria, mas não aplica timeout.","advanced":true}
+                    ]
+                }
+            ]
+        })
+    }
+
+    fn defaults() -> serde_json::Value {
+        serde_json::json!({
+            "floodCount": 6,
+            "windowSeconds": 10,
+            "duplicateLimit": 3,
+            "timeoutSeconds": 60,
+            "mentionLimit": 5,
+            "ignoredChannels": [],
+            "ignoredRoles": [],
+            "logChannel": "",
+            "alertOnly": false
+        })
+    }
+}
+
+impl FeatureAdapter for AntiSpamAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: Self::schema(),
+            defaults: Self::defaults(),
+            dependencies: vec!["message_content_intent".into(), "moderate_members".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let mut issues = Vec::new();
+        if !config.is_object() {
+            issues.push(ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "A configuração tem de ser um objeto.".into(),
+                severity: "error".into(),
+            });
+            return issues;
+        }
+        for (name, min, max) in [
+            ("floodCount", 3_i64, 30_i64),
+            ("windowSeconds", 3, 60),
+            ("duplicateLimit", 2, 12),
+            ("timeoutSeconds", 0, 86_400),
+            ("mentionLimit", 1, 30),
+        ] {
+            if let Some(value) = config.get(name).and_then(serde_json::Value::as_i64)
+                && !(min..=max).contains(&value)
+            {
+                issues.push(ValidationIssue {
+                    path: name.into(),
+                    code: "out_of_range".into(),
+                    message: format!("O valor tem de estar entre {min} e {max}."),
+                    severity: "error".into(),
+                });
+            }
+        }
+        for field in ["ignoredChannels", "ignoredRoles"] {
+            if let Some(value) = config.get(field) {
+                let valid = value.as_array().is_some_and(|items| {
+                    items.len() <= 100
+                        && items.iter().all(|item| {
+                            item.as_str().is_some_and(|text| {
+                                !text.is_empty()
+                                    && text.chars().count() <= 64
+                                    && !text.chars().any(char::is_control)
+                            })
+                        })
+                });
+                if !valid {
+                    issues.push(ValidationIssue {
+                        path: field.into(),
+                        code: "invalid_exemptions".into(),
+                        message: "Indica no máximo 100 IDs ou nomes válidos.".into(),
+                        severity: "error".into(),
+                    });
+                }
+            }
+        }
+        if let Some(value) = config.get("logChannel") {
+            let valid = value
+                .as_str()
+                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok());
+            if !valid {
+                issues.push(ValidationIssue {
+                    path: "logChannel".into(),
+                    code: "invalid_channel_id".into(),
+                    message: "Escolhe um canal Discord válido para o registo.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut pairs = Vec::new();
+        let mut add = |name: &str, value: String| pairs.push((name.to_string(), value));
+        for (field, setting) in [
+            ("floodCount", "security.antispam.flood_count"),
+            ("windowSeconds", "security.antispam.window_seconds"),
+            ("duplicateLimit", "security.antispam.duplicate_limit"),
+            ("timeoutSeconds", "security.antispam.timeout_seconds"),
+            ("mentionLimit", "security.antispam.mention_limit"),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_i64) {
+                add(setting, value.to_string());
+            }
+        }
+        if let Some(value) = object.get("logChannel").and_then(serde_json::Value::as_str) {
+            add("security.antispam.log_channel", value.to_string());
+        }
+        for (field, setting) in [
+            ("ignoredChannels", "security.antispam.ignored_channels"),
+            ("ignoredRoles", "security.antispam.ignored_roles"),
+        ] {
+            if let Some(values) = object.get(field).and_then(serde_json::Value::as_array) {
+                add(
+                    setting,
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+            }
+        }
+        if let Some(value) = object.get("alertOnly").and_then(serde_json::Value::as_bool) {
+            add("security.antispam.alert_only", value.to_string());
+        }
+        pairs
+    }
+}
+
+static ANTI_SPAM_ADAPTER: AntiSpamAdapter = AntiSpamAdapter;
+
+pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
+    (key == AntiSpamAdapter::KEY).then_some(&ANTI_SPAM_ADAPTER as &dyn FeatureAdapter)
 }
 
 /// Evaluate one message observation without Discord side effects. This is the
@@ -444,5 +634,31 @@ mod tests {
             assert!(!decision.should_act);
             assert!(decision.matched.is_empty());
         }
+    }
+
+    #[test]
+    fn anti_spam_adapter_is_the_single_schema_and_validation_source() {
+        let adapter = feature_adapter("protection.antispam").expect("adapter registered");
+        let descriptor = adapter.descriptor();
+        assert_eq!(descriptor.source, "anti_spam_adapter_v1");
+        assert_eq!(descriptor.defaults["floodCount"], 6);
+        assert!(descriptor.schema["sections"].as_array().unwrap().len() >= 2);
+        let issues = adapter.validate(&serde_json::json!({
+            "floodCount": 2,
+            "ignoredChannels": [""],
+            "logChannel": "not-a-discord-id"
+        }));
+        assert!(issues.iter().any(|issue| issue.path == "floodCount"));
+        assert!(issues.iter().any(|issue| issue.path == "ignoredChannels"));
+        assert!(issues.iter().any(|issue| issue.path == "logChannel"));
+        let projection = adapter.runtime_projection(&serde_json::json!({
+            "floodCount": 8,
+            "ignoredChannels": ["123"],
+            "alertOnly": true
+        }));
+        assert!(projection.contains(&("security.antispam.flood_count".into(), "8".into())));
+        assert!(projection.contains(&("security.antispam.ignored_channels".into(), "123".into())));
+        assert!(projection.contains(&("security.antispam.alert_only".into(), "true".into())));
+        assert!(feature_adapter("community.levels").is_none());
     }
 }

@@ -577,23 +577,9 @@ const featureCopy: Record<string, Pick<Feature, 'label' | 'description'>> = {
   },
 };
 function presentFeature(feature: Feature): Feature {
-  const value = featureCopy[feature.key] ? { ...feature, ...featureCopy[feature.key] } : feature;
-  return value.key === 'social.rss' || value.key === 'social.twitch'
-    ? { ...value, available: true, maturity: 'beta', configurable: true }
-    : value;
+  return featureCopy[feature.key] ? { ...feature, ...featureCopy[feature.key] } : feature;
 }
 const defaults: Record<string, FeatureConfig> = {
-  'protection.antispam': {
-    floodCount: 6,
-    windowSeconds: 10,
-    duplicateLimit: 3,
-    timeoutSeconds: 60,
-    mentionLimit: 5,
-    ignoredChannels: [],
-    ignoredRoles: [],
-    logChannel: '',
-    alertOnly: false,
-  },
   'protection.antiscam': {
     enabledLinks: true,
     blockedDomains: [],
@@ -1043,65 +1029,6 @@ const twitchSpec: SectionSpec[] = [
 additionalSpecs['social.twitch'] = twitchSpec;
 const spec = (key: string): SectionSpec[] => {
   const map: Record<string, SectionSpec[]> = {
-    'protection.antispam': [
-      {
-        title: 'Resposta automática',
-        description: 'Deteta padrões de flood, repetição e menções com limites seguros.',
-        fields: [
-          { key: 'floodCount', label: 'Mensagens no intervalo', kind: 'number', min: 3, max: 30 },
-          {
-            key: 'windowSeconds',
-            label: 'Janela de tempo (segundos)',
-            kind: 'number',
-            min: 3,
-            max: 60,
-          },
-          { key: 'duplicateLimit', label: 'Repetições iguais', kind: 'number', min: 2, max: 12 },
-          {
-            key: 'timeoutSeconds',
-            label: 'Timeout inicial (segundos)',
-            kind: 'number',
-            min: 0,
-            max: 86400,
-          },
-        ],
-      },
-      {
-        title: 'Exceções e alertas',
-        description: 'Evita falsos positivos e escolhe onde a equipa recebe contexto.',
-        fields: [
-          {
-            key: 'mentionLimit',
-            label: 'Limite de menções por mensagem',
-            kind: 'number',
-            min: 1,
-            max: 30,
-            advanced: true,
-          },
-          {
-            key: 'ignoredChannels',
-            label: 'Canais ignorados',
-            kind: 'channels',
-            help: 'Escolhe canais existentes no servidor.',
-            advanced: true,
-          },
-          {
-            key: 'ignoredRoles',
-            label: 'Cargos ignorados',
-            kind: 'roles',
-            help: 'Escolhe cargos existentes no servidor.',
-            advanced: true,
-          },
-          { key: 'logChannel', label: 'Canal de registo', kind: 'channel', advanced: true },
-          {
-            key: 'alertOnly',
-            label: 'Apenas alertar, sem aplicar castigo',
-            kind: 'toggle',
-            advanced: true,
-          },
-        ],
-      },
-    ],
     'protection.antiscam': [
       {
         title: 'Deteção de fraude',
@@ -2060,11 +1987,13 @@ function App() {
         const profiles: Record<string, { antispam: FeatureConfig; antiRaid: FeatureConfig }> = {
           monitor: {
             antispam: {
-              ...defaults['protection.antispam'],
               floodCount: 8,
+              windowSeconds: 10,
               duplicateLimit: 4,
               timeoutSeconds: 0,
               mentionLimit: 8,
+              ignoredChannels: [],
+              ignoredRoles: [],
               alertOnly: true,
               logChannel: config.logChannel ?? '',
             },
@@ -2077,11 +2006,13 @@ function App() {
           },
           balanced: {
             antispam: {
-              ...defaults['protection.antispam'],
               floodCount: 6,
+              windowSeconds: 10,
               duplicateLimit: 3,
               timeoutSeconds: 60,
               mentionLimit: 5,
+              ignoredChannels: [],
+              ignoredRoles: [],
               alertOnly: false,
               logChannel: config.logChannel ?? '',
             },
@@ -2094,11 +2025,13 @@ function App() {
           },
           strict: {
             antispam: {
-              ...defaults['protection.antispam'],
               floodCount: 5,
+              windowSeconds: 10,
               duplicateLimit: 2,
               timeoutSeconds: 300,
               mentionLimit: 4,
+              ignoredChannels: [],
+              ignoredRoles: [],
               alertOnly: false,
               logChannel: config.logChannel ?? '',
             },
@@ -3177,8 +3110,15 @@ function FeatureCatalogue({
         {features.map((feature) => {
           const maturity = feature.maturity ?? (feature.available ? 'operational' : 'planned');
           const configurable = feature.configurable ?? feature.available;
+          const healthStatus = feature.health?.status;
           const label =
-            maturity === 'operational'
+            healthStatus === 'misconfigured'
+              ? 'Verificar configuração'
+              : healthStatus === 'degraded'
+                ? 'Degradada'
+                : healthStatus === 'dependency_down'
+                  ? 'Dependência em falta'
+                  : maturity === 'operational'
               ? feature.enabled
                 ? 'Ativa'
                 : 'Disponível'

@@ -33,6 +33,107 @@ use tracing::info;
 
 mod rank_card;
 
+/// A small side-effect boundary used by policy tests. Production handlers
+/// still use Serenity directly, while the fake makes permission failures and
+/// emitted actions deterministic without connecting to Discord.
+pub mod adapter {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Effect {
+        Timeout {
+            guild_id: String,
+            member_id: String,
+            seconds: u64,
+            reason: String,
+        },
+        Log {
+            channel_id: String,
+            content: String,
+        },
+        Reply {
+            channel_id: String,
+            content: String,
+        },
+    }
+
+    pub trait DiscordAdapter {
+        fn timeout_member(
+            &mut self,
+            guild_id: &str,
+            member_id: &str,
+            seconds: u64,
+            reason: &str,
+        ) -> Result<(), String>;
+        fn log(&mut self, channel_id: &str, content: &str) -> Result<(), String>;
+        fn reply(&mut self, channel_id: &str, content: &str) -> Result<(), String>;
+    }
+
+    #[derive(Debug, Default, Clone)]
+    pub struct FakeDiscordAdapter {
+        effects: Vec<Effect>,
+        fail_next: bool,
+    }
+
+    impl FakeDiscordAdapter {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn effects(&self) -> &[Effect] {
+            &self.effects
+        }
+
+        pub fn fail_next(&mut self) {
+            self.fail_next = true;
+        }
+
+        fn check(&mut self) -> Result<(), String> {
+            if self.fail_next {
+                self.fail_next = false;
+                Err("discord_permission_denied".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl DiscordAdapter for FakeDiscordAdapter {
+        fn timeout_member(
+            &mut self,
+            guild_id: &str,
+            member_id: &str,
+            seconds: u64,
+            reason: &str,
+        ) -> Result<(), String> {
+            self.check()?;
+            self.effects.push(Effect::Timeout {
+                guild_id: guild_id.into(),
+                member_id: member_id.into(),
+                seconds,
+                reason: reason.into(),
+            });
+            Ok(())
+        }
+
+        fn log(&mut self, channel_id: &str, content: &str) -> Result<(), String> {
+            self.check()?;
+            self.effects.push(Effect::Log {
+                channel_id: channel_id.into(),
+                content: content.into(),
+            });
+            Ok(())
+        }
+
+        fn reply(&mut self, channel_id: &str, content: &str) -> Result<(), String> {
+            self.check()?;
+            self.effects.push(Effect::Reply {
+                channel_id: channel_id.into(),
+                content: content.into(),
+            });
+            Ok(())
+        }
+    }
+}
+
 type DuplicateMessageCache = Arc<Mutex<HashMap<String, VecDeque<(Instant, String)>>>>;
 
 #[derive(Clone)]
@@ -5428,8 +5529,10 @@ async fn deliver_scheduled_action(
 #[cfg(test)]
 mod tests {
     use super::{
-        account_age_days, english_bot_text, is_destructive_audit_action, join_burst_armed,
-        parse_duration, parse_scheduled_event_window, shadow_mode_enabled,
+        account_age_days,
+        adapter::{DiscordAdapter, Effect, FakeDiscordAdapter},
+        english_bot_text, is_destructive_audit_action, join_burst_armed, parse_duration,
+        parse_scheduled_event_window, shadow_mode_enabled,
     };
     use std::{
         collections::{HashMap, VecDeque},
@@ -5574,5 +5677,27 @@ mod tests {
         assert!(shadow_mode_enabled(Some("TRUE")));
         assert!(!shadow_mode_enabled(Some("false")));
         assert!(!shadow_mode_enabled(None));
+    }
+
+    #[test]
+    fn fake_discord_records_antispam_effects_and_surfaces_failures() {
+        let mut discord = FakeDiscordAdapter::new();
+        discord
+            .timeout_member("guild", "member", 60, "matched:flood")
+            .unwrap();
+        discord
+            .log("log-channel", "Anti-spam: matched:flood (action)")
+            .unwrap();
+        discord.reply("general", "Please slow down.").unwrap();
+        assert_eq!(discord.effects().len(), 3);
+        assert!(matches!(
+            discord.effects()[0],
+            Effect::Timeout { seconds: 60, .. }
+        ));
+
+        discord.fail_next();
+        let error = discord.log("log-channel", "permission check").unwrap_err();
+        assert_eq!(error, "discord_permission_denied");
+        assert_eq!(discord.effects().len(), 3);
     }
 }

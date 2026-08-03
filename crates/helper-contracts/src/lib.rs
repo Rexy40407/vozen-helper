@@ -20,6 +20,19 @@ pub enum FeatureMaturity {
     Degraded,
 }
 
+/// Operational health is deliberately separate from product maturity. A
+/// feature can be released globally while one guild is misconfigured or one
+/// provider is temporarily unavailable.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureHealthStatus {
+    Ready,
+    Degraded,
+    Misconfigured,
+    DependencyDown,
+    Disabled,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ValidationIssue {
     pub path: String,
@@ -38,9 +51,28 @@ pub struct FeatureRevision {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FeatureHealth {
     pub maturity: FeatureMaturity,
+    pub status: FeatureHealthStatus,
     pub operational: bool,
+    #[serde(default)]
+    pub adapter: Option<String>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
     pub issues: Vec<ValidationIssue>,
     pub last_applied_at: Option<DateTime<Utc>>,
+}
+
+/// The API and panel consume this descriptor instead of inventing local
+/// schemas. The JSON schema is intentionally bounded and UI-oriented; the
+/// runtime policy remains typed in `helper-core`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeatureAdapterDescriptor {
+    pub key: String,
+    pub source: String,
+    pub schema_version: u32,
+    pub schema: serde_json::Value,
+    pub defaults: serde_json::Value,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

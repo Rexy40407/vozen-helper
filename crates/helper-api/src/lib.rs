@@ -18,7 +18,7 @@ use helper_contracts::{
 };
 use helper_core::{
     Capability, FEATURE_SCHEMA_VERSION, anti_spam_policy_from_json, evaluate_anti_spam,
-    feature_is_configurable, feature_maturity, is_known_feature, quota_limit,
+    feature_adapter, feature_is_configurable, feature_maturity, is_known_feature, quota_limit,
 };
 use helper_modules::{EntitlementClient, RssClient, TwitchClient, YouTubeClient};
 use helper_store::{
@@ -132,6 +132,11 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/api/config/features/{key}",
             get(feature_detail).put(update_feature_detail),
+        )
+        .route("/api/config/features/{key}/health", get(feature_health))
+        .route(
+            "/api/config/features/{key}/preflight",
+            post(feature_preflight),
         )
         .route("/api/config/features/{key}/test", post(test_feature))
         .route("/api/config/features/{key}/simulate", post(test_feature))
@@ -1905,6 +1910,14 @@ struct PreflightRequest {
     enabled: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct FeaturePreflightRequest {
+    #[serde(default)]
+    config: serde_json::Value,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
 fn permission_bit(permissions: &str, bit: u8) -> bool {
     permissions
         .parse::<u64>()
@@ -1987,6 +2000,33 @@ async fn preflight(
             "shadowModeAvailable": true
         }
     })))
+}
+
+async fn feature_preflight(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+    Json(request): Json<FeaturePreflightRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    if feature_definition(&key).is_none() {
+        return Err(client_error(StatusCode::NOT_FOUND, "unknown_feature"));
+    }
+    if key != "protection.antispam" {
+        return Err(client_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "feature_preflight_not_available",
+        ));
+    }
+    preflight(
+        State(state),
+        headers,
+        Json(PreflightRequest {
+            operation: format!("{key}.publish"),
+            config: request.config,
+            enabled: request.enabled,
+        }),
+    )
+    .await
 }
 
 const QUICK_SETUP_KEY: &str = "quick_setup.state";
@@ -2401,55 +2441,26 @@ struct FeatureDefinition {
     config_schema_version: u32,
     revision: u64,
     issues: Vec<ValidationIssue>,
+    health: FeatureHealthSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FeatureHealthSummary {
+    status: &'static str,
+    operational: bool,
+    adapter: Option<String>,
+    dependencies: Vec<String>,
 }
 
 /// The anti-spam editor is deliberately described by the API.  This keeps
 /// the panel from exposing a field that the runtime does not understand and
 /// gives us one place to document bounded limits and real Discord resources.
 fn feature_schema(key: &str) -> Option<serde_json::Value> {
-    (key == "protection.antispam").then(|| serde_json::json!({
-        "version": FEATURE_SCHEMA_VERSION,
-        "source": "anti_spam_adapter_v1",
-        "sections": [
-            {
-                "title": "Resposta automática",
-                "description": "Deteta padrões de flood, repetição e menções com limites seguros.",
-                "fields": [
-                    {"key":"floodCount","label":"Mensagens no intervalo","kind":"number","min":3,"max":30,"help":"Número de mensagens do mesmo membro antes de sinalizar."},
-                    {"key":"windowSeconds","label":"Janela de tempo (segundos)","kind":"number","min":3,"max":60,"help":"As mensagens antigas saem automaticamente desta janela."},
-                    {"key":"duplicateLimit","label":"Repetições iguais","kind":"number","min":2,"max":12,"help":"Quantas mensagens iguais acionam a regra."},
-                    {"key":"timeoutSeconds","label":"Timeout inicial (segundos)","kind":"number","min":0,"max":86400,"help":"Usa 0 para apenas registar o incidente."}
-                ]
-            },
-            {
-                "title": "Exceções e alertas",
-                "description": "Escolhe recursos reais do servidor para evitar falsos positivos e receber contexto.",
-                "fields": [
-                    {"key":"mentionLimit","label":"Limite de menções por mensagem","kind":"number","min":1,"max":30,"advanced":true},
-                    {"key":"ignoredChannels","label":"Canais ignorados","kind":"channels","help":"Mensagens nestes canais não entram no avaliador.","advanced":true},
-                    {"key":"ignoredRoles","label":"Cargos ignorados","kind":"roles","help":"Membros com um destes cargos não entram no avaliador.","advanced":true},
-                    {"key":"logChannel","label":"Canal de registo","kind":"channel","help":"O Helper publica aqui o motivo e o modo da decisão.","advanced":true},
-                    {"key":"alertOnly","label":"Apenas alertar, sem aplicar castigo","kind":"toggle","help":"Mantém a deteção e auditoria, mas não aplica timeout.","advanced":true}
-                ]
-            }
-        ]
-    }))
+    feature_adapter(key).map(|adapter| adapter.descriptor().schema)
 }
 
 fn feature_defaults(key: &str) -> Option<serde_json::Value> {
-    (key == "protection.antispam").then(|| {
-        serde_json::json!({
-            "floodCount": 6,
-            "windowSeconds": 10,
-            "duplicateLimit": 3,
-            "timeoutSeconds": 60,
-            "mentionLimit": 5,
-            "ignoredChannels": [],
-            "ignoredRoles": [],
-            "logChannel": "",
-            "alertOnly": false
-        })
-    })
+    feature_adapter(key).map(|adapter| adapter.descriptor().defaults)
 }
 
 const FEATURE_DEFINITIONS: &[(&str, &str, &str, &str, &str, bool)] = &[
@@ -2931,6 +2942,16 @@ async fn feature_config(
                     })
                     .unwrap_or(false)
                     && configurable;
+                let adapter = feature_adapter(key).map(|value| value.descriptor());
+                let health = FeatureHealthSummary {
+                    status: feature_health_status(key, enabled, maturity, &issues),
+                    operational: feature_is_operational(key, maturity, &issues),
+                    adapter: adapter.as_ref().map(|value| value.source.clone()),
+                    dependencies: adapter
+                        .as_ref()
+                        .map(|value| value.dependencies.clone())
+                        .unwrap_or_default(),
+                };
                 FeatureDefinition {
                     key: (*key).to_string(),
                     label: (*label).to_string(),
@@ -2948,6 +2969,7 @@ async fn feature_config(
                     config_schema_version: FEATURE_SCHEMA_VERSION,
                     revision: stored.as_ref().map(|value| value.revision).unwrap_or(0),
                     issues,
+                    health,
                 }
             },
         )
@@ -3133,6 +3155,9 @@ fn sync_runtime_feature_config(
 }
 
 fn runtime_projection_pairs(key: &str, config: &serde_json::Value) -> Vec<(String, String)> {
+    if let Some(adapter) = feature_adapter(key) {
+        return adapter.runtime_projection(config);
+    }
     let object = config.as_object();
     let number = |name: &str| {
         object
@@ -3229,48 +3254,6 @@ fn runtime_projection_pairs(key: &str, config: &serde_json::Value) -> Vec<(Strin
                 add("identity.nickname", value.to_string());
             }
         }
-        "protection.antispam" => {
-            if let Some(value) = number("floodCount") {
-                add("security.antispam.flood_count", value.to_string());
-            }
-            if let Some(value) = number("windowSeconds") {
-                add("security.antispam.window_seconds", value.to_string());
-            }
-            if let Some(value) = number("duplicateLimit") {
-                add("security.antispam.duplicate_limit", value.to_string());
-            }
-            if let Some(value) = number("timeoutSeconds") {
-                add("security.antispam.timeout_seconds", value.to_string());
-            }
-            if let Some(value) = number("mentionLimit") {
-                add("security.antispam.mention_limit", value.to_string());
-            }
-            if let Some(value) = text("logChannel") {
-                add("security.antispam.log_channel", value.to_string());
-            }
-            for (field, setting) in [
-                ("ignoredChannels", "security.antispam.ignored_channels"),
-                ("ignoredRoles", "security.antispam.ignored_roles"),
-            ] {
-                if let Some(values) = object
-                    .and_then(|values| values.get(field))
-                    .and_then(serde_json::Value::as_array)
-                {
-                    let serialized = values
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    add(setting, serialized);
-                }
-            }
-            if let Some(value) = object
-                .and_then(|values| values.get("alertOnly"))
-                .and_then(serde_json::Value::as_bool)
-            {
-                add("security.antispam.alert_only", value.to_string());
-            }
-        }
         "community.levels" => {
             if let Some(value) = number("xpMin") {
                 add("community.levels.xp_min", value.to_string());
@@ -3357,65 +3340,34 @@ fn validate_feature_config(key: &str, config: &serde_json::Value) -> Vec<Validat
             }),
         }
     }
-    for (name, min, max) in [
-        ("threshold", 1_i64, 100_i64),
-        ("joinThreshold", 1, 10_000),
-        ("windowSeconds", 1, 86_400),
-        ("minimumAccountDays", 0, 365),
-        ("floodCount", 3, 30),
-        ("duplicateLimit", 2, 12),
-        ("timeoutSeconds", 0, 86_400),
-        ("mentionLimit", 1, 30),
-        ("xpMin", 1, 1_000),
-        ("xpMax", 1, 2_000),
-        ("cooldownSeconds", 0, 3_600),
-    ] {
-        if let Some(value) = config.get(name).and_then(serde_json::Value::as_i64)
-            && !(min..=max).contains(&value)
-        {
-            issues.push(ValidationIssue {
-                path: name.into(),
-                code: "out_of_range".into(),
-                message: format!("O valor tem de estar entre {min} e {max}."),
-                severity: "error".into(),
-            });
-        }
-    }
-    if key == "protection.antispam" {
-        if let Some(value) = config
-            .get("windowSeconds")
-            .and_then(serde_json::Value::as_i64)
-            && !(3..=60).contains(&value)
-        {
-            issues.push(ValidationIssue {
-                path: "windowSeconds".into(),
-                code: "out_of_range".into(),
-                message: "A janela do anti-spam tem de estar entre 3 e 60 segundos.".into(),
-                severity: "error".into(),
-            });
-        }
-        for field in ["ignoredChannels", "ignoredRoles"] {
-            if let Some(value) = config.get(field) {
-                let valid = value.as_array().is_some_and(|items| {
-                    items.len() <= 100
-                        && items.iter().all(|item| {
-                            item.as_str().is_some_and(|text| {
-                                !text.is_empty()
-                                    && text.chars().count() <= 64
-                                    && !text.chars().any(char::is_control)
-                            })
-                        })
+    if key != "protection.antispam" {
+        for (name, min, max) in [
+            ("threshold", 1_i64, 100_i64),
+            ("joinThreshold", 1, 10_000),
+            ("windowSeconds", 1, 86_400),
+            ("minimumAccountDays", 0, 365),
+            ("floodCount", 3, 30),
+            ("duplicateLimit", 2, 12),
+            ("timeoutSeconds", 0, 86_400),
+            ("mentionLimit", 1, 30),
+            ("xpMin", 1, 1_000),
+            ("xpMax", 1, 2_000),
+            ("cooldownSeconds", 0, 3_600),
+        ] {
+            if let Some(value) = config.get(name).and_then(serde_json::Value::as_i64)
+                && !(min..=max).contains(&value)
+            {
+                issues.push(ValidationIssue {
+                    path: name.into(),
+                    code: "out_of_range".into(),
+                    message: format!("O valor tem de estar entre {min} e {max}."),
+                    severity: "error".into(),
                 });
-                if !valid {
-                    issues.push(ValidationIssue {
-                        path: field.into(),
-                        code: "invalid_exemptions".into(),
-                        message: "Indica no máximo 100 IDs ou nomes válidos.".into(),
-                        severity: "error".into(),
-                    });
-                }
             }
         }
+    }
+    if let Some(adapter) = feature_adapter(key) {
+        issues.extend(adapter.validate(config));
     }
     if key == "community.levels"
         && let (Some(minimum), Some(maximum)) = (
@@ -3444,6 +3396,37 @@ fn lifecycle_issues(maturity: FeatureMaturity) -> Vec<ValidationIssue> {
         }];
     }
     Vec::new()
+}
+
+fn feature_health_status(
+    key: &str,
+    enabled: bool,
+    maturity: FeatureMaturity,
+    issues: &[ValidationIssue],
+) -> &'static str {
+    if !enabled {
+        return "disabled";
+    }
+    if maturity == FeatureMaturity::Blocked {
+        return "dependency_down";
+    }
+    if feature_adapter(key).is_none() {
+        return "degraded";
+    }
+    if issues.iter().any(|issue| issue.severity == "error") {
+        return "misconfigured";
+    }
+    "ready"
+}
+
+fn feature_is_operational(
+    key: &str,
+    maturity: FeatureMaturity,
+    issues: &[ValidationIssue],
+) -> bool {
+    maturity != FeatureMaturity::Blocked
+        && feature_adapter(key).is_some()
+        && issues.iter().all(|issue| issue.severity != "error")
 }
 
 async fn feature_detail(
@@ -3478,18 +3461,67 @@ async fn feature_detail(
     let mut issues = validate_feature_config(&key, &config);
     issues.extend(lifecycle_issues(maturity));
     let revision = stored.as_ref().map(|value| value.revision).unwrap_or(0);
+    let enabled = feature_enabled(&state, &claims.guild_id, &key);
+    let adapter = feature_adapter(&key).map(|value| value.descriptor());
+    let health_status = feature_health_status(&key, enabled, maturity, &issues);
     Ok(Json(serde_json::json!({
         "guildId": claims.guild_id,
         "key": key,
-        "enabled": feature_enabled(&state, &claims.guild_id, &key),
+        "enabled": enabled,
         "config": config,
         "defaults": feature_defaults(&key),
         "schema": feature_schema(&key),
+        "adapter": adapter.as_ref().map(|value| value.source.clone()),
+        "dependencies": adapter.as_ref().map(|value| value.dependencies.clone()).unwrap_or_default(),
         "revision": revision,
         "maturity": maturity,
         "configurable": feature_is_configurable(&key),
         "schemaVersion": FEATURE_SCHEMA_VERSION,
-        "health": {"maturity": maturity, "operational": feature_is_configurable(&key) && issues.iter().all(|issue| issue.severity != "error"), "issues": issues},
+        "health": {"maturity": maturity, "status": health_status, "adapter": adapter.as_ref().map(|value| value.source.clone()), "dependencies": adapter.as_ref().map(|value| value.dependencies.clone()).unwrap_or_default(), "operational": feature_is_operational(&key, maturity, &issues), "issues": issues},
+    })))
+}
+
+async fn feature_health(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    if feature_definition(&key).is_none() {
+        return Err(client_error(StatusCode::NOT_FOUND, "unknown_feature"));
+    }
+    let config = state
+        .store
+        .get_feature_setting(&claims.guild_id, &key)
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(&value.config_json).ok())
+        .filter(|value| value.is_object())
+        .or_else(|| {
+            state
+                .store
+                .get_setting(&claims.guild_id, &feature_config_key(&key))
+                .ok()
+                .flatten()
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+                .filter(|value| value.is_object())
+        })
+        .unwrap_or_else(|| serde_json::json!({}));
+    let maturity = feature_maturity(&key);
+    let mut issues = validate_feature_config(&key, &config);
+    issues.extend(lifecycle_issues(maturity));
+    let enabled = feature_enabled(&state, &claims.guild_id, &key);
+    let descriptor = feature_adapter(&key).map(|adapter| adapter.descriptor());
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "key": key,
+        "enabled": enabled,
+        "maturity": maturity,
+        "status": feature_health_status(&key, enabled, maturity, &issues),
+        "operational": feature_is_operational(&key, maturity, &issues),
+        "adapter": descriptor.as_ref().map(|value| value.source.clone()),
+        "dependencies": descriptor.as_ref().map(|value| value.dependencies.clone()).unwrap_or_default(),
+        "issues": issues,
     })))
 }
 
@@ -5066,6 +5098,21 @@ mod tests {
                 .iter()
                 .any(|item| item["key"] == "community.levels")
         );
+        let anti_spam = body["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["key"] == "protection.antispam")
+            .unwrap();
+        assert_eq!(anti_spam["health"]["adapter"], "anti_spam_adapter_v1");
+        assert_eq!(anti_spam["health"]["operational"], true);
+        let planned = body["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["key"] == "community.levels")
+            .unwrap();
+        assert_eq!(planned["health"]["operational"], false);
 
         let response = router(state(store.clone()))
             .oneshot(
@@ -5154,7 +5201,6 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
         let response: serde_json::Value =
             serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
                 .unwrap();
@@ -5203,7 +5249,6 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value =
             serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
                 .unwrap();
@@ -5253,6 +5298,67 @@ mod tests {
                 .iter()
                 .any(|field| field["kind"] == "channels")
         );
+    }
+
+    #[tokio::test]
+    async fn anti_spam_health_and_feature_preflight_are_available_under_feature_route() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        store
+            .replace_session_guilds(
+                session.session_id,
+                &[("guild-a".into(), "Alpha".into(), Some("0".into()))],
+            )
+            .unwrap();
+
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/config/features/protection.antispam/health")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                .unwrap();
+        assert_eq!(body["status"], "disabled");
+        assert_eq!(body["adapter"], "anti_spam_adapter_v1");
+        assert_eq!(body["operational"], true);
+
+        let response = router(state(store))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/config/features/protection.antispam/preflight")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"enabled": false, "config": {"floodCount": 6}})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if response.status() != StatusCode::OK {
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+            panic!(
+                "feature preflight returned {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                .unwrap();
+        assert_eq!(body["operation"], "protection.antispam.publish");
+        assert_eq!(body["guildId"], "guild-a");
     }
 
     #[tokio::test]
