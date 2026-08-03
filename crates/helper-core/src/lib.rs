@@ -1653,6 +1653,207 @@ impl FeatureAdapter for StarboardAdapter {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AntiRaidAdapter;
+
+impl AntiRaidAdapter {
+    pub const KEY: &'static str = "protection.anti_raid";
+    pub const SOURCE: &'static str = "anti_raid_adapter_v1";
+}
+
+impl FeatureAdapter for AntiRaidAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Join burst protection",
+                    "description": "Enable the gate when too many members arrive in a short window.",
+                    "fields": [
+                        {"key":"joinThreshold","label":"Joins before containment","kind":"number","min":2,"max":100},
+                        {"key":"windowSeconds","label":"Window (seconds)","kind":"number","min":3,"max":60},
+                        {"key":"alertChannel","label":"Alert channel","kind":"channel","advanced":true},
+                        {"key":"alertOnly","label":"Monitor only","kind":"toggle","advanced":true}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({
+                "joinThreshold": 10,
+                "windowSeconds": 10,
+                "alertChannel": "",
+                "alertOnly": false
+            }),
+            dependencies: vec!["guild_members_intent".into(), "manage_roles".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        for (field, min, max) in [("joinThreshold", 2_i64, 100_i64), ("windowSeconds", 3, 60)] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_i64)
+                && !(min..=max).contains(&value)
+            {
+                issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "out_of_range".into(),
+                    message: format!("The value must be between {min} and {max}."),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if let Some(value) = object.get("alertChannel")
+            && !value
+                .as_str()
+                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok())
+        {
+            issues.push(ValidationIssue {
+                path: "alertChannel".into(),
+                code: "invalid_channel_id".into(),
+                message: "Choose a valid Discord channel.".into(),
+                severity: "error".into(),
+            });
+        }
+        if object
+            .get("alertOnly")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "alertOnly".into(),
+                code: "boolean_required".into(),
+                message: "Monitor only must be true or false.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut pairs = Vec::new();
+        for (field, setting) in [
+            ("joinThreshold", "security.anti_raid.joins"),
+            ("windowSeconds", "security.anti_raid.window_seconds"),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_i64) {
+                pairs.push((setting.into(), value.to_string()));
+            }
+        }
+        if let Some(value) = object
+            .get("alertChannel")
+            .and_then(serde_json::Value::as_str)
+        {
+            pairs.push(("security.anti_raid.alert_channel".into(), value.into()));
+        }
+        if let Some(value) = object.get("alertOnly").and_then(serde_json::Value::as_bool) {
+            pairs.push(("security.anti_raid.alert_only".into(), value.to_string()));
+        }
+        pairs
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct JoinGateAdapter;
+
+impl JoinGateAdapter {
+    pub const KEY: &'static str = "protection.join_gate";
+    pub const SOURCE: &'static str = "join_gate_adapter_v1";
+}
+
+impl FeatureAdapter for JoinGateAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Join verification",
+                    "description": "Hold accounts below the configured age behind a verification role.",
+                    "fields": [
+                        {"key":"minimumAccountDays","label":"Minimum account age (days)","kind":"number","min":0,"max":365},
+                        {"key":"verifiedRole","label":"Verification role","kind":"role"}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({"minimumAccountDays": 0, "verifiedRole": ""}),
+            dependencies: vec!["guild_members_intent".into(), "manage_roles".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        if let Some(value) = object
+            .get("minimumAccountDays")
+            .and_then(serde_json::Value::as_i64)
+            && !(0..=365).contains(&value)
+        {
+            issues.push(ValidationIssue {
+                path: "minimumAccountDays".into(),
+                code: "out_of_range".into(),
+                message: "Account age must be between 0 and 365 days.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(value) = object.get("verifiedRole")
+            && !value
+                .as_str()
+                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok())
+        {
+            issues.push(ValidationIssue {
+                path: "verifiedRole".into(),
+                code: "invalid_role_id".into(),
+                message: "Choose a valid Discord role.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut pairs = Vec::new();
+        if let Some(value) = object
+            .get("minimumAccountDays")
+            .and_then(serde_json::Value::as_i64)
+        {
+            pairs.push(("security.join_gate.min_age_days".into(), value.to_string()));
+        }
+        if let Some(value) = object
+            .get("verifiedRole")
+            .and_then(serde_json::Value::as_str)
+        {
+            pairs.push(("security.join_gate.role_id".into(), value.into()));
+        }
+        pairs
+    }
+}
+
 impl AntiSpamAdapter {
     pub const KEY: &'static str = "protection.antispam";
     pub const SOURCE: &'static str = "anti_spam_adapter_v1";
@@ -1836,6 +2037,8 @@ static ANTI_SCAM_ADAPTER: AntiScamAdapter = AntiScamAdapter;
 static WELCOME_CHANNEL_ADAPTER: WelcomeChannelAdapter = WelcomeChannelAdapter;
 static LEVELS_ADAPTER: LevelsAdapter = LevelsAdapter;
 static STARBOARD_ADAPTER: StarboardAdapter = StarboardAdapter;
+static ANTI_RAID_ADAPTER: AntiRaidAdapter = AntiRaidAdapter;
+static JOIN_GATE_ADAPTER: JoinGateAdapter = JoinGateAdapter;
 
 pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
     match key {
@@ -1852,6 +2055,8 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         WelcomeChannelAdapter::KEY => Some(&WELCOME_CHANNEL_ADAPTER as &dyn FeatureAdapter),
         LevelsAdapter::KEY => Some(&LEVELS_ADAPTER as &dyn FeatureAdapter),
         StarboardAdapter::KEY => Some(&STARBOARD_ADAPTER as &dyn FeatureAdapter),
+        AntiRaidAdapter::KEY => Some(&ANTI_RAID_ADAPTER as &dyn FeatureAdapter),
+        JoinGateAdapter::KEY => Some(&JOIN_GATE_ADAPTER as &dyn FeatureAdapter),
         _ => None,
     }
 }
@@ -2337,6 +2542,33 @@ mod tests {
                     "emoji": "⭐"
                 }))
                 .contains(&("community.starboard.threshold".into(), "5".into()))
+        );
+    }
+
+    #[test]
+    fn join_protection_adapters_project_real_gateway_limits() {
+        let raid = feature_adapter("protection.anti_raid").expect("anti-raid adapter");
+        assert_eq!(raid.descriptor().source, "anti_raid_adapter_v1");
+        assert!(
+            raid.runtime_projection(&serde_json::json!({
+                "joinThreshold": 20,
+                "windowSeconds": 15,
+                "alertOnly": true
+            }))
+            .contains(&("security.anti_raid.joins".into(), "20".into()))
+        );
+        let gate = feature_adapter("protection.join_gate").expect("join gate adapter");
+        assert_eq!(gate.descriptor().source, "join_gate_adapter_v1");
+        assert!(
+            gate.validate(&serde_json::json!({"minimumAccountDays": 400}))
+                .iter()
+                .any(|issue| issue.path == "minimumAccountDays")
+        );
+        assert!(
+            gate.runtime_projection(
+                &serde_json::json!({"minimumAccountDays": 7, "verifiedRole": "123"})
+            )
+            .contains(&("security.join_gate.role_id".into(), "123".into()))
         );
     }
 
