@@ -2713,6 +2713,33 @@ static TEMP_CHANNELS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
     dependencies: &["manage_channels", "voice_states"],
 };
 
+static YOUTUBE_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+    key: "social.youtube",
+    source: "youtube_data_api_v3_adapter_v1",
+    title: "YouTube alerts",
+    description: "Polls the official YouTube Data API and delivers deduplicated new-video alerts.",
+    dependencies: &["YOUTUBE_API_KEY", "send_messages", "embed_links"],
+};
+static RSS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+    key: "social.rss",
+    source: "rss_atom_adapter_v1",
+    title: "RSS alerts",
+    description: "Polls validated RSS and Atom feeds with SSRF protection and deduplication.",
+    dependencies: &["outbound_https", "send_messages"],
+};
+static TWITCH_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+    key: "social.twitch",
+    source: "twitch_eventsub_adapter_v1",
+    title: "Twitch alerts",
+    description: "Uses the official Helix/EventSub API with signed webhook verification and deduplication.",
+    dependencies: &[
+        "TWITCH_CLIENT_ID",
+        "TWITCH_CLIENT_SECRET",
+        "TWITCH_EVENTSUB_SECRET",
+        "send_messages",
+    ],
+};
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EmbedsAdapter;
 
@@ -2869,6 +2896,9 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         "community.achievements" => Some(&ACHIEVEMENTS_ADAPTER as &dyn FeatureAdapter),
         "management.invite_tracker" => Some(&INVITE_TRACKER_ADAPTER as &dyn FeatureAdapter),
         "utility.temp_channels" => Some(&TEMP_CHANNELS_ADAPTER as &dyn FeatureAdapter),
+        "social.youtube" => Some(&YOUTUBE_ADAPTER as &dyn FeatureAdapter),
+        "social.rss" => Some(&RSS_ADAPTER as &dyn FeatureAdapter),
+        "social.twitch" => Some(&TWITCH_ADAPTER as &dyn FeatureAdapter),
         EmbedsAdapter::KEY => Some(&EMBEDS_ADAPTER as &dyn FeatureAdapter),
         EconomyAdapter::KEY => Some(&ECONOMY_ADAPTER as &dyn FeatureAdapter),
         _ => None,
