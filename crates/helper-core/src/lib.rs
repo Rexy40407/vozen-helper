@@ -1399,6 +1399,260 @@ impl FeatureAdapter for WelcomeChannelAdapter {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LevelsAdapter;
+
+impl LevelsAdapter {
+    pub const KEY: &'static str = "community.levels";
+    pub const SOURCE: &'static str = "levels_adapter_v1";
+}
+
+impl FeatureAdapter for LevelsAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "XP progression",
+                    "description": "Tune message XP and level-up announcements.",
+                    "fields": [
+                        {"key":"xpMin","label":"Minimum XP per message","kind":"number","min":1,"max":1000},
+                        {"key":"xpMax","label":"Maximum XP per message","kind":"number","min":1,"max":2000},
+                        {"key":"cooldownSeconds","label":"XP cooldown (seconds)","kind":"number","min":0,"max":3600},
+                        {"key":"announceChannel","label":"Level-up channel","kind":"channel","advanced":true},
+                        {"key":"announceTemplate","label":"Level-up message","kind":"text","max":1000,"advanced":true}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({
+                "xpMin": 15,
+                "xpMax": 30,
+                "cooldownSeconds": 60,
+                "announceChannel": "",
+                "announceTemplate": "{member} reached level {level}!"
+            }),
+            dependencies: vec!["message_content_intent".into(), "send_messages".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        for (field, min, max) in [
+            ("xpMin", 1_i64, 1_000_i64),
+            ("xpMax", 1, 2_000),
+            ("cooldownSeconds", 0, 3_600),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_i64)
+                && !(min..=max).contains(&value)
+            {
+                issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "out_of_range".into(),
+                    message: format!("The value must be between {min} and {max}."),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if object
+            .get("xpMin")
+            .and_then(serde_json::Value::as_i64)
+            .zip(object.get("xpMax").and_then(serde_json::Value::as_i64))
+            .is_some_and(|(min, max)| max < min)
+        {
+            issues.push(ValidationIssue {
+                path: "xpMax".into(),
+                code: "must_be_at_least_minimum".into(),
+                message: "Maximum XP must be at least minimum XP.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(value) = object.get("announceChannel")
+            && !value
+                .as_str()
+                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok())
+        {
+            issues.push(ValidationIssue {
+                path: "announceChannel".into(),
+                code: "invalid_channel_id".into(),
+                message: "Choose a valid Discord channel.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(value) = object.get("announceTemplate")
+            && !value
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty() && text.chars().count() <= 1_000)
+        {
+            issues.push(ValidationIssue {
+                path: "announceTemplate".into(),
+                code: "invalid_template".into(),
+                message: "The announcement must contain 1-1000 characters.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut pairs = Vec::new();
+        for (field, setting) in [
+            ("xpMin", "community.levels.xp_min"),
+            ("xpMax", "community.levels.xp_max"),
+            ("cooldownSeconds", "community.levels.cooldown_seconds"),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_i64) {
+                pairs.push((setting.into(), value.to_string()));
+            }
+        }
+        for (field, setting) in [
+            ("announceChannel", "community.levels.announce_channel"),
+            ("announceTemplate", "community.levels.announce_template"),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
+                pairs.push((setting.into(), value.into()));
+            }
+        }
+        pairs
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StarboardAdapter;
+
+impl StarboardAdapter {
+    pub const KEY: &'static str = "community.starboard";
+    pub const SOURCE: &'static str = "starboard_adapter_v1";
+}
+
+impl FeatureAdapter for StarboardAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Starboard",
+                    "description": "Choose the channel and reaction score required to feature a message.",
+                    "fields": [
+                        {"key":"channel","label":"Starboard channel","kind":"channel"},
+                        {"key":"threshold","label":"Stars required","kind":"number","min":1,"max":100},
+                        {"key":"emoji","label":"Reaction emoji","kind":"text","min":1,"max":32},
+                        {"key":"allowSelfStar","label":"Allow authors to star their own message","kind":"toggle","advanced":true},
+                        {"key":"includeImages","label":"Include image attachments","kind":"toggle","advanced":true},
+                        {"key":"ignoredChannels","label":"Ignored channels","kind":"channels","max":100,"advanced":true}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({
+                "channel": "",
+                "threshold": 3,
+                "emoji": "⭐",
+                "allowSelfStar": false,
+                "includeImages": true,
+                "ignoredChannels": []
+            }),
+            dependencies: vec![
+                "read_message_history".into(),
+                "add_reactions".into(),
+                "send_messages".into(),
+            ],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        if let Some(value) = object.get("threshold").and_then(serde_json::Value::as_i64)
+            && !(1..=100).contains(&value)
+        {
+            issues.push(ValidationIssue {
+                path: "threshold".into(),
+                code: "out_of_range".into(),
+                message: "Stars required must be between 1 and 100.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(value) = object.get("channel")
+            && !value
+                .as_str()
+                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok())
+        {
+            issues.push(ValidationIssue {
+                path: "channel".into(),
+                code: "invalid_channel_id".into(),
+                message: "Choose a valid Discord channel.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut pairs = Vec::new();
+        for (field, setting) in [
+            ("channel", "community.starboard.channel_id"),
+            ("emoji", "community.starboard.emoji"),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
+                pairs.push((setting.into(), value.into()));
+            }
+        }
+        if let Some(value) = object.get("threshold").and_then(serde_json::Value::as_i64) {
+            pairs.push(("community.starboard.threshold".into(), value.to_string()));
+        }
+        for (field, setting) in [
+            ("allowSelfStar", "community.starboard.allow_self_star"),
+            ("includeImages", "community.starboard.include_images"),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_bool) {
+                pairs.push((setting.into(), value.to_string()));
+            }
+        }
+        if let Some(values) = object
+            .get("ignoredChannels")
+            .and_then(serde_json::Value::as_array)
+        {
+            pairs.push((
+                "community.starboard.ignored_channels".into(),
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ));
+        }
+        pairs
+    }
+}
+
 impl AntiSpamAdapter {
     pub const KEY: &'static str = "protection.antispam";
     pub const SOURCE: &'static str = "anti_spam_adapter_v1";
@@ -1580,6 +1834,8 @@ static HELP_ADAPTER: HelpAdapter = HelpAdapter;
 static MODERATION_ADAPTER: ModerationAdapter = ModerationAdapter;
 static ANTI_SCAM_ADAPTER: AntiScamAdapter = AntiScamAdapter;
 static WELCOME_CHANNEL_ADAPTER: WelcomeChannelAdapter = WelcomeChannelAdapter;
+static LEVELS_ADAPTER: LevelsAdapter = LevelsAdapter;
+static STARBOARD_ADAPTER: StarboardAdapter = StarboardAdapter;
 
 pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
     match key {
@@ -1594,6 +1850,8 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         ModerationAdapter::KEY => Some(&MODERATION_ADAPTER as &dyn FeatureAdapter),
         AntiScamAdapter::KEY => Some(&ANTI_SCAM_ADAPTER as &dyn FeatureAdapter),
         WelcomeChannelAdapter::KEY => Some(&WELCOME_CHANNEL_ADAPTER as &dyn FeatureAdapter),
+        LevelsAdapter::KEY => Some(&LEVELS_ADAPTER as &dyn FeatureAdapter),
+        StarboardAdapter::KEY => Some(&STARBOARD_ADAPTER as &dyn FeatureAdapter),
         _ => None,
     }
 }
@@ -1875,7 +2133,7 @@ mod tests {
         assert!(projection.contains(&("security.antispam.flood_count".into(), "8".into())));
         assert!(projection.contains(&("security.antispam.ignored_channels".into(), "123".into())));
         assert!(projection.contains(&("security.antispam.alert_only".into(), "true".into())));
-        assert!(feature_adapter("community.levels").is_none());
+        assert!(feature_adapter("community.levels").is_some());
     }
 
     #[test]
@@ -2044,6 +2302,41 @@ mod tests {
         assert_eq!(
             feature_maturity("support.welcome_channel"),
             FeatureMaturity::Operational
+        );
+    }
+
+    #[test]
+    fn levels_and_starboard_adapters_cover_runtime_settings() {
+        let levels = feature_adapter("community.levels").expect("levels adapter");
+        assert_eq!(levels.descriptor().source, "levels_adapter_v1");
+        assert!(
+            levels
+                .validate(&serde_json::json!({"xpMin": 40, "xpMax": 20}))
+                .iter()
+                .any(|issue| issue.path == "xpMax")
+        );
+        assert!(
+            levels
+                .runtime_projection(&serde_json::json!({"xpMin": 10, "xpMax": 25}))
+                .contains(&("community.levels.xp_max".into(), "25".into()))
+        );
+
+        let starboard = feature_adapter("community.starboard").expect("starboard adapter");
+        assert_eq!(starboard.descriptor().source, "starboard_adapter_v1");
+        assert!(
+            starboard
+                .validate(&serde_json::json!({"threshold": 0}))
+                .iter()
+                .any(|issue| issue.path == "threshold")
+        );
+        assert!(
+            starboard
+                .runtime_projection(&serde_json::json!({
+                    "channel": "123",
+                    "threshold": 5,
+                    "emoji": "⭐"
+                }))
+                .contains(&("community.starboard.threshold".into(), "5".into()))
         );
     }
 

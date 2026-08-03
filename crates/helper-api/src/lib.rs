@@ -5636,13 +5636,13 @@ mod tests {
             .unwrap();
         assert_eq!(anti_spam["health"]["adapter"], "anti_spam_adapter_v1");
         assert_eq!(anti_spam["health"]["operational"], true);
-        let planned = body["features"]
+        let levels = body["features"]
             .as_array()
             .unwrap()
             .iter()
             .find(|item| item["key"] == "community.levels")
             .unwrap();
-        assert_eq!(planned["health"]["operational"], false);
+        assert_eq!(levels["health"]["operational"], true);
         let nickname = body["features"]
             .as_array()
             .unwrap()
