@@ -3374,11 +3374,14 @@ async fn feature_config(
                     description: (*description).to_string(),
                     category: (*category).to_string(),
                     capability: (*capability).to_string(),
-                    available: (*available
-                        || *key == "social.youtube"
-                        || *key == "social.rss"
-                        || *key == "social.twitch")
-                        && configurable,
+                    // `available` used to be a second, stale allow-list which
+                    // left newly registered adapters hidden behind the
+                    // original thirteen cards.  The adapter registry is now
+                    // the source of truth: a feature is discoverable when it
+                    // has a real adapter and is in a configurable lifecycle
+                    // state.  Keep the legacy flag only for compatibility
+                    // with descriptors that predate the registry.
+                    available: (feature_adapter(key).is_some() || *available) && configurable,
                     enabled,
                     maturity,
                     configurable,
