@@ -2058,6 +2058,43 @@ impl EventHandler for Handler {
             .delete_star_entry(&guild_text, &deleted_message_id.to_string());
     }
 
+    async fn message_delete_bulk(
+        &self,
+        ctx: Context,
+        _channel_id: ChannelId,
+        deleted_message_ids: Vec<serenity::all::MessageId>,
+        guild_id: Option<serenity::all::GuildId>,
+    ) {
+        let Some(guild_id) = guild_id else {
+            return;
+        };
+        let guild_text = guild_id.to_string();
+        let board_id = setting_string(&self.store, &guild_text, "community.starboard.channel_id")
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(serenity::all::ChannelId::new);
+        for deleted_message_id in deleted_message_ids {
+            let Ok(Some(entry)) = self
+                .store
+                .star_entry(&guild_text, &deleted_message_id.to_string())
+            else {
+                continue;
+            };
+            if let Some(board_id) = board_id
+                && let Ok(starboard_message_id) = entry.starboard_message_id.parse::<u64>()
+            {
+                let _ = board_id
+                    .delete_message(
+                        &ctx.http,
+                        serenity::all::MessageId::new(starboard_message_id),
+                    )
+                    .await;
+            }
+            let _ = self
+                .store
+                .delete_star_entry(&guild_text, &deleted_message_id.to_string());
+        }
+    }
+
     async fn message_update(
         &self,
         _ctx: Context,
