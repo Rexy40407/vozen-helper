@@ -29,7 +29,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 mod rank_card;
 
@@ -156,6 +156,26 @@ struct Handler {
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!(user = %ready.user.name, "helper gateway ready");
+        for guild in &ready.guilds {
+            let guild_id = guild.id.to_string();
+            if !feature_enabled(&self.store, &guild_id, "management.nickname", None) {
+                continue;
+            }
+            let Some(nickname) = setting_string(&self.store, &guild_id, "identity.nickname") else {
+                continue;
+            };
+            if let Err(error) = guild
+                .id
+                .edit_member(
+                    &ctx.http,
+                    ready.user.id,
+                    serenity::all::EditMember::new().nickname(nickname.trim().to_owned()),
+                )
+                .await
+            {
+                warn!(%guild_id, %error, "failed to apply configured Helper nickname");
+            }
+        }
         if !self.scheduler_started.swap(true, Ordering::AcqRel) {
             let store = self.store.clone();
             let http = ctx.http.clone();

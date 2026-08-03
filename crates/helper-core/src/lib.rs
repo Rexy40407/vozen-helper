@@ -216,6 +216,86 @@ pub trait FeatureAdapter: Sync {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AntiSpamAdapter;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NicknameAdapter;
+
+impl NicknameAdapter {
+    pub const KEY: &'static str = "management.nickname";
+    pub const SOURCE: &'static str = "nickname_adapter_v1";
+
+    fn schema() -> serde_json::Value {
+        serde_json::json!({
+            "version": FEATURE_SCHEMA_VERSION,
+            "source": Self::SOURCE,
+            "sections": [{
+                "title": "Helper identity",
+                "description": "Choose the display name the Helper uses in this server.",
+                "fields": [{
+                    "key": "nickname",
+                    "label": "Server nickname",
+                    "kind": "text",
+                    "min": 0,
+                    "max": 32,
+                    "help": "Discord allows up to 32 characters. Leave it empty when disabling to restore the default name."
+                }]
+            }]
+        })
+    }
+
+    fn defaults() -> serde_json::Value {
+        serde_json::json!({"nickname": ""})
+    }
+}
+
+impl FeatureAdapter for NicknameAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: Self::schema(),
+            defaults: Self::defaults(),
+            dependencies: vec!["change_nickname".into(), "manage_nicknames".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let Some(value) = object.get("nickname").and_then(serde_json::Value::as_str) else {
+            return vec![ValidationIssue {
+                path: "nickname".into(),
+                code: "required".into(),
+                message: "Enter the Helper nickname.".into(),
+                severity: "error".into(),
+            }];
+        };
+        if value.chars().count() > 32 || value.chars().any(char::is_control) {
+            return vec![ValidationIssue {
+                path: "nickname".into(),
+                code: "invalid_nickname".into(),
+                message: "The nickname must be at most 32 characters and cannot contain control characters.".into(),
+                severity: "error".into(),
+            }];
+        }
+        Vec::new()
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        config
+            .get("nickname")
+            .and_then(serde_json::Value::as_str)
+            .map(|value| vec![("identity.nickname".into(), value.to_owned())])
+            .unwrap_or_default()
+    }
+}
+
 impl AntiSpamAdapter {
     pub const KEY: &'static str = "protection.antispam";
     pub const SOURCE: &'static str = "anti_spam_adapter_v1";
@@ -387,9 +467,14 @@ impl FeatureAdapter for AntiSpamAdapter {
 }
 
 static ANTI_SPAM_ADAPTER: AntiSpamAdapter = AntiSpamAdapter;
+static NICKNAME_ADAPTER: NicknameAdapter = NicknameAdapter;
 
 pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
-    (key == AntiSpamAdapter::KEY).then_some(&ANTI_SPAM_ADAPTER as &dyn FeatureAdapter)
+    match key {
+        AntiSpamAdapter::KEY => Some(&ANTI_SPAM_ADAPTER as &dyn FeatureAdapter),
+        NicknameAdapter::KEY => Some(&NICKNAME_ADAPTER as &dyn FeatureAdapter),
+        _ => None,
+    }
 }
 
 /// Evaluate one message observation without Discord side effects. This is the
@@ -462,6 +547,7 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "support.tickets"
         | "support.welcome"
         | "management.polls"
+        | "management.nickname"
         | "studio.rank_card" => FeatureMaturity::Operational,
         "social.youtube" | "social.rss" | "social.twitch" => FeatureMaturity::Beta,
         // Providers without an approved adapter or credentials must never be
@@ -660,5 +746,27 @@ mod tests {
         assert!(projection.contains(&("security.antispam.ignored_channels".into(), "123".into())));
         assert!(projection.contains(&("security.antispam.alert_only".into(), "true".into())));
         assert!(feature_adapter("community.levels").is_none());
+    }
+
+    #[test]
+    fn nickname_adapter_owns_schema_validation_and_projection() {
+        let adapter = feature_adapter("management.nickname").expect("adapter registered");
+        let descriptor = adapter.descriptor();
+        assert_eq!(descriptor.source, "nickname_adapter_v1");
+        assert_eq!(descriptor.defaults["nickname"], "");
+        assert!(
+            adapter
+                .validate(&serde_json::json!({"nickname": "A\u{0007}"}))
+                .iter()
+                .any(|issue| issue.code == "invalid_nickname")
+        );
+        assert_eq!(
+            adapter.runtime_projection(&serde_json::json!({"nickname": "Vozen Helper"})),
+            vec![("identity.nickname".into(), "Vozen Helper".into())]
+        );
+        assert_eq!(
+            feature_maturity("management.nickname"),
+            FeatureMaturity::Operational
+        );
     }
 }

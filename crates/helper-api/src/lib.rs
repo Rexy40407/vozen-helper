@@ -2352,6 +2352,9 @@ async fn feature_preflight(
     if feature_definition(&key).is_none() {
         return Err(client_error(StatusCode::NOT_FOUND, "unknown_feature"));
     }
+    if key == "management.nickname" {
+        return nickname_preflight(State(state), headers, request).await;
+    }
     if key != "protection.antispam" {
         return Err(client_error(
             StatusCode::NOT_IMPLEMENTED,
@@ -2368,6 +2371,78 @@ async fn feature_preflight(
         }),
     )
     .await
+}
+
+async fn nickname_preflight(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    request: FeaturePreflightRequest,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let managed = state
+        .store
+        .session_guilds(claims.session_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .any(|guild| guild.guild_id == claims.guild_id);
+    if !managed {
+        return Err(client_error(StatusCode::FORBIDDEN, "guild_not_managed"));
+    }
+    nickname_preflight_for_claims(&state, &claims, request).await
+}
+
+async fn nickname_preflight_for_claims(
+    state: &ApiState,
+    claims: &helper_contracts::SessionClaims,
+    request: FeaturePreflightRequest,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let mut issues = validate_feature_config("management.nickname", &request.config);
+    let snapshot = fetch_discord_guild_snapshot(&claims.guild_id, &state.discord_token).await;
+    let bot_permissions =
+        effective_bot_permissions(&claims.guild_id, &snapshot.roles, &snapshot.bot_role_ids);
+    let bot_permission_string = bot_permissions.map(|value| value.to_string());
+    let bot_context_available = snapshot.bot_ready && bot_permissions.is_some();
+    let bot_change_nickname = bot_permission_string
+        .as_deref()
+        .is_some_and(|value| permission_bit(value, 26));
+    let bot_manage_nicknames = bot_permission_string
+        .as_deref()
+        .is_some_and(|value| permission_bit(value, 27));
+    if request.enabled && !bot_context_available {
+        issues.push(ValidationIssue {
+            path: "permissions.bot_context".into(),
+            code: "discord_context_unavailable".into(),
+            message: "Refresh the Discord context before publishing; the Helper bot member and role could not be verified.".into(),
+            severity: "error".into(),
+        });
+    }
+    if request.enabled && !bot_change_nickname && !bot_manage_nicknames {
+        issues.push(ValidationIssue {
+            path: "permissions.bot_nickname".into(),
+            code: "missing_bot_permission".into(),
+            message: "The Helper bot needs Change Nickname or Manage Nicknames to apply its server nickname.".into(),
+            severity: "error".into(),
+        });
+    }
+    let error_count = issues
+        .iter()
+        .filter(|issue| issue.severity == "error")
+        .count();
+    Ok(Json(serde_json::json!({
+        "operation": "management.nickname.publish",
+        "guildId": claims.guild_id,
+        "ok": error_count == 0,
+        "issues": issues,
+        "checks": {
+            "guildManaged": true,
+            "botContextAvailable": bot_context_available,
+            "botPermissionBitfieldAvailable": bot_permissions.is_some(),
+            "botChangeNickname": bot_change_nickname,
+            "botManageNicknames": bot_manage_nicknames,
+            "discordResourcesFresh": snapshot.roles_ready,
+            "nicknameLength": request.config.get("nickname").and_then(serde_json::Value::as_str).map(|value| value.chars().count())
+        }
+    })))
 }
 
 const QUICK_SETUP_KEY: &str = "quick_setup.state";
@@ -3662,7 +3737,7 @@ fn validate_feature_config(key: &str, config: &serde_json::Value) -> Vec<Validat
             severity: "error".into(),
         });
     }
-    if key == "management.nickname" {
+    if key == "management.nickname" && feature_adapter(key).is_none() {
         match config.get("nickname").and_then(serde_json::Value::as_str) {
             Some(value) if value.chars().count() <= 32 && !value.chars().any(char::is_control) => {}
             Some(_) => issues.push(ValidationIssue {
@@ -3874,6 +3949,44 @@ struct FeatureDetailUpdate {
     expected_revision: Option<u64>,
 }
 
+async fn apply_discord_nickname(
+    state: &ApiState,
+    guild_id: &str,
+    nickname: &str,
+) -> Result<(), String> {
+    if state.discord_token.len() < 20 {
+        return Err("discord_bot_unavailable".into());
+    }
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| Client::new());
+    let auth = format!("Bot {}", state.discord_token);
+    let bot = discord_json(&client, &auth, "/users/@me").await?;
+    let bot_id = bot
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "discord_bot_identity_unavailable".to_string())?;
+    let value = if nickname.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(nickname.trim().to_owned())
+    };
+    let response = client
+        .patch(format!(
+            "{DISCORD_API_BASE}/guilds/{guild_id}/members/{bot_id}"
+        ))
+        .header(header::AUTHORIZATION, auth)
+        .json(&serde_json::json!({"nick": value}))
+        .send()
+        .await
+        .map_err(|_| "discord_request_failed".to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("discord_http_{}", response.status().as_u16()));
+    }
+    Ok(())
+}
+
 async fn update_feature_detail(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -3889,6 +4002,28 @@ async fn update_feature_detail(
             StatusCode::NOT_IMPLEMENTED,
             "feature_not_available",
         ));
+    }
+    if key == "management.nickname" {
+        let preflight = nickname_preflight_for_claims(
+            &state,
+            &claims,
+            FeaturePreflightRequest {
+                config: update.config.clone(),
+                enabled: update.enabled,
+            },
+        )
+        .await?;
+        if !preflight
+            .0
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(client_error(
+                StatusCode::PRECONDITION_FAILED,
+                "nickname_preflight_failed",
+            ));
+        }
     }
     let issues = validate_feature_config(&key, &update.config);
     if issues.iter().any(|issue| issue.severity == "error") {
@@ -3981,8 +4116,26 @@ async fn update_feature_detail(
             ));
         }
     };
+    let discord_apply = if key == "management.nickname" {
+        match apply_discord_nickname(
+            &state,
+            &claims.guild_id,
+            update
+                .config
+                .get("nickname")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+        )
+        .await
+        {
+            Ok(()) => serde_json::json!({"applied": true}),
+            Err(error) => serde_json::json!({"applied": false, "error": error}),
+        }
+    } else {
+        serde_json::json!(null)
+    };
     Ok(Json(
-        serde_json::json!({ "guildId": claims.guild_id, "key": key, "enabled": record.enabled, "config": update.config, "revision": record.revision, "maturity": feature_maturity(&key), "issues": issues }),
+        serde_json::json!({ "guildId": claims.guild_id, "key": key, "enabled": record.enabled, "config": update.config, "revision": record.revision, "maturity": feature_maturity(&key), "issues": issues, "discordApply": discord_apply }),
     ))
 }
 
@@ -5490,6 +5643,15 @@ mod tests {
             .find(|item| item["key"] == "community.levels")
             .unwrap();
         assert_eq!(planned["health"]["operational"], false);
+        let nickname = body["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["key"] == "management.nickname")
+            .unwrap();
+        assert_eq!(nickname["maturity"], "operational");
+        assert_eq!(nickname["health"]["adapter"], "nickname_adapter_v1");
+        assert_eq!(nickname["configurable"], true);
 
         let response = router(state(store.clone()))
             .oneshot(
@@ -5526,7 +5688,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
 
         let response = router(state(store))
             .oneshot(
