@@ -2063,6 +2063,19 @@ impl EventHandler for Handler {
             && let Ok(workflows) = self.store.active_workflows(&guild_text, "message")
         {
             let lower = message.content.to_lowercase();
+            let max_reply_length = setting_u64(
+                &self.store,
+                &guild_text,
+                "management.workflows.max_reply_length",
+                1_000,
+            )
+            .clamp(1, 1_500) as usize;
+            let allow_mentions = setting_bool(
+                &self.store,
+                &guild_text,
+                "management.workflows.allow_mentions",
+                false,
+            );
             for workflow in workflows {
                 if !workflow.condition.is_empty()
                     && !lower.contains(&workflow.condition.to_lowercase())
@@ -2079,13 +2092,18 @@ impl EventHandler for Handler {
                 ) else {
                     continue;
                 };
-                let reply = workflow
+                let mut reply = workflow
                     .payload
                     .replace("{user}", &format!("<@{}>", message.author.id))
                     .replace("{message}", &truncate(&message.content, 500));
+                if !allow_mentions {
+                    reply = reply
+                        .replace("@everyone", "@\u{200b}everyone")
+                        .replace("@here", "@\u{200b}here");
+                }
                 let _ = message
                     .channel_id
-                    .say(&ctx.http, truncate(&reply, 1_500))
+                    .say(&ctx.http, truncate(&reply, max_reply_length))
                     .await;
             }
         }
@@ -2978,7 +2996,23 @@ impl Handler {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
-                let rows = self.store.top_levels(&guild_id.to_string(), 10)?;
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "community.leaderboard", None) {
+                    return respond(
+                        ctx,
+                        command,
+                        "The XP leaderboard is disabled in this server. Enable it in the dashboard.",
+                    )
+                    .await;
+                }
+                let max_entries = setting_u64(
+                    &self.store,
+                    &guild_text,
+                    "community.leaderboard.max_entries",
+                    10,
+                )
+                .clamp(1, 100) as u32;
+                let rows = self.store.top_levels(&guild_text, max_entries)?;
                 if rows.is_empty() { "Ainda não existem dados de XP.".to_string() } else { rows.into_iter().enumerate().map(|(index, row)| format!("{}. <@{}> — {} XP", index + 1, row.user_id, row.xp)).collect::<Vec<_>>().join("\n") }
             }
             "serverstats" => {
@@ -3698,19 +3732,45 @@ impl Handler {
                 format!("Evento nativo #{} cancelado.", event_id)
             }
             "workflow-create" => {
-                let Some(guild_id) = command.guild_id else {
-                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
+                let guild_text = match command.guild_id {
+                    Some(guild_id) => guild_id.to_string(),
+                    None => return respond(ctx, command, "This command can only be used in a server.").await,
                 };
+                if !feature_enabled(&self.store, &guild_text, "management.workflows", None) {
+                    return respond(
+                        ctx,
+                        command,
+                        "Automations are disabled in this server. Enable them in the dashboard.",
+                    )
+                    .await;
+                }
                 let name = option_string(command, "name").unwrap_or_default().trim();
                 let condition = option_string(command, "contains").unwrap_or_default().trim();
                 let reply = option_string(command, "reply").unwrap_or_default().trim();
-                if !(1..=50).contains(&name.len()) || !(1..=1_000).contains(&reply.len()) || condition.len() > 200 {
+                let max_reply_length = setting_u64(
+                    &self.store,
+                    &guild_text,
+                    "management.workflows.max_reply_length",
+                    1_000,
+                )
+                .clamp(1, 1_500) as usize;
+                if !(1..=50).contains(&name.len())
+                    || !(1..=max_reply_length).contains(&reply.len())
+                    || condition.len() > 200
+                {
                     return respond(ctx, command, "Nome, condição ou resposta inválidos.").await;
                 }
-                let guild_text = guild_id.to_string();
                 let user_text = command.user.id.to_string();
                 let plan = self.effective_plan(&user_text, Some(&guild_text)).await;
-                let workflow_limit = quota_limit(&plan, "workflows");
+                let plan_limit = quota_limit(&plan, "workflows");
+                let configured_limit = setting_u64(
+                    &self.store,
+                    &guild_text,
+                    "management.workflows.max_workflows",
+                    plan_limit,
+                )
+                .clamp(1, 100);
+                let workflow_limit = plan_limit.min(configured_limit);
                 let Some(id) = self.store.create_workflow_bounded(
                     &guild_text,
                     name,
@@ -3984,13 +4044,22 @@ impl Handler {
             }
             _ => "Comando desconhecido.".to_string(),
         };
+        let public_leaderboard = command.data.name == "leaderboard"
+            && command.guild_id.is_some_and(|guild_id| {
+                setting_bool(
+                    &self.store,
+                    &guild_id.to_string(),
+                    "community.leaderboard.public",
+                    true,
+                )
+            });
         command
             .create_response(
                 ctx,
                 CreateInteractionResponse::Message(
                     CreateInteractionResponseMessage::new()
                         .content(english_bot_text(&content))
-                        .ephemeral(command.data.name != "ping"),
+                        .ephemeral(command.data.name != "ping" && !public_leaderboard),
                 ),
             )
             .await?;

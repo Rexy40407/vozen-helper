@@ -430,6 +430,230 @@ impl FeatureAdapter for ReminderAdapter {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LeaderboardAdapter;
+
+impl LeaderboardAdapter {
+    pub const KEY: &'static str = "community.leaderboard";
+    pub const SOURCE: &'static str = "leaderboard_adapter_v1";
+
+    fn descriptor_schema() -> serde_json::Value {
+        serde_json::json!({
+            "version": FEATURE_SCHEMA_VERSION,
+            "source": Self::SOURCE,
+            "sections": [{
+                "title": "Leaderboard privacy",
+                "description": "Control how many members appear in the XP leaderboard.",
+                "fields": [
+                    {"key":"maxEntries","label":"Members shown","kind":"number","min":1,"max":100,"help":"Keep the public result concise and predictable."},
+                    {"key":"public","label":"Show the leaderboard publicly","kind":"toggle","help":"When disabled, only the requesting member sees the result."}
+                ]
+            }]
+        })
+    }
+
+    fn defaults() -> serde_json::Value {
+        serde_json::json!({"maxEntries": 10, "public": true})
+    }
+}
+
+impl FeatureAdapter for LeaderboardAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: Self::descriptor_schema(),
+            defaults: Self::defaults(),
+            dependencies: vec!["levels".into(), "send_messages".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        if let Some(value) = object.get("maxEntries") {
+            if let Some(value) = value.as_i64() {
+                if !(1..=100).contains(&value) {
+                    issues.push(ValidationIssue {
+                        path: "maxEntries".into(),
+                        code: "out_of_range".into(),
+                        message: "Members shown must be between 1 and 100.".into(),
+                        severity: "error".into(),
+                    });
+                }
+            } else {
+                issues.push(ValidationIssue {
+                    path: "maxEntries".into(),
+                    code: "integer_required".into(),
+                    message: "Members shown must be an integer.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if object
+            .get("public")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "public".into(),
+                code: "boolean_required".into(),
+                message: "Public visibility must be true or false.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut projection = Vec::new();
+        if let Some(value) = object.get("maxEntries").and_then(serde_json::Value::as_i64) {
+            projection.push((
+                "community.leaderboard.max_entries".into(),
+                value.to_string(),
+            ));
+        }
+        if let Some(value) = object.get("public").and_then(serde_json::Value::as_bool) {
+            projection.push(("community.leaderboard.public".into(), value.to_string()));
+        }
+        projection
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorkflowAdapter;
+
+impl WorkflowAdapter {
+    pub const KEY: &'static str = "management.workflows";
+    pub const SOURCE: &'static str = "workflows_adapter_v1";
+
+    fn schema() -> serde_json::Value {
+        serde_json::json!({
+            "version": FEATURE_SCHEMA_VERSION,
+            "source": Self::SOURCE,
+            "sections": [{
+                "title": "Automation safety limits",
+                "description": "Bounded message automations keep your server responsive.",
+                "fields": [
+                    {"key":"maxWorkflows","label":"Maximum workflows","kind":"number","min":1,"max":100,"help":"The maximum number of active and paused workflows stored for this server."},
+                    {"key":"maxReplyLength","label":"Maximum reply length","kind":"number","min":1,"max":1500,"help":"Longer generated replies are rejected before they can be sent."},
+                    {"key":"allowMentions","label":"Allow mentions in replies","kind":"toggle","help":"When disabled, everyone/here mentions are neutralised."}
+                ]
+            }]
+        })
+    }
+
+    fn defaults() -> serde_json::Value {
+        serde_json::json!({"maxWorkflows": 10, "maxReplyLength": 1000, "allowMentions": false})
+    }
+}
+
+impl FeatureAdapter for WorkflowAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: Self::schema(),
+            defaults: Self::defaults(),
+            dependencies: vec!["message_content".into(), "send_messages".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        for (field, min, max, label) in [
+            ("maxWorkflows", 1_i64, 100_i64, "Maximum workflows"),
+            ("maxReplyLength", 1_i64, 1_500_i64, "Maximum reply length"),
+        ] {
+            if let Some(value) = object.get(field) {
+                if let Some(value) = value.as_i64() {
+                    if !(min..=max).contains(&value) {
+                        issues.push(ValidationIssue {
+                            path: field.into(),
+                            code: "out_of_range".into(),
+                            message: format!("{label} must be between {min} and {max}."),
+                            severity: "error".into(),
+                        });
+                    }
+                } else {
+                    issues.push(ValidationIssue {
+                        path: field.into(),
+                        code: "integer_required".into(),
+                        message: format!("{label} must be an integer."),
+                        severity: "error".into(),
+                    });
+                }
+            }
+        }
+        if object
+            .get("allowMentions")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "allowMentions".into(),
+                code: "boolean_required".into(),
+                message: "Mention permission must be true or false.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut projection = Vec::new();
+        if let Some(value) = object
+            .get("maxWorkflows")
+            .and_then(serde_json::Value::as_i64)
+        {
+            projection.push((
+                "management.workflows.max_workflows".into(),
+                value.to_string(),
+            ));
+        }
+        if let Some(value) = object
+            .get("maxReplyLength")
+            .and_then(serde_json::Value::as_i64)
+        {
+            projection.push((
+                "management.workflows.max_reply_length".into(),
+                value.to_string(),
+            ));
+        }
+        if let Some(value) = object
+            .get("allowMentions")
+            .and_then(serde_json::Value::as_bool)
+        {
+            projection.push((
+                "management.workflows.allow_mentions".into(),
+                value.to_string(),
+            ));
+        }
+        projection
+    }
+}
+
 impl AntiSpamAdapter {
     pub const KEY: &'static str = "protection.antispam";
     pub const SOURCE: &'static str = "anti_spam_adapter_v1";
@@ -603,12 +827,16 @@ impl FeatureAdapter for AntiSpamAdapter {
 static ANTI_SPAM_ADAPTER: AntiSpamAdapter = AntiSpamAdapter;
 static NICKNAME_ADAPTER: NicknameAdapter = NicknameAdapter;
 static REMINDER_ADAPTER: ReminderAdapter = ReminderAdapter;
+static LEADERBOARD_ADAPTER: LeaderboardAdapter = LeaderboardAdapter;
+static WORKFLOW_ADAPTER: WorkflowAdapter = WorkflowAdapter;
 
 pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
     match key {
         AntiSpamAdapter::KEY => Some(&ANTI_SPAM_ADAPTER as &dyn FeatureAdapter),
         NicknameAdapter::KEY => Some(&NICKNAME_ADAPTER as &dyn FeatureAdapter),
         ReminderAdapter::KEY => Some(&REMINDER_ADAPTER as &dyn FeatureAdapter),
+        LeaderboardAdapter::KEY => Some(&LEADERBOARD_ADAPTER as &dyn FeatureAdapter),
+        WorkflowAdapter::KEY => Some(&WORKFLOW_ADAPTER as &dyn FeatureAdapter),
         _ => None,
     }
 }
@@ -685,6 +913,8 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "management.polls"
         | "management.nickname"
         | "utility.reminders"
+        | "community.leaderboard"
+        | "management.workflows"
         | "studio.rank_card" => FeatureMaturity::Operational,
         "social.youtube" | "social.rss" | "social.twitch" => FeatureMaturity::Beta,
         // Providers without an approved adapter or credentials must never be
@@ -927,6 +1157,47 @@ mod tests {
         assert!(projection.contains(&("utility.reminders.notify_user".into(), "false".into())));
         assert_eq!(
             feature_maturity("utility.reminders"),
+            FeatureMaturity::Operational
+        );
+    }
+
+    #[test]
+    fn leaderboard_and_workflow_adapters_project_runtime_limits() {
+        let leaderboard = feature_adapter("community.leaderboard").expect("leaderboard adapter");
+        assert_eq!(leaderboard.descriptor().source, "leaderboard_adapter_v1");
+        assert!(
+            leaderboard
+                .validate(&serde_json::json!({"maxEntries": 101, "public": true}))
+                .iter()
+                .any(|issue| issue.path == "maxEntries")
+        );
+        assert!(
+            leaderboard
+                .runtime_projection(&serde_json::json!({"maxEntries": 25, "public": false}))
+                .contains(&("community.leaderboard.max_entries".into(), "25".into()))
+        );
+        assert_eq!(
+            feature_maturity("community.leaderboard"),
+            FeatureMaturity::Operational
+        );
+
+        let workflows = feature_adapter("management.workflows").expect("workflow adapter");
+        assert_eq!(workflows.descriptor().source, "workflows_adapter_v1");
+        assert!(workflows
+            .validate(&serde_json::json!({"maxWorkflows": 10, "maxReplyLength": 0, "allowMentions": false}))
+            .iter()
+            .any(|issue| issue.path == "maxReplyLength"));
+        assert!(
+            workflows
+                .runtime_projection(&serde_json::json!({
+                    "maxWorkflows": 20,
+                    "maxReplyLength": 750,
+                    "allowMentions": true
+                }))
+                .contains(&("management.workflows.allow_mentions".into(), "true".into()))
+        );
+        assert_eq!(
+            feature_maturity("management.workflows"),
             FeatureMaturity::Operational
         );
     }
