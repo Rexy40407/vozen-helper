@@ -366,6 +366,121 @@ pub struct ToggleOnlyAdapter {
     pub dependencies: &'static [&'static str],
 }
 
+/// Settings for temporary voice rooms.  The command already creates and
+/// cleans up rooms in the Discord runtime; exposing these bounded controls
+/// makes the dashboard publish the same values that command handler reads.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TempChannelsAdapter;
+
+impl TempChannelsAdapter {
+    pub const KEY: &'static str = "utility.temp_channels";
+    pub const SOURCE: &'static str = "temp_channels_adapter_v2";
+}
+
+impl FeatureAdapter for TempChannelsAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Temporary voice rooms",
+                    "description": "Create bounded rooms with a predictable name and optional category.",
+                    "fields": [
+                        {"key":"categoryId","label":"Category (optional)","kind":"category","help":"New rooms are created inside this category when selected."},
+                        {"key":"nameTemplate","label":"Room name template","kind":"text","min":1,"max":80,"help":"Use {user} for the member display name."},
+                        {"key":"maxActive","label":"Maximum active rooms","kind":"number","min":1,"max":50}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({"categoryId":"", "nameTemplate":"{user}'s room", "maxActive": 10}),
+            dependencies: vec!["manage_channels".into(), "voice_states".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        if let Some(value) = object.get("categoryId")
+            && !value
+                .as_str()
+                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok())
+        {
+            issues.push(ValidationIssue {
+                path: "categoryId".into(),
+                code: "invalid_category_id".into(),
+                message: "Choose a valid Discord category.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(value) = object.get("nameTemplate") {
+            let valid = value.as_str().is_some_and(|text| {
+                let count = text.chars().count();
+                (1..=80).contains(&count) && !text.chars().any(char::is_control)
+            });
+            if !valid {
+                issues.push(ValidationIssue {
+                    path: "nameTemplate".into(),
+                    code: "invalid_template".into(),
+                    message: "The room name must be 1-80 characters without control characters."
+                        .into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if let Some(value) = object.get("maxActive") {
+            if let Some(value) = value.as_i64() {
+                if !(1..=50).contains(&value) {
+                    issues.push(ValidationIssue {
+                        path: "maxActive".into(),
+                        code: "out_of_range".into(),
+                        message: "Maximum active rooms must be between 1 and 50.".into(),
+                        severity: "error".into(),
+                    });
+                }
+            } else {
+                issues.push(ValidationIssue {
+                    path: "maxActive".into(),
+                    code: "integer_required".into(),
+                    message: "Maximum active rooms must be an integer.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut pairs = Vec::new();
+        if let Some(value) = object.get("categoryId").and_then(serde_json::Value::as_str) {
+            pairs.push(("utility.temp_channels.category_id".into(), value.into()));
+        }
+        if let Some(value) = object
+            .get("nameTemplate")
+            .and_then(serde_json::Value::as_str)
+        {
+            pairs.push(("utility.temp_channels.name_template".into(), value.into()));
+        }
+        if let Some(value) = object.get("maxActive").and_then(serde_json::Value::as_i64) {
+            pairs.push(("utility.temp_channels.max_active".into(), value.to_string()));
+        }
+        pairs
+    }
+}
+
 /// Adapter for the tag-backed custom command module.  Tags are the bounded,
 /// user-authored responses exposed by `/tag` and `/tag-set`; the adapter keeps
 /// the limits in the same source of truth as the runtime instead of leaving
@@ -2957,13 +3072,7 @@ static INVITE_TRACKER_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
     dependencies: &["manage_guild", "guild_invites"],
 };
 
-static TEMP_CHANNELS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
-    key: "utility.temp_channels",
-    source: "temp_channels_adapter_v1",
-    title: "Temporary voice channels",
-    description: "Creates bounded voice rooms and removes them after everyone leaves.",
-    dependencies: &["manage_channels", "voice_states"],
-};
+static TEMP_CHANNELS_ADAPTER: TempChannelsAdapter = TempChannelsAdapter;
 
 static YOUTUBE_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
     key: "social.youtube",
@@ -3508,7 +3617,6 @@ mod tests {
             "management.polls",
             "community.events",
             "community.role_panels",
-            "utility.temp_channels",
         ] {
             let adapter = feature_adapter(key).expect("toggle-only adapter registered");
             assert!(
@@ -3518,6 +3626,17 @@ mod tests {
             );
             assert!(adapter.validate(&serde_json::json!({})).is_empty());
         }
+
+        let temp = feature_adapter("utility.temp_channels").expect("temporary channels adapter");
+        assert_eq!(temp.descriptor().source, "temp_channels_adapter_v2");
+        assert!(
+            temp.validate(&serde_json::json!({"maxActive": 0}))
+                .iter()
+                .any(|issue| issue.path == "maxActive")
+        );
+        assert!(temp
+            .runtime_projection(&serde_json::json!({"categoryId": "123", "nameTemplate": "Room {user}", "maxActive": 4}))
+            .contains(&("utility.temp_channels.max_active".into(), "4".into())));
 
         for key in [
             "social.youtube",

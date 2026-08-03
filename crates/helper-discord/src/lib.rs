@@ -3707,12 +3707,55 @@ impl Handler {
                 if !feature_enabled(&self.store, &guild_text, "utility.temp_channels", None) {
                     return respond(ctx, command, "Temporary channels are disabled in this server. Enable them in the dashboard.").await;
                 }
-                let channel = guild_id
-                    .create_channel(
-                        &ctx.http,
-                        CreateChannel::new(format!("{}'s room", command.user.name))
-                            .kind(serenity::all::ChannelType::Voice),
+                let max_active = setting_u64(
+                    &self.store,
+                    &guild_text,
+                    "utility.temp_channels.max_active",
+                    10,
+                )
+                .clamp(1, 50) as i64;
+                let active = self.store.active_temp_channels(&guild_text)?;
+                if active >= max_active {
+                    return respond(
+                        ctx,
+                        command,
+                        "This server has reached its temporary room limit. Try again after one is cleaned up.",
                     )
+                    .await;
+                }
+                let template = setting_string(
+                    &self.store,
+                    &guild_text,
+                    "utility.temp_channels.name_template",
+                )
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "{user}'s room".to_string());
+                let display_name = command.user.name.trim();
+                let room_name = template
+                    .replace("{user}", display_name)
+                    .chars()
+                    .filter(|character| !character.is_control())
+                    .take(100)
+                    .collect::<String>();
+                let room_name = if room_name.trim().is_empty() {
+                    format!("{}'s room", display_name)
+                } else {
+                    room_name
+                };
+                let category_id = setting_string(
+                    &self.store,
+                    &guild_text,
+                    "utility.temp_channels.category_id",
+                )
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(serenity::all::ChannelId::new);
+                let mut create = CreateChannel::new(room_name)
+                    .kind(serenity::all::ChannelType::Voice);
+                if let Some(category_id) = category_id {
+                    create = create.category(category_id);
+                }
+                let channel = guild_id
+                    .create_channel(&ctx.http, create)
                     .await?;
                 self.store.register_temp_channel(
                     &guild_text,

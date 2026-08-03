@@ -1093,6 +1093,16 @@ impl Store {
             .optional()?)
     }
 
+    pub fn active_temp_channels(&self, guild_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.query_row(
+            "SELECT COUNT(*) FROM temp_channels WHERE guild_id=?1",
+            [guild_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
     pub fn remove_temp_channel(&self, channel_id: &str) -> Result<bool> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         Ok(conn.execute(
