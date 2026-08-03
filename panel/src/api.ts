@@ -118,12 +118,35 @@ export type GuildContext = {
   guildId: string;
   name: string;
   permissions: string;
-  channels: Array<{ id: string; name: string; type: string }>;
-  roles: Array<{ id: string; name: string; position: number }>;
-  hierarchy: { known: boolean; reason?: string };
+  channels: Array<{
+    id: string;
+    name: string;
+    type: string;
+    overwritesKnown?: boolean;
+    overwriteCount?: number;
+    botPermissions?: string | null;
+    botPermissionsKnown?: boolean;
+  }>;
+  roles: Array<{
+    id: string;
+    name: string;
+    position: number;
+    managed?: boolean;
+    manageable?: boolean;
+  }>;
+  bot?: {
+    available: boolean;
+    userId?: string | null;
+    roleIds?: string[];
+    topRolePosition?: number | null;
+    permissions?: string | null;
+    permissionBitfieldAvailable?: boolean;
+    reason?: string | null;
+  };
+  hierarchy: { known: boolean; topRolePosition?: number | null; reason?: string | null };
   capabilities: { channelSelectors: boolean; roleSelectors: boolean; permissionPreflight: boolean };
   stale: boolean;
-  message?: string;
+  message?: string | null;
 };
 export type QuickSetupStepKey = 'welcome' | 'roles' | 'moderation' | 'protection';
 export type QuickSetupStep = {

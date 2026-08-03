@@ -2252,6 +2252,14 @@ function App() {
             </button>
           </div>
         )}
+        {guildContext && !localPreviewMode && guildContext.stale && (
+          <div className="toast" role="status">
+            O contexto do Discord precisa de ser atualizado antes de publicar alterações.{' '}
+            {guildContext.bot?.reason === 'discord_bot_member_unavailable'
+              ? 'Não foi possível confirmar o cargo e as permissões do Helper.'
+              : guildContext.message ?? 'Os seletores continuam disponíveis, mas o preflight está bloqueado.'}
+          </div>
+        )}
         {route.page === 'overview' && (
           <Overview
             features={features}

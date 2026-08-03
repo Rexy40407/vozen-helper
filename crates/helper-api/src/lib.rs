@@ -1821,6 +1821,223 @@ async fn guilds(
     })))
 }
 
+const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
+
+#[derive(Debug, Default)]
+struct DiscordGuildSnapshot {
+    channels: Vec<serde_json::Value>,
+    roles: Vec<serde_json::Value>,
+    bot_user_id: Option<String>,
+    bot_role_ids: Vec<String>,
+    channels_ready: bool,
+    roles_ready: bool,
+    bot_ready: bool,
+    bot_reason: Option<String>,
+    stale_reason: Option<String>,
+}
+
+async fn discord_json(
+    client: &Client,
+    auth: &str,
+    path: &str,
+) -> Result<serde_json::Value, String> {
+    let response = client
+        .get(format!("{DISCORD_API_BASE}{path}"))
+        .header(header::AUTHORIZATION, auth)
+        .send()
+        .await
+        .map_err(|_| "discord_request_failed".to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("discord_http_{}", status.as_u16()));
+    }
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|_| "discord_invalid_response".to_string())
+}
+
+async fn fetch_discord_guild_snapshot(guild_id: &str, discord_token: &str) -> DiscordGuildSnapshot {
+    if discord_token.len() < 20 {
+        return DiscordGuildSnapshot {
+            bot_reason: Some("bot_token_not_configured".into()),
+            stale_reason: Some("discord_context_refresh_required".into()),
+            ..Default::default()
+        };
+    }
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| Client::new());
+    let auth = format!("Bot {discord_token}");
+    let mut snapshot = DiscordGuildSnapshot::default();
+
+    match discord_json(&client, &auth, &format!("/guilds/{guild_id}/channels")).await {
+        Ok(value) if value.is_array() => {
+            snapshot.channels = value.as_array().cloned().unwrap_or_default();
+            snapshot.channels_ready = true;
+        }
+        Ok(_) | Err(_) => {
+            snapshot.stale_reason = Some("discord_channels_unavailable".into());
+        }
+    }
+
+    match discord_json(&client, &auth, &format!("/guilds/{guild_id}/roles")).await {
+        Ok(value) if value.is_array() => {
+            snapshot.roles = value.as_array().cloned().unwrap_or_default();
+            snapshot.roles_ready = true;
+        }
+        Ok(_) | Err(_) => {
+            if snapshot.stale_reason.is_none() {
+                snapshot.stale_reason = Some("discord_roles_unavailable".into());
+            }
+        }
+    }
+
+    let bot_user_id = match discord_json(&client, &auth, "/users/@me").await {
+        Ok(value) => value
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        Err(_) => None,
+    };
+    let Some(bot_user_id) = bot_user_id else {
+        snapshot.bot_reason = Some("discord_bot_identity_unavailable".into());
+        if snapshot.stale_reason.is_none() {
+            snapshot.stale_reason = Some("discord_bot_context_unavailable".into());
+        }
+        return snapshot;
+    };
+    snapshot.bot_user_id = Some(bot_user_id.clone());
+
+    match discord_json(
+        &client,
+        &auth,
+        &format!("/guilds/{guild_id}/members/{bot_user_id}"),
+    )
+    .await
+    {
+        Ok(value) => {
+            snapshot.bot_role_ids = value
+                .get("roles")
+                .and_then(serde_json::Value::as_array)
+                .map(|roles| {
+                    roles
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            snapshot.bot_ready = true;
+        }
+        Err(_) => {
+            snapshot.bot_reason = Some("discord_bot_member_unavailable".into());
+            if snapshot.stale_reason.is_none() {
+                snapshot.stale_reason = Some("discord_bot_context_unavailable".into());
+            }
+        }
+    }
+    snapshot
+}
+
+fn parse_permission_bits(value: &serde_json::Value) -> Option<u64> {
+    value
+        .get("permissions")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|permissions| permissions.parse::<u64>().ok())
+}
+
+fn effective_bot_permissions(
+    guild_id: &str,
+    roles: &[serde_json::Value],
+    bot_role_ids: &[String],
+) -> Option<u64> {
+    let mut effective = 0_u64;
+    let mut found = false;
+    for role in roles {
+        let role_id = role.get("id").and_then(serde_json::Value::as_str)?;
+        if role_id != guild_id && !bot_role_ids.iter().any(|id| id == role_id) {
+            continue;
+        }
+        effective |= parse_permission_bits(role)?;
+        found = true;
+    }
+    found.then_some(effective)
+}
+
+fn overwrite_values(overwrite: &serde_json::Value) -> Option<(u64, u64)> {
+    let allow = overwrite
+        .get("allow")
+        .and_then(serde_json::Value::as_str)?
+        .parse::<u64>()
+        .ok()?;
+    let deny = overwrite
+        .get("deny")
+        .and_then(serde_json::Value::as_str)?
+        .parse::<u64>()
+        .ok()?;
+    Some((allow, deny))
+}
+
+fn apply_overwrite(bits: &mut u64, overwrite: &serde_json::Value) -> Option<()> {
+    let (allow, deny) = overwrite_values(overwrite)?;
+    *bits &= !deny;
+    *bits |= allow;
+    Some(())
+}
+
+fn channel_bot_permissions(
+    base: u64,
+    guild_id: &str,
+    bot_user_id: &str,
+    bot_role_ids: &[String],
+    overwrites: &serde_json::Value,
+) -> Option<u64> {
+    let overwrites = overwrites.as_array()?;
+    let mut bits = base;
+    let everyone = overwrites.iter().find(|overwrite| {
+        overwrite.get("id").and_then(serde_json::Value::as_str) == Some(guild_id)
+            && overwrite
+                .get("type")
+                .and_then(serde_json::Value::as_i64)
+                .map(|kind| kind == 0)
+                .unwrap_or(true)
+    });
+    if let Some(overwrite) = everyone {
+        apply_overwrite(&mut bits, overwrite)?;
+    }
+    let mut role_deny = 0_u64;
+    let mut role_allow = 0_u64;
+    for overwrite in overwrites {
+        let role_id = overwrite.get("id").and_then(serde_json::Value::as_str);
+        let is_role = overwrite
+            .get("type")
+            .and_then(serde_json::Value::as_i64)
+            .map(|kind| kind == 0)
+            .unwrap_or(true);
+        if is_role && role_id.is_some_and(|id| bot_role_ids.iter().any(|role| role == id)) {
+            let (allow, deny) = overwrite_values(overwrite)?;
+            role_allow |= allow;
+            role_deny |= deny;
+        }
+    }
+    bits &= !role_deny;
+    bits |= role_allow;
+    if let Some(member_overwrite) = overwrites.iter().find(|overwrite| {
+        overwrite.get("id").and_then(serde_json::Value::as_str) == Some(bot_user_id)
+            && overwrite
+                .get("type")
+                .and_then(serde_json::Value::as_i64)
+                .map(|kind| kind == 1)
+                .unwrap_or(true)
+    }) {
+        apply_overwrite(&mut bits, member_overwrite)?;
+    }
+    Some(bits)
+}
+
 async fn guild_context(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -1836,68 +2053,104 @@ async fn guild_context(
         return Err(client_error(StatusCode::FORBIDDEN, "guild_not_managed"));
     };
     let permissions = guild.permissions.unwrap_or_default();
-    let mut channels = Vec::new();
-    let mut roles = Vec::new();
-    let mut stale = true;
-    if state.discord_token.len() >= 20 {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(8))
-            .build()
-            .unwrap_or_else(|_| Client::new());
-        let auth = format!("Bot {}", state.discord_token);
-        let channels_result = client
-            .get(format!(
-                "https://discord.com/api/v10/guilds/{}/channels",
-                guild.guild_id
-            ))
-            .header(header::AUTHORIZATION, &auth)
-            .send()
-            .await;
-        let roles_result = client
-            .get(format!(
-                "https://discord.com/api/v10/guilds/{}/roles",
-                guild.guild_id
-            ))
-            .header(header::AUTHORIZATION, &auth)
-            .send()
-            .await;
-        if let (Ok(channels_response), Ok(roles_response)) = (channels_result, roles_result)
-            && channels_response.status().is_success()
-            && roles_response.status().is_success()
-        {
-            let channel_values = channels_response
-                .json::<Vec<serde_json::Value>>()
-                .await
-                .unwrap_or_default();
-            let role_values = roles_response
-                .json::<Vec<serde_json::Value>>()
-                .await
-                .unwrap_or_default();
-            channels = channel_values.into_iter().filter_map(|value| {
-                let channel_type = value.get("type").and_then(serde_json::Value::as_i64).unwrap_or(0);
-                if channel_type != 0 && channel_type != 5 { return None; }
-                Some(serde_json::json!({"id": value.get("id").and_then(serde_json::Value::as_str)?, "name": value.get("name").and_then(serde_json::Value::as_str)?, "type": if channel_type == 5 { "announcement" } else { "text" }}))
-            }).collect();
-            roles = role_values.into_iter().filter_map(|value| {
-                Some(serde_json::json!({"id": value.get("id").and_then(serde_json::Value::as_str)?, "name": value.get("name").and_then(serde_json::Value::as_str)?, "position": value.get("position").and_then(serde_json::Value::as_i64)?}))
-            }).collect();
-            stale = false;
-        }
-    }
+    let snapshot = fetch_discord_guild_snapshot(&guild.guild_id, &state.discord_token).await;
+    let bot_permissions =
+        effective_bot_permissions(&guild.guild_id, &snapshot.roles, &snapshot.bot_role_ids);
+    let bot_top_role_position = snapshot
+        .roles
+        .iter()
+        .filter(|role| {
+            role.get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| snapshot.bot_role_ids.iter().any(|bot_role| bot_role == id))
+        })
+        .filter_map(|role| role.get("position").and_then(serde_json::Value::as_i64))
+        .max();
+    let bot_user_id = snapshot.bot_user_id.as_deref();
+    let roles = snapshot
+        .roles
+        .iter()
+        .filter_map(|value| {
+            let id = value.get("id").and_then(serde_json::Value::as_str)?;
+            let position = value.get("position").and_then(serde_json::Value::as_i64)?;
+            let managed = value
+                .get("managed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            Some(serde_json::json!({
+                "id": id,
+                "name": value.get("name").and_then(serde_json::Value::as_str).unwrap_or("role"),
+                "position": position,
+                "managed": managed,
+                "manageable": id != guild.guild_id && !managed && bot_top_role_position.is_some_and(|top| position < top)
+            }))
+        })
+        .collect::<Vec<_>>();
+    let channels = snapshot
+        .channels
+        .iter()
+        .filter_map(|value| {
+            let channel_type = value.get("type").and_then(serde_json::Value::as_i64).unwrap_or(0);
+            if channel_type != 0 && channel_type != 5 {
+                return None;
+            }
+            let id = value.get("id").and_then(serde_json::Value::as_str)?;
+            let overwrites = value.get("permission_overwrites");
+            let bot_channel_permissions = bot_permissions
+                .zip(bot_user_id)
+                .and_then(|(base, user_id)| {
+                    channel_bot_permissions(
+                        base,
+                        &guild.guild_id,
+                        user_id,
+                        &snapshot.bot_role_ids,
+                        overwrites?,
+                    )
+                });
+            Some(serde_json::json!({
+                "id": id,
+                "name": value.get("name").and_then(serde_json::Value::as_str).unwrap_or("channel"),
+                "type": if channel_type == 5 { "announcement" } else { "text" },
+                "overwritesKnown": overwrites.and_then(serde_json::Value::as_array).is_some(),
+                "overwriteCount": overwrites.and_then(serde_json::Value::as_array).map_or(0, Vec::len),
+                "botPermissions": bot_channel_permissions.map(|bits| bits.to_string()),
+                "botPermissionsKnown": bot_channel_permissions.is_some()
+            }))
+        })
+        .collect::<Vec<_>>();
+    let bot_available = snapshot.bot_ready && bot_permissions.is_some();
+    let stale = !snapshot.channels_ready || !snapshot.roles_ready || !bot_available;
+    let bot_reason = if bot_available {
+        None
+    } else {
+        snapshot
+            .bot_reason
+            .clone()
+            .or_else(|| Some("discord_bot_permissions_unavailable".into()))
+    };
     Ok(Json(serde_json::json!({
         "guildId": guild.guild_id,
         "name": guild.name,
         "permissions": permissions,
         "channels": channels,
         "roles": roles,
-        "hierarchy": {"known": !stale, "reason": if stale { Some("discord_context_refresh_required") } else { None::<&str> }},
+        "bot": {
+            "available": bot_available,
+            "userId": snapshot.bot_user_id,
+            "roleIds": snapshot.bot_role_ids,
+            "topRolePosition": bot_top_role_position,
+            "permissions": bot_permissions.map(|value| value.to_string()),
+            "permissionBitfieldAvailable": bot_permissions.is_some(),
+            "reason": bot_reason
+        },
+        "hierarchy": {"known": bot_available && snapshot.roles_ready, "topRolePosition": bot_top_role_position, "reason": if stale { snapshot.stale_reason.clone().or_else(|| Some("discord_context_refresh_required".into())) } else { None::<String> }},
         "capabilities": {
-            "channelSelectors": !stale,
-            "roleSelectors": !stale,
-            "permissionPreflight": !permissions.is_empty() && !stale
+            "channelSelectors": snapshot.channels_ready,
+            "roleSelectors": snapshot.roles_ready,
+            "permissionPreflight": !permissions.is_empty() && bot_available && snapshot.channels_ready && snapshot.roles_ready
         },
         "stale": stale,
-        "message": if stale { Some("Unable to refresh channels and roles from Discord.") } else { None::<&str> }
+        "message": if stale { Some(snapshot.stale_reason.unwrap_or_else(|| "discord_context_refresh_required".into())) } else { None::<String> }
     })))
 }
 
@@ -1947,11 +2200,50 @@ async fn preflight(
         .find(|guild| guild.guild_id == claims.guild_id)
         .ok_or_else(|| client_error(StatusCode::FORBIDDEN, "guild_not_managed"))?;
     let permissions = guild.permissions.unwrap_or_default();
+    let discord_snapshot =
+        fetch_discord_guild_snapshot(&guild.guild_id, &state.discord_token).await;
+    let bot_permissions = effective_bot_permissions(
+        &guild.guild_id,
+        &discord_snapshot.roles,
+        &discord_snapshot.bot_role_ids,
+    );
+    let bot_permission_string = bot_permissions.map(|value| value.to_string());
+    let bot_context_available = discord_snapshot.bot_ready && bot_permissions.is_some();
     let alert_only = request
         .config
         .get("alertOnly")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    if request.enabled && !bot_context_available {
+        issues.push(ValidationIssue {
+            path: "permissions.bot_context".into(),
+            code: "discord_context_unavailable".into(),
+            message: "Refresh the Discord context before publishing; the Helper's effective permissions and role hierarchy could not be verified.".into(),
+            severity: "error".into(),
+        });
+    }
+    let bot_moderate_members = bot_permission_string
+        .as_deref()
+        .is_some_and(|value| permission_bit(value, 40));
+    let bot_send_messages = bot_permission_string
+        .as_deref()
+        .is_some_and(|value| permission_bit(value, 11));
+    if request.enabled && !alert_only && !bot_moderate_members {
+        issues.push(ValidationIssue {
+            path: "permissions.bot_moderate_members".into(),
+            code: "missing_bot_permission".into(),
+            message: "The Helper bot needs Moderate Members and a manageable role below its highest role to apply timeouts.".into(),
+            severity: "error".into(),
+        });
+    }
+    if request.enabled && !bot_send_messages {
+        issues.push(ValidationIssue {
+            path: "permissions.bot_send_messages".into(),
+            code: "missing_bot_permission".into(),
+            message: "The Helper bot needs Send Messages to publish anti-spam alerts.".into(),
+            severity: "error".into(),
+        });
+    }
     if request.enabled && !alert_only && !permission_bit(&permissions, 40) {
         issues.push(ValidationIssue {
             path: "permissions.moderate_members".into(),
@@ -1982,6 +2274,49 @@ async fn preflight(
             severity: "error".into(),
         });
     }
+    let selected_log_channel = request
+        .config
+        .get("logChannel")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let mut selected_channel_send_messages = None;
+    if let Some(channel_id) = selected_log_channel.filter(|value| value.parse::<u64>().is_ok()) {
+        let channel = discord_snapshot
+            .channels
+            .iter()
+            .find(|value| value.get("id").and_then(serde_json::Value::as_str) == Some(channel_id));
+        if discord_snapshot.channels_ready && channel.is_none() {
+            issues.push(ValidationIssue {
+                path: "logChannel".into(),
+                code: "channel_not_found".into(),
+                message: "Choose a text channel that still exists in this server.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let (Some(channel), Some(base), Some(bot_user_id)) = (
+            channel,
+            bot_permissions,
+            discord_snapshot.bot_user_id.as_deref(),
+        ) && let Some(overwrites) = channel.get("permission_overwrites")
+        {
+            selected_channel_send_messages = channel_bot_permissions(
+                base,
+                &guild.guild_id,
+                bot_user_id,
+                &discord_snapshot.bot_role_ids,
+                overwrites,
+            )
+            .map(|value| permission_bit(&value.to_string(), 11));
+            if selected_channel_send_messages == Some(false) {
+                issues.push(ValidationIssue {
+                    path: "permissions.bot_send_messages_channel".into(),
+                    code: "missing_channel_permission".into(),
+                    message: "The Helper bot cannot send messages in the selected log channel. Check its channel permissions.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+    }
 
     let error_count = issues
         .iter()
@@ -1997,6 +2332,12 @@ async fn preflight(
             "permissionBitfieldAvailable": permissions.parse::<u64>().is_ok(),
             "moderateMembers": permission_bit(&permissions, 40),
             "sendMessages": permission_bit(&permissions, 11),
+            "botContextAvailable": bot_context_available,
+            "botPermissionBitfieldAvailable": bot_permissions.is_some(),
+            "botModerateMembers": bot_moderate_members,
+            "botSendMessages": bot_send_messages,
+            "selectedLogChannelSendMessages": selected_channel_send_messages,
+            "discordResourcesFresh": discord_snapshot.channels_ready && discord_snapshot.roles_ready,
             "shadowModeAvailable": true
         }
     })))
@@ -5057,6 +5398,42 @@ mod tests {
             expires_at: now + Duration::hours(1),
             last_seen_at: now,
         }
+    }
+
+    #[test]
+    fn permission_passport_combines_everyone_and_bot_roles() {
+        let roles = vec![
+            serde_json::json!({"id":"guild-a","permissions":"1024"}),
+            serde_json::json!({"id":"role-bot","permissions":"2048"}),
+            serde_json::json!({"id":"role-other","permissions":"4"}),
+        ];
+        let bot_roles = vec!["role-bot".to_string()];
+        assert_eq!(
+            effective_bot_permissions("guild-a", &roles, &bot_roles),
+            Some(3072)
+        );
+        assert!(permission_bit("3072", 10));
+        assert!(permission_bit("3072", 11));
+        assert!(!permission_bit("3072", 2));
+    }
+
+    #[test]
+    fn permission_passport_applies_channel_overwrites_in_discord_order() {
+        let overwrites = serde_json::json!([
+            {"id":"guild-a","type":0,"allow":"0","deny":"2048"},
+            {"id":"role-bot","type":0,"allow":"2048","deny":"0"},
+            {"id":"bot-user","type":1,"allow":"0","deny":"2048"}
+        ]);
+        let permissions = channel_bot_permissions(
+            2048,
+            "guild-a",
+            "bot-user",
+            &["role-bot".into()],
+            &overwrites,
+        )
+        .unwrap();
+        assert_eq!(permissions, 0);
+        assert!(!permission_bit(&permissions.to_string(), 11));
     }
 
     #[tokio::test]
