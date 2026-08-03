@@ -121,6 +121,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/session/switch", post(switch_session_guild))
         .route("/api/cases", get(cases))
         .route("/api/audit", get(audit))
+        .route("/api/activity", get(activity))
         .route("/api/tickets", get(tickets))
         .route("/api/stats", get(stats))
         .route("/api/quotas", get(quotas))
@@ -4488,6 +4489,23 @@ async fn audit(
         "events": list,
     })))
 }
+
+async fn activity(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Query(query): Query<LimitQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let list = state
+        .store
+        .recent_activity(&claims.guild_id, query.limit.unwrap_or(50).min(200))
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "activity": list,
+    })))
+}
+
 async fn stats(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,

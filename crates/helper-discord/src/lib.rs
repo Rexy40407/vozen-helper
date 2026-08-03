@@ -20,7 +20,8 @@ use serenity::{
         CommandInteraction, Context, CreateActionRow, CreateAttachment, CreateButton,
         CreateChannel, CreateCommand, CreateCommandOption, CreateEmbed, CreateInteractionResponse,
         CreateInteractionResponseMessage, CreateMessage, EditChannel, EventHandler, GatewayIntents,
-        Interaction, PermissionOverwrite, PermissionOverwriteType, Permissions, Ready, RoleId,
+        Interaction, MessageUpdateEvent, PermissionOverwrite, PermissionOverwriteType, Permissions,
+        Ready, RoleId,
     },
     async_trait,
 };
@@ -2055,6 +2056,45 @@ impl EventHandler for Handler {
         let _ = self
             .store
             .delete_star_entry(&guild_text, &deleted_message_id.to_string());
+    }
+
+    async fn message_update(
+        &self,
+        _ctx: Context,
+        _old: Option<serenity::all::Message>,
+        _new: Option<serenity::all::Message>,
+        event: MessageUpdateEvent,
+    ) {
+        let Some(guild_id) = event.guild_id else {
+            return;
+        };
+        let guild_text = guild_id.to_string();
+        if !feature_enabled(&self.store, &guild_text, "management.audit", None) {
+            return;
+        }
+        let author_id = event
+            .author
+            .as_ref()
+            .map(|author| author.id.to_string())
+            .unwrap_or_else(|| "unknown".into());
+        let author_tag = event.author.as_ref().map(|author| author.tag());
+        let detail = serde_json::json!({
+            "messageId": event.id.to_string(),
+            "channelId": event.channel_id.to_string(),
+            "contentAvailable": event.content.is_some(),
+            "embedsChanged": event.embeds.is_some(),
+            "attachmentsChanged": event.attachments.is_some(),
+            "editedTimestamp": event.edited_timestamp.as_ref().map(ToString::to_string),
+        })
+        .to_string();
+        let _ = self.store.record_activity(
+            &guild_text,
+            "message_edit",
+            &author_id,
+            author_tag.as_deref(),
+            Some(&author_id),
+            &detail,
+        );
     }
 
     async fn reaction_remove(&self, ctx: Context, reaction: serenity::all::Reaction) {

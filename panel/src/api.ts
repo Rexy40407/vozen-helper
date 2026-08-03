@@ -190,6 +190,16 @@ export type AuditRecord = {
   outcome: string;
   created_at?: number;
 };
+export type ActivityRecord = {
+  id: number;
+  guild_id: string;
+  kind: string;
+  user_id: string;
+  user_tag?: string | null;
+  actor_id?: string | null;
+  detail: string;
+  created_at: number;
+};
 
 const base = (import.meta.env.VITE_HELPER_API_BASE as string | undefined)?.replace(/\/$/, '') ?? '';
 let sessionBearer: string | null = null;
@@ -278,6 +288,7 @@ export const api = {
   stats: () => request<{ totalCases: number; guildId: string }>('/api/stats'),
   cases: () => request<{ cases: CaseRecord[] }>('/api/cases?limit=8'),
   audit: () => request<{ events: AuditRecord[] }>('/api/audit?limit=12'),
+  activity: () => request<{ activity: ActivityRecord[] }>('/api/activity?limit=24'),
   quotas: () =>
     request<{ plan: string; limits: Record<string, number>; usage: Record<string, number> }>(
       '/api/quotas',

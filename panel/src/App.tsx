@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   api,
+  type ActivityRecord,
   type AuditRecord,
   type CaseRecord,
   type Feature,
@@ -1605,6 +1606,7 @@ function App() {
   );
   const [cases, setCases] = useState<CaseRecord[]>([]);
   const [audit, setAudit] = useState<AuditRecord[]>([]);
+  const [activity, setActivity] = useState<ActivityRecord[]>([]);
   const [stats, setStats] = useState({ totalCases: 0 });
   const [quota, setQuota] = useState({
     plan: 'Free',
@@ -1659,6 +1661,7 @@ function App() {
       api.stats().catch(() => ({ totalCases: 0, guildId: '' })),
       api.cases().catch(() => ({ cases: [] })),
       api.audit().catch(() => ({ events: [] })),
+      api.activity().catch(() => ({ activity: [] })),
       api.quotas().catch(() => ({ plan: 'Free', limits: {}, usage: {} })),
       api.rankCard().catch(() => ({ guildId: '', config: defaultRankCard })),
     ])
@@ -1670,6 +1673,7 @@ function App() {
           nextStats,
           nextCases,
           nextAudit,
+          nextActivity,
           nextQuota,
           nextRank,
         ]) => {
@@ -1679,6 +1683,7 @@ function App() {
           setStats(nextStats);
           setCases(nextCases.cases);
           setAudit(nextAudit.events);
+          setActivity(nextActivity.activity);
           setQuota(nextQuota);
           setRankConfig(nextRank.config);
           setSavedRankConfig(nextRank.config);
@@ -2327,7 +2332,7 @@ function App() {
             }
           />
         )}
-        {route.page === 'activity' && <Activity cases={cases} audit={audit} />}
+        {route.page === 'activity' && <Activity cases={cases} audit={audit} activity={activity} />}
         {route.page === 'rank-card' && (
           <RankCardEditor
             config={rankConfig}
@@ -3519,7 +3524,15 @@ function FieldControl({
   );
 }
 
-function Activity({ cases, audit }: { cases: CaseRecord[]; audit: AuditRecord[] }) {
+function Activity({
+  cases,
+  audit,
+  activity,
+}: {
+  cases: CaseRecord[];
+  audit: AuditRecord[];
+  activity: ActivityRecord[];
+}) {
   return (
     <section className="activity">
       <div className="section-heading">
@@ -3556,7 +3569,17 @@ function Activity({ cases, audit }: { cases: CaseRecord[]; audit: AuditRecord[] 
             <span>{formatDate(item.created_at)}</span>
           </div>
         ))}
-        {!cases.length && !audit.length && (
+        {activity.map((item) => (
+          <div className="table-row" key={`activity-${item.id}`}>
+            <span>
+              <b className="tag">{item.kind.replaceAll('_', ' ')}</b>
+            </span>
+            <span>{item.user_tag ?? item.user_id}</span>
+            <span>Metadata only · {item.detail}</span>
+            <span>{formatDate(item.created_at)}</span>
+          </div>
+        ))}
+        {!cases.length && !audit.length && !activity.length && (
           <div className="empty">Ainda não há atividade para mostrar.</div>
         )}
       </div>

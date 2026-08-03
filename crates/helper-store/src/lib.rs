@@ -49,6 +49,21 @@ pub struct AuditEventRecord {
     pub created_at: i64,
 }
 
+/// Privacy-first activity entry.  Message content is never required here;
+/// callers can store bounded metadata such as an id, channel and whether the
+/// payload was available in the gateway event.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActivityLogRecord {
+    pub id: i64,
+    pub guild_id: String,
+    pub kind: String,
+    pub user_id: String,
+    pub user_tag: Option<String>,
+    pub actor_id: Option<String>,
+    pub detail: String,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FeatureSettingRecord {
     pub guild_id: String,
@@ -619,6 +634,59 @@ impl Store {
                 after_json: row.get(7)?,
                 outcome: row.get(8)?,
                 created_at: row.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Append metadata-only activity.  Details are bounded before entering
+    /// SQLite so an unexpected gateway payload cannot grow the audit table
+    /// without limit.
+    pub fn record_activity(
+        &self,
+        guild_id: &str,
+        kind: &str,
+        user_id: &str,
+        user_tag: Option<&str>,
+        actor_id: Option<&str>,
+        detail: &str,
+    ) -> Result<i64> {
+        let bounded_detail = detail.chars().take(2_000).collect::<String>();
+        let bounded_kind = kind.chars().take(80).collect::<String>();
+        let bounded_user = user_id.chars().take(64).collect::<String>();
+        let bounded_tag = user_tag.map(|value| value.chars().take(128).collect::<String>());
+        let bounded_actor = actor_id.map(|value| value.chars().take(64).collect::<String>());
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT INTO activity_log(guild_id,type,user_id,user_tag,actor_id,detail,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                guild_id,
+                bounded_kind,
+                bounded_user,
+                bounded_tag,
+                bounded_actor,
+                bounded_detail,
+                Utc::now().timestamp_millis()
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn recent_activity(&self, guild_id: &str, limit: u32) -> Result<Vec<ActivityLogRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id,guild_id,type,user_id,user_tag,actor_id,detail,created_at FROM activity_log WHERE guild_id=?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![guild_id, i64::from(limit.min(200))], |row| {
+            Ok(ActivityLogRecord {
+                id: row.get(0)?,
+                guild_id: row.get(1)?,
+                kind: row.get(2)?,
+                user_id: row.get(3)?,
+                user_tag: row.get(4)?,
+                actor_id: row.get(5)?,
+                detail: row.get(6)?,
+                created_at: row.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -3305,6 +3373,28 @@ mod tests {
                 .consume_quota("guild", "user", "workflow_runs", 1, Utc::now())
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn activity_log_is_metadata_only_and_bounded() {
+        let store = Store::open(":memory:").unwrap();
+        let oversized = "x".repeat(3_000);
+        let id = store
+            .record_activity(
+                "guild",
+                "message_edit",
+                "user",
+                Some("member#0001"),
+                Some("user"),
+                &oversized,
+            )
+            .unwrap();
+        assert_eq!(id, 1);
+        let rows = store.recent_activity("guild", 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "message_edit");
+        assert_eq!(rows[0].detail.chars().count(), 2_000);
+        assert_eq!(rows[0].user_tag.as_deref(), Some("member#0001"));
     }
 
     #[test]
