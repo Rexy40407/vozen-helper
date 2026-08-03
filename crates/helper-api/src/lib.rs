@@ -4712,9 +4712,6 @@ async fn studio_templates(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_auth(&state, &headers)?;
-    if !feature_enabled(&state, &claims.guild_id, "management.templates") {
-        return Err(client_error(StatusCode::FORBIDDEN, "feature_disabled"));
-    }
     let templates = state
         .store
         .settings_with_prefix(&claims.guild_id, TEMPLATE_PREFIX)
@@ -4734,9 +4731,6 @@ async fn studio_template(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_auth(&state, &headers)?;
-    if !feature_enabled(&state, &claims.guild_id, "management.templates") {
-        return Err(client_error(StatusCode::FORBIDDEN, "feature_disabled"));
-    }
     if !valid_template_id(&id) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template_id"));
     }
@@ -4758,9 +4752,6 @@ async fn create_studio_template(
     Json(input): Json<StudioTemplateInput>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
-    if !feature_enabled(&state, &claims.guild_id, "management.templates") {
-        return Err(client_error(StatusCode::FORBIDDEN, "feature_disabled"));
-    }
     if !validate_template_input(&input) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template"));
     }
@@ -4799,9 +4790,6 @@ async fn update_studio_template(
     Json(input): Json<StudioTemplateInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
-    if !feature_enabled(&state, &claims.guild_id, "management.templates") {
-        return Err(client_error(StatusCode::FORBIDDEN, "feature_disabled"));
-    }
     if !valid_template_id(&id) || !validate_template_input(&input) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template"));
     }
@@ -4845,9 +4833,6 @@ async fn delete_studio_template(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
-    if !feature_enabled(&state, &claims.guild_id, "management.templates") {
-        return Err(client_error(StatusCode::FORBIDDEN, "feature_disabled"));
-    }
     if !valid_template_id(&id) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template_id"));
     }
@@ -5205,9 +5190,9 @@ async fn privacy_receipt(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_auth(&state, &headers)?;
-    if !feature_enabled(&state, &claims.guild_id, "management.privacy") {
-        return Err(client_error(StatusCode::FORBIDDEN, "feature_disabled"));
-    }
+    // The receipt is a safety and transparency endpoint, not a guild feature
+    // toggle. It must remain readable even before a manager enables the
+    // optional export/delete workflows.
     Ok(Json(serde_json::json!({
         "version": 1,
         "source": "helper_runtime_metadata_v1",
@@ -5286,9 +5271,6 @@ async fn import_config(
     Json(document): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
-    if !feature_enabled(&state, &claims.guild_id, "management.templates") {
-        return Err(client_error(StatusCode::FORBIDDEN, "feature_disabled"));
-    }
     let summary = state
         .store
         .import_guild_config(&claims.guild_id, &document)
