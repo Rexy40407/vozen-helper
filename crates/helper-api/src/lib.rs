@@ -3683,6 +3683,41 @@ fn runtime_projection_pairs(key: &str, config: &serde_json::Value) -> Vec<(Strin
             if let Some(value) = number("cooldownSeconds") {
                 add("community.levels.cooldown_seconds", value.to_string());
             }
+            if let Some(value) = object
+                .and_then(|values| values.get("voiceXpEnabled"))
+                .and_then(serde_json::Value::as_bool)
+            {
+                add("community.levels.voice_xp_enabled", value.to_string());
+            }
+            if let Some(value) = number("voiceXpPerMinute") {
+                add("community.levels.voice_xp_per_minute", value.to_string());
+            }
+            if let Some(values) = object
+                .and_then(|values| values.get("ignoredChannels"))
+                .and_then(serde_json::Value::as_array)
+            {
+                add(
+                    "community.levels.ignored_channels",
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+            }
+            if let Some(values) = object
+                .and_then(|values| values.get("levelRoles"))
+                .and_then(serde_json::Value::as_array)
+            {
+                add(
+                    "community.levels.level_roles",
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+            }
             if let Some(value) = text("announceChannel") {
                 add("community.levels.announce_channel", value.to_string());
             }

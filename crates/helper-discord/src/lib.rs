@@ -1363,20 +1363,88 @@ impl EventHandler for Handler {
         else {
             return;
         };
-        let Some(old_channel_id) = old.and_then(|state| state.channel_id) else {
-            return;
-        };
-        let channel_id = old_channel_id.to_string();
-        let Ok(Some(record)) = self.store.temp_channel(&channel_id) else {
-            return;
-        };
-        if new.user_id.to_string() != record.owner_id {
-            return;
+        let old_channel_id = old.as_ref().and_then(|state| state.channel_id);
+        let new_channel_id = new.channel_id;
+        let guild_text = guild_id.to_string();
+        let user_text = new.user_id.to_string();
+
+        // Voice XP is session based: joins start a durable snapshot, moves
+        // close the old snapshot before starting the new one, and leaves close
+        // it without relying on a background timer. The store operation is
+        // idempotent so duplicate gateway deliveries cannot double-award XP.
+        if old_channel_id != new_channel_id
+            && feature_enabled(&self.store, &guild_text, "community.levels", None)
+            && setting_bool(
+                &self.store,
+                &guild_text,
+                "community.levels.voice_xp_enabled",
+                false,
+            )
+        {
+            let now = Utc::now().timestamp();
+            if old_channel_id.is_some()
+                && let Ok(Some(minutes)) =
+                    self.store
+                        .finish_voice_session(&guild_text, &user_text, now)
+            {
+                let per_minute = setting_i64(
+                    &self.store,
+                    &guild_text,
+                    "community.levels.voice_xp_per_minute",
+                    2,
+                )
+                .clamp(0, 30);
+                let xp = minutes.min(24 * 60).saturating_mul(per_minute);
+                if xp > 0 {
+                    let before = self.store.level_for(&guild_text, &user_text).unwrap_or(0);
+                    if let Err(error) = self.store.add_xp(&guild_text, &user_text, xp) {
+                        warn!(%guild_id, user = %new.user_id, %error, "failed to award voice XP");
+                    } else {
+                        let after = self
+                            .store
+                            .level_for(&guild_text, &user_text)
+                            .unwrap_or(before);
+                        self.apply_level_rewards(&ctx, guild_id, &user_text, after / 100 + 1)
+                            .await;
+                        if after / 100 > before / 100 {
+                            info!(
+                                %guild_id,
+                                user = %new.user_id,
+                                xp,
+                                before,
+                                after,
+                                "voice XP awarded with level-up"
+                            );
+                        }
+                    }
+                }
+            }
+            if let Some(channel_id) = new_channel_id
+                && let Err(error) = self.store.start_voice_session(
+                    &guild_text,
+                    &user_text,
+                    &channel_id.to_string(),
+                    now,
+                )
+            {
+                warn!(%guild_id, user = %new.user_id, %error, "failed to start voice XP session");
+            }
         }
-        if let Err(error) = old_channel_id.delete(&ctx.http).await {
-            warn!(%guild_id, %old_channel_id, %error, "failed to remove ownerless temporary voice channel");
-        } else if let Err(error) = self.store.remove_temp_channel(&channel_id) {
-            warn!(%guild_id, %old_channel_id, %error, "failed to remove temporary channel record");
+
+        // Temporary channel ownership cleanup remains independent from XP. A
+        // member can leave/move through a normal voice channel without there
+        // being a temp-channel record.
+        if let Some(old_channel_id) = old_channel_id {
+            let channel_id = old_channel_id.to_string();
+            if let Ok(Some(record)) = self.store.temp_channel(&channel_id)
+                && user_text == record.owner_id
+            {
+                if let Err(error) = old_channel_id.delete(&ctx.http).await {
+                    warn!(%guild_id, %old_channel_id, %error, "failed to remove ownerless temporary voice channel");
+                } else if let Err(error) = self.store.remove_temp_channel(&channel_id) {
+                    warn!(%guild_id, %old_channel_id, %error, "failed to remove temporary channel record");
+                }
+            }
         }
     }
 
@@ -1969,61 +2037,76 @@ impl EventHandler for Handler {
             &chrono::Utc::now().format("%Y-%m-%d").to_string(),
         );
         if feature_enabled(&self.store, &guild_text, "community.levels", None) {
-            let cooldown = setting_u64(
+            let ignored_channels = setting_string(
                 &self.store,
                 &guild_text,
-                "community.levels.cooldown_seconds",
-                60,
+                "community.levels.ignored_channels",
             )
-            .clamp(0, 3_600);
-            let xp_key = format!("{guild_text}:{user_text}");
-            let now = Instant::now();
-            let should_award = {
-                let mut awarded = self.xp_awarded_at.lock().expect("xp mutex poisoned");
-                let ready = awarded
-                    .get(&xp_key)
-                    .is_none_or(|at| now.duration_since(*at) >= Duration::from_secs(cooldown));
-                if ready {
-                    awarded.insert(xp_key, now);
-                }
-                ready
-            };
-            if should_award {
-                let minimum = setting_i64(&self.store, &guild_text, "community.levels.xp_min", 15)
-                    .clamp(1, 1_000);
-                let maximum = setting_i64(&self.store, &guild_text, "community.levels.xp_max", 30)
-                    .clamp(minimum, 2_000);
-                let span = (maximum - minimum + 1) as u64;
-                let stable = message.id.to_string().bytes().fold(0_u64, |total, byte| {
-                    total.wrapping_mul(33).wrapping_add(byte as u64)
-                });
-                let amount = minimum + (stable % span) as i64;
-                let before = self.store.level_for(&guild_text, &user_text).unwrap_or(0);
-                let _ = self.store.add_xp(&guild_text, &user_text, amount);
-                let after = self
-                    .store
-                    .level_for(&guild_text, &user_text)
-                    .unwrap_or(before);
-                let before_level = before / 100 + 1;
-                let after_level = after / 100 + 1;
-                if after_level > before_level {
-                    let text = setting_string(
-                        &self.store,
-                        &guild_text,
-                        "community.levels.announce_template",
-                    )
-                    .unwrap_or_else(|| "{member} reached level {level}!".to_string())
-                    .replace("{member}", &format!("<@{}>", message.author.id))
-                    .replace("{level}", &after_level.to_string())
-                    .replace("{server}", "this server");
-                    let channel = setting_u64_optional(
-                        &self.store,
-                        &guild_text,
-                        "community.levels.announce_channel",
-                    )
-                    .map(ChannelId::new)
-                    .unwrap_or(message.channel_id);
-                    let _ = channel.say(&ctx.http, text).await;
+            .unwrap_or_default();
+            let channel_ignored = ignored_channels
+                .split(',')
+                .any(|channel| channel.trim() == message.channel_id.to_string());
+            if !channel_ignored {
+                let cooldown = setting_u64(
+                    &self.store,
+                    &guild_text,
+                    "community.levels.cooldown_seconds",
+                    60,
+                )
+                .clamp(0, 3_600);
+                let xp_key = format!("{guild_text}:{user_text}");
+                let now = Instant::now();
+                let should_award = {
+                    let mut awarded = self.xp_awarded_at.lock().expect("xp mutex poisoned");
+                    let ready = awarded
+                        .get(&xp_key)
+                        .is_none_or(|at| now.duration_since(*at) >= Duration::from_secs(cooldown));
+                    if ready {
+                        awarded.insert(xp_key, now);
+                    }
+                    ready
+                };
+                if should_award {
+                    let minimum =
+                        setting_i64(&self.store, &guild_text, "community.levels.xp_min", 15)
+                            .clamp(1, 1_000);
+                    let maximum =
+                        setting_i64(&self.store, &guild_text, "community.levels.xp_max", 30)
+                            .clamp(minimum, 2_000);
+                    let span = (maximum - minimum + 1) as u64;
+                    let stable = message.id.to_string().bytes().fold(0_u64, |total, byte| {
+                        total.wrapping_mul(33).wrapping_add(byte as u64)
+                    });
+                    let amount = minimum + (stable % span) as i64;
+                    let before = self.store.level_for(&guild_text, &user_text).unwrap_or(0);
+                    let _ = self.store.add_xp(&guild_text, &user_text, amount);
+                    let after = self
+                        .store
+                        .level_for(&guild_text, &user_text)
+                        .unwrap_or(before);
+                    let before_level = before / 100 + 1;
+                    let after_level = after / 100 + 1;
+                    if after_level > before_level {
+                        self.apply_level_rewards(&ctx, guild_id, &user_text, after_level)
+                            .await;
+                        let text = setting_string(
+                            &self.store,
+                            &guild_text,
+                            "community.levels.announce_template",
+                        )
+                        .unwrap_or_else(|| "{member} reached level {level}!".to_string())
+                        .replace("{member}", &format!("<@{}>", message.author.id))
+                        .replace("{level}", &after_level.to_string())
+                        .replace("{server}", "this server");
+                        let channel = setting_u64_optional(
+                            &self.store,
+                            &guild_text,
+                            "community.levels.announce_channel",
+                        )
+                        .map(ChannelId::new)
+                        .unwrap_or(message.channel_id);
+                        let _ = channel.say(&ctx.http, text).await;
+                    }
                 }
             }
         }
@@ -2639,6 +2722,80 @@ fn format_twitch_message(
 }
 
 impl Handler {
+    async fn apply_level_rewards(
+        &self,
+        ctx: &Context,
+        guild_id: serenity::all::GuildId,
+        user_id: &str,
+        level: i64,
+    ) {
+        let mut rewards = setting_string(
+            &self.store,
+            &guild_id.to_string(),
+            "community.levels.level_roles",
+        )
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|entry| {
+            let (raw_level, raw_role) = entry.trim().split_once('=')?;
+            Some((
+                raw_level.trim().parse::<i64>().ok()?,
+                raw_role.trim().parse::<u64>().ok()?,
+            ))
+        })
+        .filter(|(reward_level, _)| *reward_level > 0 && *reward_level <= level)
+        .collect::<Vec<_>>();
+        if rewards.is_empty() {
+            return;
+        }
+        rewards.sort_unstable_by_key(|(reward_level, _)| *reward_level);
+        let Ok(user_id) = user_id.parse::<u64>() else {
+            return;
+        };
+        let Ok(member) = guild_id
+            .member(&ctx.http, serenity::all::UserId::new(user_id))
+            .await
+        else {
+            return;
+        };
+        let stack_roles = setting_bool(
+            &self.store,
+            &guild_id.to_string(),
+            "community.levels.stack_roles",
+            true,
+        );
+        let desired = if stack_roles {
+            rewards
+                .iter()
+                .map(|(_, role_id)| *role_id)
+                .collect::<Vec<_>>()
+        } else {
+            vec![
+                rewards
+                    .last()
+                    .map(|(_, role_id)| *role_id)
+                    .unwrap_or_default(),
+            ]
+        };
+        if !stack_roles {
+            for (_, role_id) in &rewards {
+                if !desired.contains(role_id) {
+                    let _ = member.remove_role(&ctx.http, RoleId::new(*role_id)).await;
+                }
+            }
+        }
+        for role_id in desired {
+            if role_id != 0
+                && !member
+                    .roles
+                    .iter()
+                    .any(|existing| existing.get() == role_id)
+            {
+                let _ = member.add_role(&ctx.http, RoleId::new(role_id)).await;
+            }
+        }
+    }
+
     async fn effective_plan(&self, user_id: &str, guild_id: Option<&str>) -> Plan {
         let Some(client) = &self.entitlements else {
             return Plan::Free;

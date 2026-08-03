@@ -2118,6 +2118,11 @@ impl FeatureAdapter for LevelsAdapter {
                         {"key":"xpMin","label":"Minimum XP per message","kind":"number","min":1,"max":1000},
                         {"key":"xpMax","label":"Maximum XP per message","kind":"number","min":1,"max":2000},
                         {"key":"cooldownSeconds","label":"XP cooldown (seconds)","kind":"number","min":0,"max":3600},
+                        {"key":"voiceXpEnabled","label":"Award XP in voice channels","kind":"toggle","advanced":true},
+                        {"key":"voiceXpPerMinute","label":"Voice XP per minute","kind":"number","min":0,"max":30,"advanced":true},
+                        {"key":"ignoredChannels","label":"Channels that do not award XP","kind":"channels","max":100,"advanced":true},
+                        {"key":"levelRoles","label":"Level role rewards (level=role ID)","kind":"tags","max":50,"advanced":true},
+                        {"key":"stackRoles","label":"Keep previous level roles","kind":"toggle","advanced":true},
                         {"key":"announceChannel","label":"Level-up channel","kind":"channel","advanced":true},
                         {"key":"announceTemplate","label":"Level-up message","kind":"text","max":1000,"advanced":true}
                     ]
@@ -2127,6 +2132,11 @@ impl FeatureAdapter for LevelsAdapter {
                 "xpMin": 15,
                 "xpMax": 30,
                 "cooldownSeconds": 60,
+                "voiceXpEnabled": false,
+                "voiceXpPerMinute": 2,
+                "ignoredChannels": [],
+                "levelRoles": [],
+                "stackRoles": true,
                 "announceChannel": "",
                 "announceTemplate": "{member} reached level {level}!"
             }),
@@ -2197,6 +2207,106 @@ impl FeatureAdapter for LevelsAdapter {
                 severity: "error".into(),
             });
         }
+        if object
+            .get("voiceXpEnabled")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "voiceXpEnabled".into(),
+                code: "boolean_required".into(),
+                message: "Voice XP enabled must be true or false.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(value) = object.get("voiceXpPerMinute") {
+            if let Some(value) = value.as_i64() {
+                if !(0..=30).contains(&value) {
+                    issues.push(ValidationIssue {
+                        path: "voiceXpPerMinute".into(),
+                        code: "out_of_range".into(),
+                        message: "Voice XP per minute must be between 0 and 30.".into(),
+                        severity: "error".into(),
+                    });
+                }
+            } else {
+                issues.push(ValidationIssue {
+                    path: "voiceXpPerMinute".into(),
+                    code: "integer_required".into(),
+                    message: "Voice XP per minute must be an integer.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if let Some(value) = object.get("ignoredChannels") {
+            if let Some(values) = value.as_array() {
+                if values.len() > 100
+                    || values.iter().any(|item| {
+                        !item
+                            .as_str()
+                            .is_some_and(|text| text.parse::<u64>().is_ok())
+                    })
+                {
+                    issues.push(ValidationIssue {
+                        path: "ignoredChannels".into(),
+                        code: "invalid_channel_ids".into(),
+                        message: "Ignored channels must contain at most 100 Discord channel IDs."
+                            .into(),
+                        severity: "error".into(),
+                    });
+                }
+            } else {
+                issues.push(ValidationIssue {
+                    path: "ignoredChannels".into(),
+                    code: "array_required".into(),
+                    message: "Ignored channels must be an array.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if let Some(value) = object.get("levelRoles") {
+            if let Some(values) = value.as_array() {
+                if values.len() > 50
+                    || values.iter().any(|item| {
+                        let Some(entry) = item.as_str() else {
+                            return true;
+                        };
+                        let mut parts = entry.split('=');
+                        let level = parts
+                            .next()
+                            .and_then(|part| part.trim().parse::<u32>().ok());
+                        let role = parts
+                            .next()
+                            .and_then(|part| part.trim().parse::<u64>().ok());
+                        level.is_none() || role.is_none() || parts.next().is_some()
+                    })
+                {
+                    issues.push(ValidationIssue {
+                        path: "levelRoles".into(),
+                        code: "invalid_level_roles".into(),
+                        message: "Rewards must use level=role ID, with at most 50 entries.".into(),
+                        severity: "error".into(),
+                    });
+                }
+            } else {
+                issues.push(ValidationIssue {
+                    path: "levelRoles".into(),
+                    code: "array_required".into(),
+                    message: "Level rewards must be an array.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if object
+            .get("stackRoles")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "stackRoles".into(),
+                code: "boolean_required".into(),
+                message: "Stack roles must be true or false.".into(),
+                severity: "error".into(),
+            });
+        }
         issues
     }
 
@@ -2221,6 +2331,56 @@ impl FeatureAdapter for LevelsAdapter {
             if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
                 pairs.push((setting.into(), value.into()));
             }
+        }
+        if let Some(value) = object
+            .get("voiceXpEnabled")
+            .and_then(serde_json::Value::as_bool)
+        {
+            pairs.push((
+                "community.levels.voice_xp_enabled".into(),
+                value.to_string(),
+            ));
+        }
+        if let Some(value) = object
+            .get("voiceXpPerMinute")
+            .and_then(serde_json::Value::as_i64)
+        {
+            pairs.push((
+                "community.levels.voice_xp_per_minute".into(),
+                value.to_string(),
+            ));
+        }
+        if let Some(values) = object
+            .get("ignoredChannels")
+            .and_then(serde_json::Value::as_array)
+        {
+            pairs.push((
+                "community.levels.ignored_channels".into(),
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ));
+        }
+        if let Some(values) = object
+            .get("levelRoles")
+            .and_then(serde_json::Value::as_array)
+        {
+            pairs.push((
+                "community.levels.level_roles".into(),
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ));
+        }
+        if let Some(value) = object
+            .get("stackRoles")
+            .and_then(serde_json::Value::as_bool)
+        {
+            pairs.push(("community.levels.stack_roles".into(), value.to_string()));
         }
         pairs
     }
@@ -3604,6 +3764,42 @@ mod tests {
             levels
                 .runtime_projection(&serde_json::json!({"xpMin": 10, "xpMax": 25}))
                 .contains(&("community.levels.xp_max".into(), "25".into()))
+        );
+        assert!(
+            levels
+                .validate(&serde_json::json!({"voiceXpEnabled": true, "voiceXpPerMinute": 31}))
+                .iter()
+                .any(|issue| issue.path == "voiceXpPerMinute")
+        );
+        assert!(
+            levels
+                .runtime_projection(&serde_json::json!({
+                    "voiceXpEnabled": true,
+                    "voiceXpPerMinute": 4
+                }))
+                .contains(&("community.levels.voice_xp_enabled".into(), "true".into()))
+        );
+        assert!(
+            levels
+                .runtime_projection(&serde_json::json!({
+                    "voiceXpEnabled": true,
+                    "voiceXpPerMinute": 4
+                }))
+                .contains(&("community.levels.voice_xp_per_minute".into(), "4".into()))
+        );
+        assert!(
+            levels
+                .validate(&serde_json::json!({"levelRoles": ["5=123"]}))
+                .is_empty()
+        );
+        assert!(
+            levels
+                .runtime_projection(&serde_json::json!({
+                    "ignoredChannels": ["456"],
+                    "levelRoles": ["5=123"],
+                    "stackRoles": false
+                }))
+                .contains(&("community.levels.ignored_channels".into(), "456".into()))
         );
 
         let starboard = feature_adapter("community.starboard").expect("starboard adapter");
