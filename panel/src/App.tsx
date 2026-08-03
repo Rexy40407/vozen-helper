@@ -1760,8 +1760,14 @@ function App() {
       .then((result) => {
         setDetailSchema(result.schema ?? null);
         const apiDefaults = result.defaults ?? {};
-        setDetailConfig({ ...fallback, ...apiDefaults, ...result.config });
-        setSavedDetailConfig({ ...fallback, ...apiDefaults, ...result.config });
+        // The API adapter is the source of truth whenever it exposes a schema.
+        // Local specs are only a compatibility fallback for legacy/preview
+        // features that have not migrated to an adapter yet. This prevents
+        // unsupported controls from being sent back to the runtime.
+        const baseConfig = result.schema ? apiDefaults : { ...fallback, ...apiDefaults };
+        const resolvedConfig = { ...baseConfig, ...result.config };
+        setDetailConfig(resolvedConfig);
+        setSavedDetailConfig(resolvedConfig);
         setDetailEnabled(result.enabled);
         setDetailRevision(result.revision ?? 0);
       })

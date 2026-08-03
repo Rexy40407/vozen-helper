@@ -353,6 +353,266 @@ pub trait FeatureAdapter: Sync {
     fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)>;
 }
 
+/// Adapter for modules whose Discord behaviour is already command/interaction
+/// driven and therefore has no additional server-side knobs yet.  An empty
+/// schema is intentional: the panel can publish the feature toggle without
+/// inventing controls that the runtime would ignore.
+#[derive(Debug, Clone, Copy)]
+pub struct ToggleOnlyAdapter {
+    pub key: &'static str,
+    pub source: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub dependencies: &'static [&'static str],
+}
+
+impl FeatureAdapter for ToggleOnlyAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: self.key.into(),
+            source: self.source.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": self.source,
+                "sections": [{
+                    "title": self.title,
+                    "description": self.description,
+                    "fields": []
+                }]
+            }),
+            defaults: serde_json::json!({}),
+            dependencies: self
+                .dependencies
+                .iter()
+                .map(|value| (*value).into())
+                .collect(),
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        if config.is_object() {
+            Vec::new()
+        } else {
+            vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }]
+        }
+    }
+
+    fn runtime_projection(&self, _config: &serde_json::Value) -> Vec<(String, String)> {
+        Vec::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TicketsAdapter;
+
+impl TicketsAdapter {
+    pub const KEY: &'static str = "support.tickets";
+    pub const SOURCE: &'static str = "tickets_adapter_v1";
+}
+
+impl FeatureAdapter for TicketsAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Support workflow",
+                    "description": "Choose the real role, transcript channel and SLA used by ticket interactions.",
+                    "fields": [
+                        {"key":"staffRole","label":"Support team role","kind":"role","help":"This role can claim, close and reopen tickets."},
+                        {"key":"transcriptChannel","label":"Transcript channel","kind":"channel","help":"Closed ticket transcripts are sent here."},
+                        {"key":"closeAfterHours","label":"SLA reminder (hours)","kind":"number","min":1,"max":168,"help":"The Helper records an overdue ticket job after this period."}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({"staffRole":"","transcriptChannel":"","closeAfterHours":1}),
+            dependencies: vec![
+                "manage_channels".into(),
+                "send_messages".into(),
+                "manage_roles".into(),
+            ],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        for field in ["staffRole", "transcriptChannel"] {
+            if let Some(value) = object.get(field)
+                && !(value
+                    .as_str()
+                    .is_some_and(|raw| raw.is_empty() || raw.parse::<u64>().is_ok()))
+            {
+                issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "invalid_discord_id".into(),
+                    message: "Choose a real Discord role or channel.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if let Some(value) = object.get("closeAfterHours")
+            && !value
+                .as_i64()
+                .is_some_and(|hours| (1..=168).contains(&hours))
+        {
+            issues.push(ValidationIssue {
+                path: "closeAfterHours".into(),
+                code: "out_of_range".into(),
+                message: "The SLA must be between 1 and 168 hours.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut pairs = Vec::new();
+        if let Some(value) = object.get("staffRole").and_then(serde_json::Value::as_str) {
+            pairs.push(("support.ticket.staff_role_id".into(), value.into()));
+        }
+        if let Some(value) = object
+            .get("transcriptChannel")
+            .and_then(serde_json::Value::as_str)
+        {
+            pairs.push(("support.ticket.transcript_channel_id".into(), value.into()));
+        }
+        if let Some(value) = object
+            .get("closeAfterHours")
+            .and_then(serde_json::Value::as_i64)
+        {
+            pairs.push((
+                "support.ticket.sla_ms".into(),
+                (value * 3_600_000).to_string(),
+            ));
+        }
+        pairs
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WelcomeAdapter;
+
+impl WelcomeAdapter {
+    pub const KEY: &'static str = "support.welcome";
+    pub const SOURCE: &'static str = "welcome_adapter_v1";
+}
+
+impl FeatureAdapter for WelcomeAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Welcome message",
+                    "description": "Configure the channel, message, optional DM and real auto-role used on member join.",
+                    "fields": [
+                        {"key":"channel","label":"Welcome channel","kind":"channel"},
+                        {"key":"message","label":"Public message","kind":"textarea","maxLength":2000,"help":"Variables: {member} and {server}."},
+                        {"key":"sendDm","label":"Send a direct message","kind":"toggle"},
+                        {"key":"dmMessage","label":"Direct message","kind":"textarea","maxLength":2000,"advanced":true},
+                        {"key":"autoRole","label":"Automatic role","kind":"role","advanced":true}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({"channel":"","message":"Welcome {member} to {server}!","sendDm":false,"dmMessage":"Hello {member}, welcome to {server}!","autoRole":""}),
+            dependencies: vec!["guild_members_intent".into(), "send_messages".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        for field in ["channel", "autoRole"] {
+            if object.get(field).is_some_and(|value| {
+                !value
+                    .as_str()
+                    .is_some_and(|raw| raw.is_empty() || raw.parse::<u64>().is_ok())
+            }) {
+                issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "invalid_discord_id".into(),
+                    message: "Choose a real Discord resource.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        for field in ["message", "dmMessage"] {
+            if object.get(field).is_some_and(|value| {
+                !value.as_str().is_some_and(|raw| {
+                    raw.chars().count() <= 2_000 && !raw.chars().any(char::is_control)
+                })
+            }) {
+                issues.push(ValidationIssue { path: field.into(), code: "invalid_message".into(), message: "Messages must be at most 2000 characters and contain no control characters.".into(), severity: "error".into() });
+            }
+        }
+        if object
+            .get("sendDm")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "sendDm".into(),
+                code: "boolean_required".into(),
+                message: "Send DM must be true or false.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut pairs = Vec::new();
+        for (field, key) in [
+            ("channel", "support.welcome.channel_id"),
+            ("message", "support.welcome.message"),
+            ("dmMessage", "support.welcome.dm_message"),
+            ("autoRole", "support.welcome.auto_role"),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
+                pairs.push((key.into(), value.into()));
+            }
+        }
+        if let Some(value) = object.get("sendDm").and_then(serde_json::Value::as_bool) {
+            pairs.push(("support.welcome.send_dm".into(), value.to_string()));
+        }
+        pairs
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AntiSpamAdapter;
 
@@ -2039,6 +2299,43 @@ static LEVELS_ADAPTER: LevelsAdapter = LevelsAdapter;
 static STARBOARD_ADAPTER: StarboardAdapter = StarboardAdapter;
 static ANTI_RAID_ADAPTER: AntiRaidAdapter = AntiRaidAdapter;
 static JOIN_GATE_ADAPTER: JoinGateAdapter = JoinGateAdapter;
+static TICKETS_ADAPTER: TicketsAdapter = TicketsAdapter;
+static WELCOME_ADAPTER: WelcomeAdapter = WelcomeAdapter;
+static SUGGESTIONS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+    key: "community.suggestions",
+    source: "suggestions_adapter_v1",
+    title: "Suggestion workflow",
+    description: "Suggestions, voting and moderation commands are enabled for this server.",
+    dependencies: &["send_messages", "interactions"],
+};
+static GIVEAWAYS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+    key: "community.giveaways",
+    source: "giveaways_adapter_v1",
+    title: "Giveaway workflow",
+    description: "Giveaway commands, entries, scheduling and rerolls are enabled for this server.",
+    dependencies: &["send_messages", "scheduler", "interactions"],
+};
+static POLLS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+    key: "management.polls",
+    source: "polls_adapter_v1",
+    title: "Poll workflow",
+    description: "Poll creation, voting and scheduled closing are enabled for this server.",
+    dependencies: &["send_messages", "scheduler", "interactions"],
+};
+static EVENTS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+    key: "community.events",
+    source: "events_adapter_v1",
+    title: "Discord events",
+    description: "Native scheduled events, registration, capacity and check-in are enabled for this server.",
+    dependencies: &["manage_events", "scheduler"],
+};
+static ROLE_PANELS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+    key: "community.role_panels",
+    source: "role_panels_adapter_v1",
+    title: "Role panel workflow",
+    description: "Role panel commands and interaction-based assignment are enabled for this server.",
+    dependencies: &["manage_roles", "interactions"],
+};
 
 pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
     match key {
@@ -2057,6 +2354,13 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         StarboardAdapter::KEY => Some(&STARBOARD_ADAPTER as &dyn FeatureAdapter),
         AntiRaidAdapter::KEY => Some(&ANTI_RAID_ADAPTER as &dyn FeatureAdapter),
         JoinGateAdapter::KEY => Some(&JOIN_GATE_ADAPTER as &dyn FeatureAdapter),
+        TicketsAdapter::KEY => Some(&TICKETS_ADAPTER as &dyn FeatureAdapter),
+        WelcomeAdapter::KEY => Some(&WELCOME_ADAPTER as &dyn FeatureAdapter),
+        "community.suggestions" => Some(&SUGGESTIONS_ADAPTER as &dyn FeatureAdapter),
+        "community.giveaways" => Some(&GIVEAWAYS_ADAPTER as &dyn FeatureAdapter),
+        "management.polls" => Some(&POLLS_ADAPTER as &dyn FeatureAdapter),
+        "community.events" => Some(&EVENTS_ADAPTER as &dyn FeatureAdapter),
+        "community.role_panels" => Some(&ROLE_PANELS_ADAPTER as &dyn FeatureAdapter),
         _ => None,
     }
 }
@@ -2339,6 +2643,57 @@ mod tests {
         assert!(projection.contains(&("security.antispam.ignored_channels".into(), "123".into())));
         assert!(projection.contains(&("security.antispam.alert_only".into(), "true".into())));
         assert!(feature_adapter("community.levels").is_some());
+    }
+
+    #[test]
+    fn existing_discord_modules_have_runtime_owned_panel_contracts() {
+        let tickets = feature_adapter("support.tickets").expect("tickets adapter registered");
+        assert_eq!(tickets.descriptor().source, "tickets_adapter_v1");
+        assert!(
+            tickets
+                .validate(&serde_json::json!({"closeAfterHours": 0}))
+                .iter()
+                .any(|issue| issue.path == "closeAfterHours")
+        );
+        assert!(
+            tickets
+                .runtime_projection(&serde_json::json!({
+                    "staffRole": "123",
+                    "transcriptChannel": "456",
+                    "closeAfterHours": 2
+                }))
+                .contains(&("support.ticket.sla_ms".into(), "7200000".into()))
+        );
+
+        let welcome = feature_adapter("support.welcome").expect("welcome adapter registered");
+        assert_eq!(welcome.descriptor().source, "welcome_adapter_v1");
+        assert!(
+            welcome
+                .runtime_projection(&serde_json::json!({
+                    "channel": "123",
+                    "message": "Welcome {member}",
+                    "sendDm": true,
+                    "dmMessage": "Hello {member}",
+                    "autoRole": "456"
+                }))
+                .contains(&("support.welcome.send_dm".into(), "true".into()))
+        );
+
+        for key in [
+            "community.suggestions",
+            "community.giveaways",
+            "management.polls",
+            "community.events",
+            "community.role_panels",
+        ] {
+            let adapter = feature_adapter(key).expect("toggle-only adapter registered");
+            assert!(
+                adapter.descriptor().schema["sections"][0]["fields"]
+                    .as_array()
+                    .is_some_and(Vec::is_empty)
+            );
+            assert!(adapter.validate(&serde_json::json!({})).is_empty());
+        }
     }
 
     #[test]
