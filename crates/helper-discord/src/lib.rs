@@ -1781,6 +1781,11 @@ impl EventHandler for Handler {
         }
         if feature_enabled(&self.store, &guild_text, "support.welcome", None) {
             let member_mention = format!("<@{}>", new_member.user.id);
+            let delay_seconds =
+                setting_u64(&self.store, &guild_text, "support.welcome.delay_seconds", 0).min(300);
+            if delay_seconds > 0 {
+                tokio::time::sleep(Duration::from_secs(delay_seconds)).await;
+            }
             if let Some(role_id) =
                 setting_u64_optional(&self.store, &guild_text, "support.welcome.auto_role")
             {
@@ -1837,16 +1842,38 @@ impl EventHandler for Handler {
 
     async fn guild_member_removal(
         &self,
-        _ctx: Context,
+        ctx: Context,
         guild_id: serenity::all::GuildId,
         user: serenity::all::User,
         _member_data_if_available: Option<serenity::all::Member>,
     ) {
         let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        let _ = self.store.record_leave(&guild_id.to_string(), &day);
+        let guild_text = guild_id.to_string();
+        let _ = self.store.record_leave(&guild_text, &day);
+        if feature_enabled(&self.store, &guild_text, "support.welcome", None) {
+            let farewell =
+                setting_string(&self.store, &guild_text, "support.welcome.farewell_message")
+                    .unwrap_or_else(|| "Goodbye {member}. We hope to see you again!".to_string())
+                    .replace("{member}", &user.name)
+                    .replace("{server}", "this server");
+            let channel = setting_u64_optional(
+                &self.store,
+                &guild_text,
+                "support.welcome.farewell_channel_id",
+            )
+            .map(ChannelId::new);
+            let fallback_channel = guild_id
+                .to_partial_guild(&ctx.http)
+                .await
+                .ok()
+                .and_then(|guild| guild.system_channel_id);
+            if let Some(channel_id) = channel.or(fallback_channel) {
+                let _ = channel_id.say(&ctx.http, farewell).await;
+            }
+        }
         if let Ok(deleted) = self
             .store
-            .delete_member_voluntary_data(&guild_id.to_string(), &user.id.to_string())
+            .delete_member_voluntary_data(&guild_text, &user.id.to_string())
         {
             tracing::debug!(
                 guild_id = %guild_id,
@@ -3839,7 +3866,13 @@ impl Handler {
                 }
                 let xp = self.store.level_for(&guild_text, &command.user.id.to_string())?;
                 let mut achievements = Vec::new();
-                for (threshold, label) in [(100_i64, "First steps"), (1_000, "Regular"), (10_000, "Community pillar")] {
+                let milestones = [
+                    ("community.achievements.first_threshold", "First steps", 100_u64),
+                    ("community.achievements.regular_threshold", "Regular", 1_000_u64),
+                    ("community.achievements.pillar_threshold", "Community pillar", 10_000_u64),
+                ];
+                for (setting, label, fallback) in milestones {
+                    let threshold = setting_u64(&self.store, &guild_text, setting, fallback) as i64;
                     if xp >= threshold { achievements.push(format!("✅ {label} ({threshold} XP)")); }
                 }
                 if achievements.is_empty() { "No achievements yet. Keep participating to unlock the first one at 100 XP.".to_string() } else { achievements.join("\n") }
@@ -3876,9 +3909,12 @@ impl Handler {
                 if !feature_enabled(&self.store, &guild_text, "utility.emojis", None) {
                     return respond(ctx, command, "Emoji inventory is disabled in this server. Enable it in the dashboard.").await;
                 }
+                let max_entries = setting_u64(&self.store, &guild_text, "utility.emojis.max_entries", 50).clamp(1, 100) as usize;
+                let animated_only = setting_bool(&self.store, &guild_text, "utility.emojis.animated_only", false);
                 let emojis = guild_id.emojis(&ctx.http).await?;
                 if emojis.is_empty() { "No custom emojis are configured in this server.".to_string() } else {
-                    emojis.into_iter().take(50).map(|emoji| format!("{} `<:{}:{}>`", if emoji.animated { "🎞️" } else { "😀" }, emoji.name, emoji.id)).collect::<Vec<_>>().join("\n")
+                    let rows = emojis.into_iter().filter(|emoji| !animated_only || emoji.animated).take(max_entries).map(|emoji| format!("{} `<:{}:{}>`", if emoji.animated { "🎞️" } else { "😀" }, emoji.name, emoji.id)).collect::<Vec<_>>();
+                    if rows.is_empty() { "No emojis match the current inventory filters.".to_string() } else { rows.join("\n") }
                 }
             }
             "invites" => {
@@ -3889,18 +3925,17 @@ impl Handler {
                 if !feature_enabled(&self.store, &guild_text, "management.invite_tracker", None) {
                     return respond(ctx, command, "Invite tracking is disabled in this server. Enable it in the dashboard.").await;
                 }
+                let max_entries = setting_u64(&self.store, &guild_text, "management.invite_tracker.max_entries", 10).clamp(1, 50) as usize;
+                let include_inviter = setting_bool(&self.store, &guild_text, "management.invite_tracker.include_inviter", true);
                 let mut invites = guild_id.invites(&ctx.http).await?;
                 invites.sort_by_key(|invite| std::cmp::Reverse(invite.uses));
                 if invites.is_empty() { "No active invites were found. The bot needs Manage Server to read them.".to_string() } else {
                     invites
                         .into_iter()
-                        .take(10)
+                        .take(max_entries)
                         .map(|invite| {
-                            let inviter = invite
-                                .inviter
-                                .map(|user| user.name)
-                                .unwrap_or_else(|| "Discord system".into());
-                            format!("`{}` — {} uses — {}", invite.code, invite.uses, inviter)
+                            let inviter = invite.inviter.map(|user| user.name).unwrap_or_else(|| "Discord system".into());
+                            if include_inviter { format!("`{}` — {} uses — {}", invite.code, invite.uses, inviter) } else { format!("`{}` — {} uses", invite.code, invite.uses) }
                         })
                         .collect::<Vec<_>>()
                         .join("\n")

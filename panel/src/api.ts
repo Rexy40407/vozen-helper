@@ -311,7 +311,7 @@ export const api = {
       guildId: string;
       ok: boolean;
       issues: Array<{ path: string; code: string; message: string; severity: string }>;
-      checks: Record<string, boolean>;
+      checks: Record<string, unknown>;
     }>(`/api/config/features/${encodeURIComponent(key)}/preflight`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -354,7 +354,7 @@ export const api = {
       guildId: string;
       ok: boolean;
       issues: Array<{ path: string; code: string; message: string; severity: string }>;
-      checks: Record<string, boolean>;
+      checks: Record<string, unknown>;
     }>('/api/preflight', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

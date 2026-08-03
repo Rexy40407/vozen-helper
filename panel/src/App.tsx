@@ -200,7 +200,7 @@ const demoFeatures: Feature[] = [
     description: 'Organiza regras, informação e primeiros passos para quem chega.',
     category: 'management',
     capability: 'core',
-    available: false,
+    available: true,
     enabled: false,
   },
   {
@@ -391,7 +391,7 @@ const additionalFeatures: Feature[] = [
     description: 'Publica um aviso quando um canal começa uma transmissão.',
     category: 'social',
     capability: 'alerts',
-    available: false,
+    available: true,
     enabled: false,
   },
   {
@@ -447,7 +447,7 @@ const additionalFeatures: Feature[] = [
     description: 'Transforma qualquer feed RSS numa atualização automática.',
     category: 'social',
     capability: 'alerts',
-    available: false,
+    available: true,
     enabled: false,
   },
   {
@@ -1909,8 +1909,8 @@ function App() {
     if (!route.key) return;
     setStatus('saving');
     try {
-      if (!localPreviewMode && route.key === 'protection.antispam') {
-        const preflight = await api.preflight('protection.antispam.publish', detailConfig, detailEnabled);
+      if (!localPreviewMode) {
+        const preflight = await api.featurePreflight(route.key, detailConfig, detailEnabled);
         if (!preflight.ok) {
           setStatus('ready');
           setMessage(preflight.issues.map((issue) => issue.message).join(' '));

@@ -1083,13 +1083,16 @@ impl FeatureAdapter for WelcomeAdapter {
                     "fields": [
                         {"key":"channel","label":"Welcome channel","kind":"channel"},
                         {"key":"message","label":"Public message","kind":"textarea","maxLength":2000,"help":"Variables: {member} and {server}."},
+                        {"key":"delaySeconds","label":"Delay before sending (seconds)","kind":"number","min":0,"max":300,"advanced":true},
                         {"key":"sendDm","label":"Send a direct message","kind":"toggle"},
                         {"key":"dmMessage","label":"Direct message","kind":"textarea","maxLength":2000,"advanced":true},
-                        {"key":"autoRole","label":"Automatic role","kind":"role","advanced":true}
+                        {"key":"autoRole","label":"Automatic role","kind":"role","advanced":true},
+                        {"key":"farewellChannel","label":"Farewell channel","kind":"channel","advanced":true},
+                        {"key":"farewellMessage","label":"Farewell message","kind":"textarea","maxLength":2000,"advanced":true}
                     ]
                 }]
             }),
-            defaults: serde_json::json!({"channel":"","message":"Welcome {member} to {server}!","sendDm":false,"dmMessage":"Hello {member}, welcome to {server}!","autoRole":""}),
+            defaults: serde_json::json!({"channel":"","message":"Welcome {member} to {server}!","delaySeconds":0,"sendDm":false,"dmMessage":"Hello {member}, welcome to {server}!","autoRole":"","farewellChannel":"","farewellMessage":"Goodbye {member}. We hope to see you again!"}),
             dependencies: vec!["guild_members_intent".into(), "send_messages".into()],
         }
     }
@@ -1104,7 +1107,7 @@ impl FeatureAdapter for WelcomeAdapter {
             }];
         };
         let mut issues = Vec::new();
-        for field in ["channel", "autoRole"] {
+        for field in ["channel", "autoRole", "farewellChannel"] {
             if object.get(field).is_some_and(|value| {
                 !value
                     .as_str()
@@ -1118,7 +1121,7 @@ impl FeatureAdapter for WelcomeAdapter {
                 });
             }
         }
-        for field in ["message", "dmMessage"] {
+        for field in ["message", "dmMessage", "farewellMessage"] {
             if object.get(field).is_some_and(|value| {
                 !value.as_str().is_some_and(|raw| {
                     raw.chars().count() <= 2_000 && !raw.chars().any(char::is_control)
@@ -1138,6 +1141,17 @@ impl FeatureAdapter for WelcomeAdapter {
                 severity: "error".into(),
             });
         }
+        if object
+            .get("delaySeconds")
+            .is_some_and(|value| !value.as_i64().is_some_and(|raw| (0..=300).contains(&raw)))
+        {
+            issues.push(ValidationIssue {
+                path: "delaySeconds".into(),
+                code: "out_of_range".into(),
+                message: "The welcome delay must be between 0 and 300 seconds.".into(),
+                severity: "error".into(),
+            });
+        }
         issues
     }
 
@@ -1151,6 +1165,8 @@ impl FeatureAdapter for WelcomeAdapter {
             ("message", "support.welcome.message"),
             ("dmMessage", "support.welcome.dm_message"),
             ("autoRole", "support.welcome.auto_role"),
+            ("farewellChannel", "support.welcome.farewell_channel_id"),
+            ("farewellMessage", "support.welcome.farewell_message"),
         ] {
             if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
                 pairs.push((key.into(), value.into()));
@@ -1158,6 +1174,12 @@ impl FeatureAdapter for WelcomeAdapter {
         }
         if let Some(value) = object.get("sendDm").and_then(serde_json::Value::as_bool) {
             pairs.push(("support.welcome.send_dm".into(), value.to_string()));
+        }
+        if let Some(value) = object
+            .get("delaySeconds")
+            .and_then(serde_json::Value::as_i64)
+        {
+            pairs.push(("support.welcome.delay_seconds".into(), value.to_string()));
         }
         pairs
     }
@@ -3123,6 +3145,259 @@ impl FeatureAdapter for AntiSpamAdapter {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AchievementsAdapter;
+
+impl AchievementsAdapter {
+    pub const KEY: &'static str = "community.achievements";
+    pub const SOURCE: &'static str = "achievements_adapter_v2";
+}
+
+impl FeatureAdapter for AchievementsAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "XP milestones",
+                    "description": "Choose the real XP thresholds used by the achievements command.",
+                    "fields": [
+                        {"key":"firstThreshold","label":"First steps threshold","kind":"number","min":1,"max":1000000},
+                        {"key":"regularThreshold","label":"Regular threshold","kind":"number","min":1,"max":1000000},
+                        {"key":"pillarThreshold","label":"Community pillar threshold","kind":"number","min":1,"max":1000000}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({"firstThreshold":100,"regularThreshold":1000,"pillarThreshold":10000}),
+            dependencies: vec![
+                "message_content".into(),
+                "levels".into(),
+                "send_messages".into(),
+            ],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "Achievement settings must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        for field in ["firstThreshold", "regularThreshold", "pillarThreshold"] {
+            match object.get(field).and_then(serde_json::Value::as_i64) {
+                Some(value) if (1..=1_000_000).contains(&value) => {}
+                Some(_) => issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "out_of_range".into(),
+                    message: "XP threshold must be between 1 and 1000000.".into(),
+                    severity: "error".into(),
+                }),
+                None => issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "integer_required".into(),
+                    message: "XP threshold must be an integer.".into(),
+                    severity: "error".into(),
+                }),
+            }
+        }
+        if let (Some(first), Some(regular), Some(pillar)) = (
+            object
+                .get("firstThreshold")
+                .and_then(serde_json::Value::as_i64),
+            object
+                .get("regularThreshold")
+                .and_then(serde_json::Value::as_i64),
+            object
+                .get("pillarThreshold")
+                .and_then(serde_json::Value::as_i64),
+        ) && !(first <= regular && regular <= pillar)
+        {
+            issues.push(ValidationIssue {
+                path: "thresholds".into(),
+                code: "ordered_required".into(),
+                message: "Milestones must be ordered from smallest to largest.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        [
+            ("firstThreshold", "community.achievements.first_threshold"),
+            (
+                "regularThreshold",
+                "community.achievements.regular_threshold",
+            ),
+            ("pillarThreshold", "community.achievements.pillar_threshold"),
+        ]
+        .into_iter()
+        .filter_map(|(field, key)| {
+            config
+                .get(field)
+                .and_then(serde_json::Value::as_i64)
+                .map(|value| (key.into(), value.to_string()))
+        })
+        .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InviteTrackerAdapter;
+
+impl InviteTrackerAdapter {
+    pub const KEY: &'static str = "management.invite_tracker";
+    pub const SOURCE: &'static str = "invite_tracker_adapter_v2";
+}
+
+impl FeatureAdapter for InviteTrackerAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({"version":FEATURE_SCHEMA_VERSION,"source":Self::SOURCE,"sections":[{"title":"Invite overview","description":"Control the staff-facing invite list without scraping or storing invite tokens.","fields":[{"key":"maxEntries","label":"Invites shown","kind":"number","min":1,"max":50},{"key":"includeInviter","label":"Show inviter names","kind":"toggle"}]}]}),
+            defaults: serde_json::json!({"maxEntries":10,"includeInviter":true}),
+            dependencies: vec![
+                "manage_guild".into(),
+                "guild_invites".into(),
+                "send_messages".into(),
+            ],
+        }
+    }
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "Invite tracker settings must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        if let Some(value) = object.get("maxEntries")
+            && !value
+                .as_i64()
+                .is_some_and(|value| (1..=50).contains(&value))
+        {
+            issues.push(ValidationIssue {
+                path: "maxEntries".into(),
+                code: "out_of_range".into(),
+                message: "Invites shown must be between 1 and 50.".into(),
+                severity: "error".into(),
+            });
+        }
+        if object
+            .get("includeInviter")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "includeInviter".into(),
+                code: "boolean_required".into(),
+                message: "Include inviter names must be true or false.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let mut pairs = Vec::new();
+        if let Some(value) = config.get("maxEntries").and_then(serde_json::Value::as_i64) {
+            pairs.push((
+                "management.invite_tracker.max_entries".into(),
+                value.to_string(),
+            ));
+        }
+        if let Some(value) = config
+            .get("includeInviter")
+            .and_then(serde_json::Value::as_bool)
+        {
+            pairs.push((
+                "management.invite_tracker.include_inviter".into(),
+                value.to_string(),
+            ));
+        }
+        pairs
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EmojisAdapter;
+
+impl EmojisAdapter {
+    pub const KEY: &'static str = "utility.emojis";
+    pub const SOURCE: &'static str = "emojis_adapter_v2";
+}
+
+impl FeatureAdapter for EmojisAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({"version":FEATURE_SCHEMA_VERSION,"source":Self::SOURCE,"sections":[{"title":"Emoji inventory","description":"Choose how many custom emojis the staff command lists.","fields":[{"key":"maxEntries","label":"Emojis shown","kind":"number","min":1,"max":100},{"key":"animatedOnly","label":"Only animated emojis","kind":"toggle"}]}]}),
+            defaults: serde_json::json!({"maxEntries":50,"animatedOnly":false}),
+            dependencies: vec!["manage_expressions".into(), "send_messages".into()],
+        }
+    }
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "Emoji settings must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        if let Some(value) = object.get("maxEntries")
+            && !value
+                .as_i64()
+                .is_some_and(|value| (1..=100).contains(&value))
+        {
+            issues.push(ValidationIssue {
+                path: "maxEntries".into(),
+                code: "out_of_range".into(),
+                message: "Emojis shown must be between 1 and 100.".into(),
+                severity: "error".into(),
+            });
+        }
+        if object
+            .get("animatedOnly")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "animatedOnly".into(),
+                code: "boolean_required".into(),
+                message: "Animated-only must be true or false.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let mut pairs = Vec::new();
+        if let Some(value) = config.get("maxEntries").and_then(serde_json::Value::as_i64) {
+            pairs.push(("utility.emojis.max_entries".into(), value.to_string()));
+        }
+        if let Some(value) = config
+            .get("animatedOnly")
+            .and_then(serde_json::Value::as_bool)
+        {
+            pairs.push(("utility.emojis.animated_only".into(), value.to_string()));
+        }
+        pairs
+    }
+}
+
 static ANTI_SPAM_ADAPTER: AntiSpamAdapter = AntiSpamAdapter;
 static NICKNAME_ADAPTER: NicknameAdapter = NicknameAdapter;
 static REMINDER_ADAPTER: ReminderAdapter = ReminderAdapter;
@@ -3179,27 +3454,9 @@ static CUSTOM_COMMANDS_ADAPTER: CustomCommandsAdapter = CustomCommandsAdapter;
 static AUDIT_ADAPTER: AuditAdapter = AuditAdapter;
 static TEMPLATES_ADAPTER: TemplatesAdapter = TemplatesAdapter;
 static BIRTHDAYS_ADAPTER: BirthdaysAdapter = BirthdaysAdapter;
-static EMOJIS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
-    key: "utility.emojis",
-    source: "emojis_adapter_v1",
-    title: "Emoji inventory",
-    description: "Lists the server's custom emojis and their current availability.",
-    dependencies: &["manage_expressions"],
-};
-static ACHIEVEMENTS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
-    key: "community.achievements",
-    source: "achievements_adapter_v1",
-    title: "Community achievements",
-    description: "Awards bounded milestones from the existing XP and activity ledger.",
-    dependencies: &["message_content", "levels"],
-};
-static INVITE_TRACKER_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
-    key: "management.invite_tracker",
-    source: "invite_tracker_adapter_v1",
-    title: "Invite overview",
-    description: "Reads the current Discord invite usage and exposes it to staff.",
-    dependencies: &["manage_guild", "guild_invites"],
-};
+static EMOJIS_ADAPTER: EmojisAdapter = EmojisAdapter;
+static ACHIEVEMENTS_ADAPTER: AchievementsAdapter = AchievementsAdapter;
+static INVITE_TRACKER_ADAPTER: InviteTrackerAdapter = InviteTrackerAdapter;
 
 static TEMP_CHANNELS_ADAPTER: TempChannelsAdapter = TempChannelsAdapter;
 
@@ -3399,9 +3656,9 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         AuditAdapter::KEY => Some(&AUDIT_ADAPTER as &dyn FeatureAdapter),
         TemplatesAdapter::KEY => Some(&TEMPLATES_ADAPTER as &dyn FeatureAdapter),
         BirthdaysAdapter::KEY => Some(&BIRTHDAYS_ADAPTER as &dyn FeatureAdapter),
-        "utility.emojis" => Some(&EMOJIS_ADAPTER as &dyn FeatureAdapter),
-        "community.achievements" => Some(&ACHIEVEMENTS_ADAPTER as &dyn FeatureAdapter),
-        "management.invite_tracker" => Some(&INVITE_TRACKER_ADAPTER as &dyn FeatureAdapter),
+        EmojisAdapter::KEY => Some(&EMOJIS_ADAPTER as &dyn FeatureAdapter),
+        AchievementsAdapter::KEY => Some(&ACHIEVEMENTS_ADAPTER as &dyn FeatureAdapter),
+        InviteTrackerAdapter::KEY => Some(&INVITE_TRACKER_ADAPTER as &dyn FeatureAdapter),
         "utility.temp_channels" => Some(&TEMP_CHANNELS_ADAPTER as &dyn FeatureAdapter),
         "social.youtube" => Some(&YOUTUBE_ADAPTER as &dyn FeatureAdapter),
         "social.rss" => Some(&RSS_ADAPTER as &dyn FeatureAdapter),
@@ -4161,6 +4418,38 @@ mod tests {
         assert_eq!(
             feature_maturity("utility.help"),
             FeatureMaturity::Operational
+        );
+    }
+
+    #[test]
+    fn achievements_invites_and_emojis_adapters_project_real_command_settings() {
+        let achievements = feature_adapter("community.achievements").expect("achievements adapter");
+        assert_eq!(achievements.descriptor().source, "achievements_adapter_v2");
+        assert!(achievements
+            .validate(&serde_json::json!({"firstThreshold": 1000, "regularThreshold": 100, "pillarThreshold": 10000}))
+            .iter()
+            .any(|issue| issue.code == "ordered_required"));
+        assert!(achievements
+            .runtime_projection(&serde_json::json!({"firstThreshold": 50, "regularThreshold": 500, "pillarThreshold": 5000}))
+            .contains(&("community.achievements.regular_threshold".into(), "500".into())));
+
+        let invites = feature_adapter("management.invite_tracker").expect("invite tracker adapter");
+        assert_eq!(invites.descriptor().source, "invite_tracker_adapter_v2");
+        assert!(
+            invites
+                .runtime_projection(&serde_json::json!({"maxEntries": 25, "includeInviter": false}))
+                .contains(&(
+                    "management.invite_tracker.include_inviter".into(),
+                    "false".into()
+                ))
+        );
+
+        let emojis = feature_adapter("utility.emojis").expect("emojis adapter");
+        assert_eq!(emojis.descriptor().source, "emojis_adapter_v2");
+        assert!(
+            emojis
+                .runtime_projection(&serde_json::json!({"maxEntries": 8, "animatedOnly": true}))
+                .contains(&("utility.emojis.animated_only".into(), "true".into()))
         );
     }
 }

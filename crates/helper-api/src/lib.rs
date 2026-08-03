@@ -30,7 +30,7 @@ use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
@@ -2180,6 +2180,285 @@ fn permission_bit(permissions: &str, bit: u8) -> bool {
         .unwrap_or(false)
 }
 
+fn dependency_permission(dependency: &str) -> Option<(u8, &'static str)> {
+    Some(match dependency {
+        "manage_channels" => (4, "Manage Channels"),
+        "manage_guild" => (5, "Manage Server"),
+        "manage_messages" => (13, "Manage Messages"),
+        "embed_links" => (14, "Embed Links"),
+        "attach_files" => (15, "Attach Files"),
+        "manage_nicknames" => (27, "Manage Nicknames"),
+        "manage_roles" => (28, "Manage Roles"),
+        "manage_expressions" => (30, "Manage Expressions"),
+        "manage_events" => (33, "Manage Events"),
+        "manage_threads" => (34, "Manage Threads"),
+        "moderate_members" => (40, "Moderate Members"),
+        "send_messages" => (11, "Send Messages"),
+        "view_channel" => (10, "View Channels"),
+        "view_audit_log" => (7, "View Audit Log"),
+        "guild_invites" => (5, "Manage Server"),
+        "voice_channels" => (20, "Connect to Voice"),
+        _ => return None,
+    })
+}
+
+fn collect_configured_resources(
+    value: &serde_json::Value,
+    path: &str,
+    channels: &mut BTreeSet<(String, String)>,
+    roles: &mut BTreeSet<(String, String)>,
+) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                let child_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                if let Some(id) = child.as_str().filter(|id| !id.trim().is_empty()) {
+                    let lower = key.to_ascii_lowercase();
+                    if lower.contains("channel") || lower == "category" || lower == "categoryid" {
+                        channels.insert((child_path.clone(), id.to_string()));
+                    }
+                    if lower.contains("role") {
+                        roles.insert((child_path.clone(), id.to_string()));
+                    }
+                }
+                collect_configured_resources(child, &child_path, channels, roles);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                collect_configured_resources(child, &format!("{path}[{index}]"), channels, roles);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn add_dependency_issue(
+    issues: &mut Vec<ValidationIssue>,
+    path: String,
+    code: &str,
+    message: String,
+    severity: &str,
+) {
+    issues.push(ValidationIssue {
+        path,
+        code: code.into(),
+        message,
+        severity: severity.into(),
+    });
+}
+
+async fn generic_feature_preflight(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    key: String,
+    request: FeaturePreflightRequest,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let guild = state
+        .store
+        .session_guilds(claims.session_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .find(|guild| guild.guild_id == claims.guild_id)
+        .ok_or_else(|| client_error(StatusCode::FORBIDDEN, "guild_not_managed"))?;
+
+    let descriptor = feature_adapter(&key).map(|adapter| adapter.descriptor());
+    let mut issues = validate_feature_config(&key, &request.config);
+    if descriptor.is_none() {
+        add_dependency_issue(
+            &mut issues,
+            "feature.adapter".into(),
+            "adapter_unavailable",
+            "This feature has no runtime adapter yet and cannot be published safely.".into(),
+            "error",
+        );
+    }
+    if !feature_is_configurable(&key) {
+        add_dependency_issue(
+            &mut issues,
+            "feature.maturity".into(),
+            "feature_not_released",
+            "This feature is not released for configuration until its required provider or approval is available.".into(),
+            "error",
+        );
+    }
+
+    let snapshot = fetch_discord_guild_snapshot(&claims.guild_id, &state.discord_token).await;
+    let bot_permissions =
+        effective_bot_permissions(&claims.guild_id, &snapshot.roles, &snapshot.bot_role_ids);
+    let bot_context_available = snapshot.bot_ready && bot_permissions.is_some();
+    let guild_permissions = guild.permissions.unwrap_or_default();
+    let mut required_permissions = Vec::new();
+    let mut bot_permission_results = serde_json::Map::new();
+    let mut user_permission_results = serde_json::Map::new();
+    let mut missing_intents = Vec::new();
+
+    if let Some(descriptor) = &descriptor {
+        for dependency in &descriptor.dependencies {
+            if let Some((bit, label)) = dependency_permission(dependency) {
+                required_permissions.push(label);
+                let user_has = permission_bit(&guild_permissions, bit);
+                let bot_has = bot_permissions
+                    .map(|permissions| permission_bit(&permissions.to_string(), bit))
+                    .unwrap_or(false);
+                user_permission_results.insert(dependency.clone(), serde_json::json!(user_has));
+                bot_permission_results.insert(dependency.clone(), serde_json::json!(bot_has));
+                if request.enabled && !user_has {
+                    add_dependency_issue(
+                        &mut issues,
+                        format!("permissions.{dependency}"),
+                        "missing_permission",
+                        format!("Your Discord account needs {label} to publish this feature."),
+                        "error",
+                    );
+                }
+                if request.enabled && !bot_context_available {
+                    add_dependency_issue(
+                        &mut issues,
+                        "permissions.bot_context".into(),
+                        "discord_context_unavailable",
+                        "Refresh the Discord context before publishing; the Helper bot's effective permissions could not be verified.".into(),
+                        "error",
+                    );
+                } else if request.enabled && !bot_has {
+                    add_dependency_issue(
+                        &mut issues,
+                        format!("permissions.bot.{dependency}"),
+                        "missing_bot_permission",
+                        format!("The Helper bot needs {label} to run this feature."),
+                        "error",
+                    );
+                }
+            } else if matches!(
+                dependency.as_str(),
+                "message_content"
+                    | "message_content_intent"
+                    | "guild_members"
+                    | "guild_members_intent"
+                    | "voice_states"
+                    | "interactions"
+                    | "message_events"
+            ) {
+                missing_intents.push(dependency.clone());
+            } else if dependency
+                .chars()
+                .all(|character| character.is_ascii_uppercase() || character == '_')
+                && std::env::var(dependency)
+                    .map(|value| value.trim().is_empty())
+                    .unwrap_or(true)
+            {
+                add_dependency_issue(
+                    &mut issues,
+                    format!("dependencies.{dependency}"),
+                    "missing_provider_credential",
+                    format!(
+                        "The required {dependency} environment variable is not configured on the API."
+                    ),
+                    "error",
+                );
+            }
+        }
+    }
+
+    if !missing_intents.is_empty() {
+        add_dependency_issue(
+            &mut issues,
+            "dependencies.intents".into(),
+            "intent_requires_runtime_check",
+            format!(
+                "This feature requires Discord gateway intents: {}. Verify them in the Developer Portal and bot runtime.",
+                missing_intents.join(", ")
+            ),
+            "warning",
+        );
+    }
+
+    let mut configured_channels = BTreeSet::new();
+    let mut configured_roles = BTreeSet::new();
+    collect_configured_resources(
+        &request.config,
+        "",
+        &mut configured_channels,
+        &mut configured_roles,
+    );
+    let channel_ids: BTreeSet<String> = snapshot
+        .channels
+        .iter()
+        .filter_map(|value| value.get("id").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    let role_ids: BTreeSet<String> = snapshot
+        .roles
+        .iter()
+        .filter_map(|value| value.get("id").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    for (path, id) in &configured_channels {
+        if snapshot.channels_ready && !channel_ids.contains(id) {
+            add_dependency_issue(
+                &mut issues,
+                path.clone(),
+                "channel_not_found",
+                "Choose a channel that still exists in this server.".into(),
+                "error",
+            );
+        }
+    }
+    for (path, id) in &configured_roles {
+        if snapshot.roles_ready && !role_ids.contains(id) {
+            add_dependency_issue(
+                &mut issues,
+                path.clone(),
+                "role_not_found",
+                "Choose a role that still exists in this server.".into(),
+                "error",
+            );
+        }
+    }
+    if request.enabled
+        && (!snapshot.channels_ready || !snapshot.roles_ready)
+        && descriptor.is_some()
+    {
+        add_dependency_issue(
+            &mut issues,
+            "discord_context".into(),
+            "discord_context_stale",
+            "Refresh the Discord context so channel, role and hierarchy checks use current resources.".into(),
+            "warning",
+        );
+    }
+
+    let error_count = issues
+        .iter()
+        .filter(|issue| issue.severity == "error")
+        .count();
+    Ok(Json(serde_json::json!({
+        "operation": format!("{key}.publish"),
+        "guildId": claims.guild_id,
+        "ok": error_count == 0,
+        "issues": issues,
+        "checks": {
+            "guildManaged": true,
+            "featureAdapter": descriptor.is_some(),
+            "featureConfigurable": feature_is_configurable(&key),
+            "botContextAvailable": bot_context_available,
+            "botPermissionBitfieldAvailable": bot_permissions.is_some(),
+            "requiredPermissions": required_permissions,
+            "userPermissions": user_permission_results,
+            "botPermissions": bot_permission_results,
+            "configuredChannels": configured_channels,
+            "configuredRoles": configured_roles,
+            "discordResourcesFresh": snapshot.channels_ready && snapshot.roles_ready,
+            "missingIntents": missing_intents
+        }
+    })))
+}
+
 async fn preflight(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -2357,22 +2636,19 @@ async fn feature_preflight(
     if key == "management.nickname" {
         return nickname_preflight(State(state), headers, request).await;
     }
-    if key != "protection.antispam" {
-        return Err(client_error(
-            StatusCode::NOT_IMPLEMENTED,
-            "feature_preflight_not_available",
-        ));
+    if key == "protection.antispam" {
+        return preflight(
+            State(state),
+            headers,
+            Json(PreflightRequest {
+                operation: format!("{key}.publish"),
+                config: request.config,
+                enabled: request.enabled,
+            }),
+        )
+        .await;
     }
-    preflight(
-        State(state),
-        headers,
-        Json(PreflightRequest {
-            operation: format!("{key}.publish"),
-            config: request.config,
-            enabled: request.enabled,
-        }),
-    )
-    .await
+    generic_feature_preflight(State(state), headers, key, request).await
 }
 
 async fn nickname_preflight(
@@ -4072,8 +4348,8 @@ async fn update_feature_detail(
             "feature_not_available",
         ));
     }
-    if key == "management.nickname" {
-        let preflight = nickname_preflight_for_claims(
+    let preflight = if key == "management.nickname" {
+        nickname_preflight_for_claims(
             &state,
             &claims,
             FeaturePreflightRequest {
@@ -4081,18 +4357,40 @@ async fn update_feature_detail(
                 enabled: update.enabled,
             },
         )
-        .await?;
-        if !preflight
-            .0
-            .get("ok")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-        {
-            return Err(client_error(
-                StatusCode::PRECONDITION_FAILED,
-                "nickname_preflight_failed",
-            ));
-        }
+        .await?
+    } else if key == "protection.antispam" {
+        preflight(
+            State(state.clone()),
+            headers.clone(),
+            Json(PreflightRequest {
+                operation: format!("{key}.publish"),
+                config: update.config.clone(),
+                enabled: update.enabled,
+            }),
+        )
+        .await?
+    } else {
+        generic_feature_preflight(
+            State(state.clone()),
+            headers.clone(),
+            key.clone(),
+            FeaturePreflightRequest {
+                config: update.config.clone(),
+                enabled: update.enabled,
+            },
+        )
+        .await?
+    };
+    if !preflight
+        .0
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(client_error(
+            StatusCode::PRECONDITION_FAILED,
+            "feature_preflight_failed",
+        ));
     }
     let issues = validate_feature_config(&key, &update.config);
     if issues.iter().any(|issue| issue.severity == "error") {
