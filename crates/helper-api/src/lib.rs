@@ -4069,7 +4069,7 @@ async fn update_feature_detail(
     } else {
         None
     };
-    let rss_subscription = if key == "social.rss" {
+    let rss_subscription = if matches!(key.as_str(), "social.rss" | "social.podcasts") {
         prepare_rss_feature(&state, &claims, &update.config, update.enabled).await?
     } else {
         None
@@ -4100,7 +4100,7 @@ async fn update_feature_detail(
             &projections,
             youtube_subscription.as_ref(),
         )
-    } else if key == "social.rss" {
+    } else if matches!(key.as_str(), "social.rss" | "social.podcasts") {
         state.store.publish_rss_feature_setting(
             &claims.guild_id,
             &key,

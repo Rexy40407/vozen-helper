@@ -454,7 +454,7 @@ const additionalFeatures: Feature[] = [
     description: 'Avisa quando sai um novo episódio dos teus podcasts.',
     category: 'social',
     capability: 'alerts',
-    available: false,
+    available: true,
     enabled: false,
   },
   {
@@ -703,6 +703,13 @@ const defaults: Record<string, FeatureConfig> = {
     targetChannelId: '',
     intervalSeconds: 900,
     messageTemplate: 'Nova publicação em {feed}: **{title}**\n{url}',
+    mention: '',
+  },
+  'social.podcasts': {
+    feedUrl: '',
+    targetChannelId: '',
+    intervalSeconds: 900,
+    messageTemplate: 'New episode from {feed}: **{title}**\n{url}',
     mention: '',
   },
   'social.twitch': {
@@ -1027,6 +1034,9 @@ const twitchSpec: SectionSpec[] = [
   },
 ];
 additionalSpecs['social.twitch'] = twitchSpec;
+// Podcasts use the same validated RSS/Atom transport and editor, but keep a
+// separate catalog key so the product surface is discoverable.
+additionalSpecs['social.podcasts'] = additionalSpecs['social.rss'];
 const spec = (key: string): SectionSpec[] => {
   const map: Record<string, SectionSpec[]> = {
     'protection.antiscam': [
@@ -1803,8 +1813,15 @@ function App() {
     }
   }, [route.page, route.key, youtubeSubscriptions]);
   useEffect(() => {
-    const subscription = route.key === 'social.rss' ? rssSubscriptions[0] : undefined;
-    if (route.page === 'detail' && route.key === 'social.rss' && subscription) {
+    const subscription =
+      route.key === 'social.rss' || route.key === 'social.podcasts'
+        ? rssSubscriptions[0]
+        : undefined;
+    if (
+      route.page === 'detail' &&
+      (route.key === 'social.rss' || route.key === 'social.podcasts') &&
+      subscription
+    ) {
       setDetailConfig((current) => ({
         ...current,
         feedUrl: subscription.feedUrl,
@@ -1906,7 +1923,7 @@ function App() {
   async function testDetail() {
     if (!route.key) return;
     try {
-      if (route.key === 'social.rss') {
+      if (route.key === 'social.rss' || route.key === 'social.podcasts') {
         const feedUrl = String(detailConfig.feedUrl ?? '').trim();
         if (!feedUrl) {
           setMessage('Indica primeiro o URL do feed RSS/Atom.');
@@ -1952,7 +1969,7 @@ function App() {
       );
     } catch {
       setMessage(
-        route.key === 'social.rss'
+        route.key === 'social.rss' || route.key === 'social.podcasts'
           ? 'Não foi possível ler este feed. Confirma o URL e tenta novamente.'
           : route.key === 'social.twitch'
             ? 'Não foi possível validar o canal Twitch. Confirma o nome e as credenciais do servidor.'

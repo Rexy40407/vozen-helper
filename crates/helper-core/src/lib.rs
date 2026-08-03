@@ -751,6 +751,98 @@ impl FeatureAdapter for ToggleOnlyAdapter {
     }
 }
 
+/// Shared schema for feed-backed alert surfaces.  RSS and podcast feeds are
+/// validated and published through the same store/provider path, but each has
+/// its own catalog key and user-facing copy.
+#[derive(Debug, Clone, Copy)]
+pub struct FeedAdapter {
+    pub key: &'static str,
+    pub source: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub dependencies: &'static [&'static str],
+}
+
+impl FeatureAdapter for FeedAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: self.key.into(),
+            source: self.source.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": self.source,
+                "sections": [{
+                    "title": self.title,
+                    "description": self.description,
+                    "fields": [
+                        {"key":"feedUrl","label":"Public feed URL","kind":"text"},
+                        {"key":"targetChannelId","label":"Discord channel","kind":"channel"},
+                        {"key":"intervalSeconds","label":"Polling interval (seconds)","kind":"number","min":300,"max":86400},
+                        {"key":"messageTemplate","label":"Alert message","kind":"textarea","advanced":true},
+                        {"key":"mention","label":"Optional mention","kind":"text","advanced":true}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({
+                "feedUrl": "",
+                "targetChannelId": "",
+                "intervalSeconds": 900,
+                "messageTemplate": "New update from {feed}: **{title}**\\n{url}",
+                "mention": ""
+            }),
+            dependencies: self
+                .dependencies
+                .iter()
+                .map(|value| (*value).into())
+                .collect(),
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "Feed configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        for field in ["feedUrl", "targetChannelId"] {
+            if object
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| value.chars().count() > 2_000)
+            {
+                issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "too_long".into(),
+                    message: "Feed fields must be at most 2000 characters.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if let Some(value) = object.get("intervalSeconds")
+            && value
+                .as_i64()
+                .is_some_and(|value| !(300..=86_400).contains(&value))
+        {
+            issues.push(ValidationIssue {
+                path: "intervalSeconds".into(),
+                code: "out_of_range".into(),
+                message: "Polling interval must be between 300 and 86400 seconds.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, _config: &serde_json::Value) -> Vec<(String, String)> {
+        Vec::new()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TicketsAdapter;
 
@@ -2720,11 +2812,18 @@ static YOUTUBE_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
     description: "Polls the official YouTube Data API and delivers deduplicated new-video alerts.",
     dependencies: &["YOUTUBE_API_KEY", "send_messages", "embed_links"],
 };
-static RSS_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+static RSS_ADAPTER: FeedAdapter = FeedAdapter {
     key: "social.rss",
     source: "rss_atom_adapter_v1",
     title: "RSS alerts",
     description: "Polls validated RSS and Atom feeds with SSRF protection and deduplication.",
+    dependencies: &["outbound_https", "send_messages"],
+};
+static PODCASTS_ADAPTER: FeedAdapter = FeedAdapter {
+    key: "social.podcasts",
+    source: "podcast_rss_adapter_v1",
+    title: "Podcast alerts",
+    description: "Polls a public podcast RSS or Atom feed with the same SSRF protection and deduplication as RSS alerts.",
     dependencies: &["outbound_https", "send_messages"],
 };
 static TWITCH_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
@@ -2898,6 +2997,7 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         "utility.temp_channels" => Some(&TEMP_CHANNELS_ADAPTER as &dyn FeatureAdapter),
         "social.youtube" => Some(&YOUTUBE_ADAPTER as &dyn FeatureAdapter),
         "social.rss" => Some(&RSS_ADAPTER as &dyn FeatureAdapter),
+        "social.podcasts" => Some(&PODCASTS_ADAPTER as &dyn FeatureAdapter),
         "social.twitch" => Some(&TWITCH_ADAPTER as &dyn FeatureAdapter),
         EmbedsAdapter::KEY => Some(&EMBEDS_ADAPTER as &dyn FeatureAdapter),
         EconomyAdapter::KEY => Some(&ECONOMY_ADAPTER as &dyn FeatureAdapter),
@@ -2997,13 +3097,15 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "community.economy"
         | "studio.rank_card" => FeatureMaturity::Operational,
         "social.youtube" | "social.rss" | "social.twitch" => FeatureMaturity::Beta,
+        // Podcast feeds reuse the official RSS/Atom transport and its SSRF
+        // protection, so they do not require a second provider or secret.
+        "social.podcasts" => FeatureMaturity::Operational,
         // Providers without an approved adapter or credentials must never be
         // presented as configurable, even if a legacy setting exists.
         "social.instagram"
         | "social.reddit"
         | "social.x"
         | "social.tiktok"
-        | "social.podcasts"
         | "social.kick"
         | "social.bluesky"
         | "utility.search"
@@ -3246,7 +3348,12 @@ mod tests {
             assert!(adapter.validate(&serde_json::json!({})).is_empty());
         }
 
-        for key in ["social.youtube", "social.rss", "social.twitch"] {
+        for key in [
+            "social.youtube",
+            "social.rss",
+            "social.podcasts",
+            "social.twitch",
+        ] {
             let adapter = feature_adapter(key).expect("official provider adapter registered");
             assert!(adapter.descriptor().dependencies.len() >= 2);
         }

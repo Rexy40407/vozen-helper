@@ -2452,7 +2452,14 @@ async fn run_rss_worker(http: Arc<serenity::http::Http>, store: Store, rss: RssC
             }
         };
         for subscription in due {
-            if !feature_enabled(&store, &subscription.guild_id, "social.rss", None) {
+            // Podcast alerts are the same bounded RSS/Atom transport. A
+            // subscription is active when either product surface is enabled;
+            // this keeps the worker single-purpose and prevents duplicate
+            // polling or delivery.
+            let rss_enabled = feature_enabled(&store, &subscription.guild_id, "social.rss", None);
+            let podcasts_enabled =
+                feature_enabled(&store, &subscription.guild_id, "social.podcasts", None);
+            if !rss_enabled && !podcasts_enabled {
                 let next = Utc::now().timestamp_millis() + subscription.interval_seconds * 1_000;
                 let _ = store.update_rss_poll(
                     subscription.id,
