@@ -2882,16 +2882,55 @@ impl Handler {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "utility.reminders", None) {
+                    return respond(
+                        ctx,
+                        command,
+                        "Reminders are disabled in this server. Enable them in the dashboard.",
+                    )
+                    .await;
+                }
                 let time = option_string(command, "time").unwrap_or_default();
                 let text = option_string(command, "text").unwrap_or_default();
                 let Some(delay) = parse_duration(time) else {
                     return respond(ctx, command, "Duração inválida. Usa formatos como 10m, 2h ou 1d.").await;
                 };
-                if text.len() > 500 {
-                    return respond(ctx, command, "O lembrete não pode exceder 500 caracteres.").await;
+                let max_delay_hours = setting_u64(
+                    &self.store,
+                    &guild_text,
+                    "utility.reminders.max_delay_hours",
+                    168,
+                )
+                .clamp(1, 8_760);
+                let max_delay_ms = max_delay_hours
+                    .saturating_mul(3_600_000)
+                    .min(i64::MAX as u64) as i64;
+                if delay > max_delay_ms {
+                    return respond(
+                        ctx,
+                        command,
+                        "That reminder is beyond the server's configured maximum delay.",
+                    )
+                    .await;
+                }
+                let max_text_length = setting_u64(
+                    &self.store,
+                    &guild_text,
+                    "utility.reminders.max_text_length",
+                    500,
+                )
+                .clamp(50, 500) as usize;
+                if text.len() > max_text_length {
+                    return respond(
+                        ctx,
+                        command,
+                        "The reminder is longer than the server's configured limit.",
+                    )
+                    .await;
                 }
                 let id = self.store.schedule(
-                    &guild_id.to_string(),
+                    &guild_text,
                     &command.user.id.to_string(),
                     chrono::Utc::now().timestamp_millis() + delay,
                     &serde_json::json!({"channel_id": command.channel_id.to_string(), "text": text}).to_string(),
@@ -5480,6 +5519,12 @@ async fn deliver_scheduled_action(
     payload: &str,
 ) -> Result<()> {
     let value: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+    if action_type == "reminder" && !feature_enabled(store, guild_id, "utility.reminders", None) {
+        // A scheduled reminder may outlive a feature disable. Consume it without
+        // delivering anything so a later re-enable cannot replay stale notices.
+        store.delete_scheduled_action(id)?;
+        return Ok(());
+    }
     if action_type == "unban" {
         let guild = guild_id
             .parse::<u64>()
@@ -5533,7 +5578,8 @@ async fn deliver_scheduled_action(
             .get("text")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("You have a pending reminder.");
-        let content = if action_type == "reminder" {
+        let notify_user = setting_bool(store, guild_id, "utility.reminders.notify_user", true);
+        let content = if action_type == "reminder" && notify_user {
             format!("<@{target_id}> ⏰ {text}")
         } else {
             text.to_string()

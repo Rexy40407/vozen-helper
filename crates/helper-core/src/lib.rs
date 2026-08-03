@@ -296,6 +296,140 @@ impl FeatureAdapter for NicknameAdapter {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReminderAdapter;
+
+impl ReminderAdapter {
+    pub const KEY: &'static str = "utility.reminders";
+    pub const SOURCE: &'static str = "reminders_adapter_v1";
+
+    fn schema() -> serde_json::Value {
+        serde_json::json!({
+            "version": FEATURE_SCHEMA_VERSION,
+            "source": Self::SOURCE,
+            "sections": [{
+                "title": "Reminder limits",
+                "description": "Keep reminders useful and bounded for every member.",
+                "fields": [
+                    {"key":"maxDelayHours","label":"Maximum delay (hours)","kind":"number","min":1,"max":8760,"help":"The longest time a member can schedule a reminder."},
+                    {"key":"maxTextLength","label":"Maximum message length","kind":"number","min":50,"max":500,"help":"Longer text is rejected before a job is created."},
+                    {"key":"notifyUser","label":"Mention the member when it fires","kind":"toggle","help":"Turn off to post a quiet reminder without a mention."}
+                ]
+            }]
+        })
+    }
+
+    fn defaults() -> serde_json::Value {
+        serde_json::json!({"maxDelayHours": 168, "maxTextLength": 500, "notifyUser": true})
+    }
+}
+
+impl FeatureAdapter for ReminderAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: Self::schema(),
+            defaults: Self::defaults(),
+            dependencies: vec!["scheduler".into(), "send_messages".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        for (field, min, max) in [
+            ("maxDelayHours", 1_i64, 8_760_i64),
+            ("maxTextLength", 50, 500),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_i64)
+                && !(min..=max).contains(&value)
+            {
+                issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "out_of_range".into(),
+                    message: format!("The value must be between {min} and {max}."),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if object
+            .get("maxDelayHours")
+            .is_some_and(|value| !value.is_i64())
+        {
+            issues.push(ValidationIssue {
+                path: "maxDelayHours".into(),
+                code: "integer_required".into(),
+                message: "Maximum delay must be an integer.".into(),
+                severity: "error".into(),
+            });
+        }
+        if object
+            .get("maxTextLength")
+            .is_some_and(|value| !value.is_i64())
+        {
+            issues.push(ValidationIssue {
+                path: "maxTextLength".into(),
+                code: "integer_required".into(),
+                message: "Maximum message length must be an integer.".into(),
+                severity: "error".into(),
+            });
+        }
+        if object
+            .get("notifyUser")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "notifyUser".into(),
+                code: "boolean_required".into(),
+                message: "Mention preference must be true or false.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut projection = Vec::new();
+        if let Some(value) = object
+            .get("maxDelayHours")
+            .and_then(serde_json::Value::as_i64)
+        {
+            projection.push((
+                "utility.reminders.max_delay_hours".into(),
+                value.to_string(),
+            ));
+        }
+        if let Some(value) = object
+            .get("maxTextLength")
+            .and_then(serde_json::Value::as_i64)
+        {
+            projection.push((
+                "utility.reminders.max_text_length".into(),
+                value.to_string(),
+            ));
+        }
+        if let Some(value) = object
+            .get("notifyUser")
+            .and_then(serde_json::Value::as_bool)
+        {
+            projection.push(("utility.reminders.notify_user".into(), value.to_string()));
+        }
+        projection
+    }
+}
+
 impl AntiSpamAdapter {
     pub const KEY: &'static str = "protection.antispam";
     pub const SOURCE: &'static str = "anti_spam_adapter_v1";
@@ -468,11 +602,13 @@ impl FeatureAdapter for AntiSpamAdapter {
 
 static ANTI_SPAM_ADAPTER: AntiSpamAdapter = AntiSpamAdapter;
 static NICKNAME_ADAPTER: NicknameAdapter = NicknameAdapter;
+static REMINDER_ADAPTER: ReminderAdapter = ReminderAdapter;
 
 pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
     match key {
         AntiSpamAdapter::KEY => Some(&ANTI_SPAM_ADAPTER as &dyn FeatureAdapter),
         NicknameAdapter::KEY => Some(&NICKNAME_ADAPTER as &dyn FeatureAdapter),
+        ReminderAdapter::KEY => Some(&REMINDER_ADAPTER as &dyn FeatureAdapter),
         _ => None,
     }
 }
@@ -548,6 +684,7 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "support.welcome"
         | "management.polls"
         | "management.nickname"
+        | "utility.reminders"
         | "studio.rank_card" => FeatureMaturity::Operational,
         "social.youtube" | "social.rss" | "social.twitch" => FeatureMaturity::Beta,
         // Providers without an approved adapter or credentials must never be
@@ -766,6 +903,30 @@ mod tests {
         );
         assert_eq!(
             feature_maturity("management.nickname"),
+            FeatureMaturity::Operational
+        );
+    }
+
+    #[test]
+    fn reminder_adapter_projects_real_runtime_limits() {
+        let adapter = feature_adapter("utility.reminders").expect("adapter registered");
+        let descriptor = adapter.descriptor();
+        assert_eq!(descriptor.source, "reminders_adapter_v1");
+        assert_eq!(descriptor.defaults["maxDelayHours"], 168);
+        assert!(adapter
+            .validate(&serde_json::json!({"maxDelayHours": 0, "maxTextLength": 500, "notifyUser": true}))
+            .iter()
+            .any(|issue| issue.path == "maxDelayHours"));
+        let projection = adapter.runtime_projection(&serde_json::json!({
+            "maxDelayHours": 24,
+            "maxTextLength": 240,
+            "notifyUser": false
+        }));
+        assert!(projection.contains(&("utility.reminders.max_delay_hours".into(), "24".into())));
+        assert!(projection.contains(&("utility.reminders.max_text_length".into(), "240".into())));
+        assert!(projection.contains(&("utility.reminders.notify_user".into(), "false".into())));
+        assert_eq!(
+            feature_maturity("utility.reminders"),
             FeatureMaturity::Operational
         );
     }
