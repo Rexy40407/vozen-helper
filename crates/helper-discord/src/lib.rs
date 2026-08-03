@@ -2551,6 +2551,21 @@ impl Handler {
                 .await;
             }
         }
+        if let Some(guild_id) = command.guild_id
+            && is_moderation_command(command.data.name.as_str())
+            && feature_explicitly_disabled(
+                &self.store,
+                &guild_id.to_string(),
+                "management.moderation",
+            )
+        {
+            return respond(
+                ctx,
+                command,
+                "Manual moderation is disabled in this server. Enable Moderation in the dashboard first.",
+            )
+            .await;
+        }
         let content = match command.data.name.as_str() {
             "ping" => "Pong — Vozen Helper está online.".to_string(),
             "help" => {
@@ -2737,7 +2752,11 @@ impl Handler {
                 if let Some(guild_id) = command.guild_id {
                     let target = command.data.options.iter().find_map(|option| match &option.value { CommandDataOptionValue::User(user) => Some(*user), _ => None });
                     if let Some(target) = target {
-                        let reason = command.data.options.iter().find_map(|option| match &option.value { CommandDataOptionValue::String(value) => Some(value.as_str()), _ => None }).unwrap_or("Sem motivo");
+                        let reason = command.data.options.iter().find_map(|option| match &option.value { CommandDataOptionValue::String(value) => Some(value.as_str()), _ => None }).unwrap_or("");
+                        if setting_bool(&self.store, &guild_id.to_string(), "management.moderation.require_reason", true) && reason.trim().is_empty() {
+                            return respond(ctx, command, "Provide a reason so the warning can be audited.").await;
+                        }
+                        let reason = if reason.trim().is_empty() { "No reason provided" } else { reason };
                         let case_id = self.store.record_case(&guild_id.to_string(), "warn", &target.to_string(), &command.user.id.to_string(), reason, None)?;
                         format!("Aviso criado como caso #{case_id} para <@{}>.", target)
                     } else { "Indica um membro.".to_string() }
@@ -2847,7 +2866,8 @@ impl Handler {
                     CommandDataOptionValue::Integer(value) if option.name == "count" => Some(value),
                     _ => None,
                 }).unwrap_or(0);
-                let count = raw_count.clamp(1, 100) as u8;
+                let max_purge = setting_u64(&self.store, &command.guild_id.map(|id| id.to_string()).unwrap_or_default(), "management.moderation.max_purge", 100).clamp(1, 100);
+                let count = raw_count.clamp(1, max_purge as i64) as u8;
                 let messages = command.channel_id.messages(&ctx.http, serenity::all::GetMessages::new().limit(count)).await?;
                 if messages.is_empty() {
                     "Não encontrei mensagens para apagar.".to_string()
@@ -2867,7 +2887,11 @@ impl Handler {
                 }) else {
                     return respond(ctx, command, "Indica um membro.").await;
                 };
-                let reason = option_string(command, "reason").unwrap_or("Sem motivo");
+                let reason = option_string(command, "reason").unwrap_or("");
+                if setting_bool(&self.store, &guild_id.to_string(), "management.moderation.require_reason", true) && reason.trim().is_empty() {
+                    return respond(ctx, command, "Provide a reason so the action can be audited.").await;
+                }
+                let reason = if reason.trim().is_empty() { "No reason provided" } else { reason };
                 let action = guild_id.ban_with_reason(&ctx.http, target, 0, reason).await;
                 if let Err(error) = action {
                     tracing::warn!(%error, action = %command.data.name, "ban action failed");
@@ -2900,7 +2924,11 @@ impl Handler {
                 let reason = command.data.options.iter().find_map(|option| match &option.value {
                     CommandDataOptionValue::String(value) => Some(value.as_str()),
                     _ => None,
-                }).unwrap_or("Sem motivo");
+                }).unwrap_or("");
+                if setting_bool(&self.store, &guild_id.to_string(), "management.moderation.require_reason", true) && reason.trim().is_empty() {
+                    return respond(ctx, command, "Provide a reason so the action can be audited.").await;
+                }
+                let reason = if reason.trim().is_empty() { "No reason provided" } else { reason };
                 let action = if command.data.name == "kick" {
                     guild_id.kick_with_reason(&ctx.http, target, reason).await
                 } else if command.data.name == "ban" {
@@ -5577,6 +5605,43 @@ fn feature_enabled(store: &Store, guild_id: &str, key: &str, legacy_key: Option<
             })
         })
         .unwrap_or(false)
+}
+
+fn feature_explicitly_disabled(store: &Store, guild_id: &str, key: &str) -> bool {
+    store
+        .get_feature_setting(guild_id, key)
+        .ok()
+        .flatten()
+        .map(|value| !value.enabled)
+        .or_else(|| {
+            store
+                .get_setting(guild_id, &format!("feature.{key}"))
+                .ok()
+                .flatten()
+                .and_then(|value| value.parse::<bool>().ok().map(|enabled| !enabled))
+        })
+        .unwrap_or(false)
+}
+
+fn is_moderation_command(name: &str) -> bool {
+    matches!(
+        name,
+        "warn"
+            | "violation"
+            | "note"
+            | "reason"
+            | "kick"
+            | "ban"
+            | "timeout"
+            | "tempban"
+            | "softban"
+            | "untimeout"
+            | "unban"
+            | "purge"
+            | "quarantine"
+            | "unquarantine"
+            | "slowmode"
+    )
 }
 
 fn setting_string(store: &Store, guild_id: &str, key: &str) -> Option<String> {

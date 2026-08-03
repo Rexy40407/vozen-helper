@@ -917,6 +917,97 @@ impl FeatureAdapter for HelpAdapter {
     }
 }
 
+/// Controls the safety envelope for manual moderation commands.  The command
+/// handlers read the projected values before touching Discord, so the panel
+/// can no longer expose limits that are ignored by the runtime.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModerationAdapter;
+
+impl ModerationAdapter {
+    pub const KEY: &'static str = "management.moderation";
+    pub const SOURCE: &'static str = "moderation_adapter_v1";
+}
+
+impl FeatureAdapter for ModerationAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Moderation safety",
+                    "description": "Set guardrails used by manual moderation commands.",
+                    "fields": [
+                        {"key":"requireReason","label":"Require a reason","kind":"toggle","help":"Reject destructive actions without a useful reason."},
+                        {"key":"maxPurge","label":"Maximum purge count","kind":"number","min":1,"max":100,"help":"Upper bound for one purge command."},
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({
+                "requireReason": true,
+                "maxPurge": 100
+            }),
+            dependencies: vec!["moderate_members".into(), "manage_messages".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        for field in ["requireReason"] {
+            if object.get(field).is_some_and(|value| !value.is_boolean()) {
+                issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "boolean_required".into(),
+                    message: "This option must be true or false.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        for (field, min, max) in [("maxPurge", 1_i64, 100_i64)] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_i64)
+                && !(min..=max).contains(&value)
+            {
+                issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "out_of_range".into(),
+                    message: format!("The value must be between {min} and {max}."),
+                    severity: "error".into(),
+                });
+            }
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut pairs = Vec::new();
+        for (field, setting) in [("requireReason", "management.moderation.require_reason")] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_bool) {
+                pairs.push((setting.into(), value.to_string()));
+            }
+        }
+        for (field, setting) in [("maxPurge", "management.moderation.max_purge")] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_i64) {
+                pairs.push((setting.into(), value.to_string()));
+            }
+        }
+        pairs
+    }
+}
+
 impl AntiSpamAdapter {
     pub const KEY: &'static str = "protection.antispam";
     pub const SOURCE: &'static str = "anti_spam_adapter_v1";
@@ -1095,6 +1186,7 @@ static WORKFLOW_ADAPTER: WorkflowAdapter = WorkflowAdapter;
 static PRIVACY_ADAPTER: PrivacyAdapter = PrivacyAdapter;
 static STATS_ADAPTER: StatsAdapter = StatsAdapter;
 static HELP_ADAPTER: HelpAdapter = HelpAdapter;
+static MODERATION_ADAPTER: ModerationAdapter = ModerationAdapter;
 
 pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
     match key {
@@ -1106,6 +1198,7 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         PrivacyAdapter::KEY => Some(&PRIVACY_ADAPTER as &dyn FeatureAdapter),
         StatsAdapter::KEY => Some(&STATS_ADAPTER as &dyn FeatureAdapter),
         HelpAdapter::KEY => Some(&HELP_ADAPTER as &dyn FeatureAdapter),
+        ModerationAdapter::KEY => Some(&MODERATION_ADAPTER as &dyn FeatureAdapter),
         _ => None,
     }
 }
@@ -1187,6 +1280,7 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "management.privacy"
         | "insights.stats"
         | "utility.help"
+        | "management.moderation"
         | "studio.rank_card" => FeatureMaturity::Operational,
         "social.youtube" | "social.rss" | "social.twitch" => FeatureMaturity::Beta,
         // Providers without an approved adapter or credentials must never be
@@ -1470,6 +1564,31 @@ mod tests {
         );
         assert_eq!(
             feature_maturity("management.workflows"),
+            FeatureMaturity::Operational
+        );
+    }
+
+    #[test]
+    fn moderation_adapter_projects_guardrails_used_by_commands() {
+        let adapter = feature_adapter("management.moderation").expect("moderation adapter");
+        assert_eq!(adapter.descriptor().source, "moderation_adapter_v1");
+        assert!(
+            adapter
+                .validate(&serde_json::json!({"requireReason": true, "maxPurge": 0}))
+                .iter()
+                .any(|issue| issue.path == "maxPurge")
+        );
+        let projection = adapter.runtime_projection(&serde_json::json!({
+            "requireReason": false,
+            "maxPurge": 42
+        }));
+        assert!(projection.contains(&(
+            "management.moderation.require_reason".into(),
+            "false".into()
+        )));
+        assert!(projection.contains(&("management.moderation.max_purge".into(), "42".into())));
+        assert_eq!(
+            feature_maturity("management.moderation"),
             FeatureMaturity::Operational
         );
     }
