@@ -5429,7 +5429,7 @@ impl Handler {
             }
             "privacy" => {
                 let Some(guild_id) = command.guild_id else {
-                    return respond(ctx, command, "Este comando sÃ³ pode ser usado num servidor.").await;
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
                 let guild_text = guild_id.to_string();
                 if !feature_enabled(&self.store, &guild_text, "management.privacy", None) {
@@ -5461,7 +5461,7 @@ impl Handler {
                             return respond(ctx, command, "Member erasure is disabled in this server.").await;
                         }
                         let result = self.store.purge_user(&guild_text, &command.user.id.to_string())?;
-                        format!("Dados voluntÃ¡rios apagados. Registos de moderaÃ§Ã£o, infraÃ§Ãµes e quarantine foram mantidos por auditoria. Resultado: {result}")
+                        format!("Dados voluntários apagados. Registos de moderação, infrações e quarantine foram mantidos por auditoria. Resultado: {result}")
                     }
                     _ => {
                         if !allow_export {
@@ -5483,7 +5483,7 @@ impl Handler {
                                 ).await?;
                                 "Enviei os teus dados por mensagem privada.".to_string()
                             }
-                            Err(_) => "NÃ£o consegui enviar mensagem privada. Ativa as DMs e tenta novamente.".to_string(),
+                            Err(_) => "Não consegui enviar mensagem privada. Ativa as DMs e tenta novamente.".to_string(),
                         }
                     }
                 }
@@ -5497,7 +5497,7 @@ impl Handler {
             }
             "modlogs" => {
                 let Some(guild_id) = command.guild_id else {
-                    return respond(ctx, command, "Este comando sÃ³ pode ser usado num servidor.").await;
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
                 let Some(target) = command.data.options.iter().find_map(|option| match option.value {
                     CommandDataOptionValue::User(user) => Some(user),
@@ -5507,7 +5507,7 @@ impl Handler {
                 };
                 let cases = self.store.cases_for_target(&guild_id.to_string(), &target.to_string(), 50)?;
                 if cases.is_empty() {
-                    format!("NÃ£o existem casos para <@{}>.", target)
+                    format!("Não existem casos para <@{}>.", target)
                 } else {
                     cases.into_iter().map(|case_record| format!("#{} {}: {}", case_record.id, case_record.kind, case_record.reason)).collect::<Vec<_>>().join("\n")
                 }
@@ -5643,7 +5643,7 @@ impl Handler {
             }
             "tempban" | "softban" => {
                 let Some(guild_id) = command.guild_id else {
-                    return respond(ctx, command, "Este comando sÃ³ pode ser usado num servidor.").await;
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
                 let Some(target) = command.data.options.iter().find_map(|option| match option.value {
                     CommandDataOptionValue::User(user) => Some(user),
@@ -5664,15 +5664,15 @@ impl Handler {
                 if command.data.name == "softban" {
                     let _ = guild_id.unban(&ctx.http, target).await;
                     let case_id = self.store.record_case(&guild_id.to_string(), "softban", &target.to_string(), &command.user.id.to_string(), reason, None)?;
-                    format!("Softban concluÃ­do como caso #{case_id} para <@{}>.", target)
+                    format!("Softban concluído como caso #{case_id} para <@{}>.", target)
                 } else {
                     let Some(delay) = parse_duration(option_string(command, "duration").unwrap_or_default()) else {
                         let _ = guild_id.unban(&ctx.http, target).await;
-                        return respond(ctx, command, "DuraÃ§Ã£o invÃ¡lida. Usa 10m, 2h ou 1d.").await;
+                        return respond(ctx, command, "Duração inválida. Usa 10m, 2h ou 1d.").await;
                     };
                     let case_id = self.store.record_case(&guild_id.to_string(), "tempban", &target.to_string(), &command.user.id.to_string(), reason, Some(delay))?;
                     self.store.schedule_typed(&guild_id.to_string(), "unban", &target.to_string(), chrono::Utc::now().timestamp_millis() + delay, "")?;
-                    format!("Tempban concluÃ­do como caso #{case_id} para <@{}>; expira em {}.", target, format_duration(delay))
+                    format!("Tempban concluído como caso #{case_id} para <@{}>; expira em {}.", target, format_duration(delay))
                 }
             }
             "kick" | "ban" | "timeout" => {
@@ -6572,7 +6572,7 @@ impl Handler {
                 let id = option_i64(command, "id").unwrap_or(0);
                 match reroll_giveaway(&ctx.http, &self.store, id).await? {
                     Some(winner) => format!("Giveaway #{id} rerolled: <@{winner}>."),
-                    None => "Giveaway nÃ£o encontrado, ainda ativo ou sem participantes.".to_string(),
+                    None => "Giveaway não encontrado, ainda ativo ou sem participantes.".to_string(),
                 }
             }
             "poll" => {
@@ -6699,16 +6699,16 @@ impl Handler {
             }
             "verify-panel" => {
                 let Some(guild_id) = command.guild_id else {
-                    return respond(ctx, command, "Este comando sÃ³ pode ser usado num servidor.").await;
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
                 let guild_text = guild_id.to_string();
                 let enabled = self.store.get_setting(&guild_text, "security.join_gate.enabled")?
                     .is_some_and(|value| value == "true");
                 let Some(role_id) = self.store.get_setting(&guild_text, "security.join_gate.role_id")? else {
-                    return respond(ctx, command, "Configura primeiro `/join-gate` com um cargo de verificaÃ§Ã£o.").await;
+                    return respond(ctx, command, "Configura primeiro `/join-gate` com um cargo de verificação.").await;
                 };
                 if !enabled {
-                    return respond(ctx, command, "Ativa primeiro o `/join-gate`; o painel nÃ£o deve ficar exposto enquanto o gate estÃ¡ desligado.").await;
+                    return respond(ctx, command, "Ativa primeiro o `/join-gate`; o painel não deve ficar exposto enquanto o gate está desligado.").await;
                 }
                 command.channel_id.send_message(
                     &ctx.http,
@@ -6720,11 +6720,11 @@ impl Handler {
                                 .style(ButtonStyle::Success),
                         ])]),
                 ).await?;
-                "Painel de verificaÃ§Ã£o publicado neste canal.".to_string()
+                "Painel de verificação publicado neste canal.".to_string()
             }
             "lockdown" => {
                 let Some(guild_id) = command.guild_id else {
-                    return respond(ctx, command, "Este comando sÃ³ pode ser usado num servidor.").await;
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
                 let reason = option_string(command, "reason").unwrap_or("Lockdown manual");
                 let count = apply_lockdown(&ctx.http, &self.store, guild_id, true).await?;
@@ -6733,7 +6733,7 @@ impl Handler {
             }
             "unlock" => {
                 let Some(guild_id) = command.guild_id else {
-                    return respond(ctx, command, "Este comando sÃ³ pode ser usado num servidor.").await;
+                    return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
                 let count = apply_lockdown(&ctx.http, &self.store, guild_id, false).await?;
                 format!("Lockdown removido de {count} canal(is); overwrites anteriores restaurados quando estavam guardados.")
@@ -7815,13 +7815,12 @@ impl Handler {
                     .await;
             }
             let Some(role_id) = role_id else {
-                return respond_component(ctx, component, "Painel de verificaÃ§Ã£o invÃ¡lido.")
-                    .await;
+                return respond_component(ctx, component, "Painel de verificação inválido.").await;
             };
             let member = guild_id.member(&ctx.http, component.user.id).await?;
             let role = RoleId::new(role_id);
             if member.roles.contains(&role) {
-                return respond_component(ctx, component, "JÃ¡ estÃ¡s verificado.").await;
+                return respond_component(ctx, component, "Já estás verificado.").await;
             }
             member.add_role(&ctx.http, role).await?;
             return respond_component(ctx, component, "Verificacao concluida; cargo atribuido.")
@@ -8352,7 +8351,7 @@ fn english_bot_text(input: &str) -> String {
             "This command can only be used in a server.",
         ),
         (
-            "Este comando sÃ³ pode ser usado num servidor.",
+            "Este comando só pode ser usado num servidor.",
             "This command can only be used in a server.",
         ),
         ("Indica um membro.", "Specify a member."),
@@ -8418,7 +8417,7 @@ fn english_bot_text(input: &str) -> String {
             "Invalid duration. Use 10m, 2h or 1d.",
         ),
         (
-            "DuraÃ§Ã£o invÃ¡lida. Usa 10m, 2h ou 1d.",
+            "Duração inválida. Usa 10m, 2h ou 1d.",
             "Invalid duration. Use 10m, 2h or 1d.",
         ),
         (
@@ -8466,7 +8465,7 @@ fn english_bot_text(input: &str) -> String {
             "Configure `/join-gate` first with a verification role.",
         ),
         (
-            "Configura primeiro `/join-gate` com um cargo de verificaÃ§Ã£o.",
+            "Configura primeiro `/join-gate` com um cargo de verificação.",
             "Configure `/join-gate` first with a verification role.",
         ),
         (
@@ -8474,7 +8473,7 @@ fn english_bot_text(input: &str) -> String {
             "Enable `/join-gate` first; do not expose the panel while the gate is disabled.",
         ),
         (
-            "Ativa primeiro o `/join-gate`; o painel nÃ£o deve ficar exposto enquanto o gate estÃ¡ desligado.",
+            "Ativa primeiro o `/join-gate`; o painel não deve ficar exposto enquanto o gate está desligado.",
             "Enable `/join-gate` first; do not expose the panel while the gate is disabled.",
         ),
         (
@@ -8482,7 +8481,7 @@ fn english_bot_text(input: &str) -> String {
             "Click the button to receive the verified member role.",
         ),
         (
-            "Carrega no botÃ£o para receber o cargo de membro verificado.",
+            "Carrega no botão para receber o cargo de membro verificado.",
             "Click the button to receive the verified member role.",
         ),
         (
@@ -8490,14 +8489,14 @@ fn english_bot_text(input: &str) -> String {
             "Verification panel posted in this channel.",
         ),
         (
-            "Painel de verificaÃ§Ã£o publicado neste canal.",
+            "Painel de verificação publicado neste canal.",
             "Verification panel posted in this channel.",
         ),
         ("Painel de cargos criado.", "Role panel created."),
         ("Painel criado.", "Panel created."),
         ("Comando desconhecido.", "Unknown command."),
         ("Dados voluntários apagados.", "Voluntary data deleted."),
-        ("Dados voluntÃ¡rios apagados.", "Voluntary data deleted."),
+        ("Dados voluntários apagados.", "Voluntary data deleted."),
         ("Ticket criado:", "Ticket created:"),
         ("Ticket reaberto.", "Ticket reopened."),
         (
@@ -8505,7 +8504,7 @@ fn english_bot_text(input: &str) -> String {
             "Ticket closed and archived. The channel was not deleted.",
         ),
         (
-            "Ticket fechado e arquivado. O canal nÃ£o foi apagado.",
+            "Ticket fechado e arquivado. O canal não foi apagado.",
             "Ticket closed and archived. The channel was not deleted.",
         ),
         (
@@ -8513,7 +8512,7 @@ fn english_bot_text(input: &str) -> String {
             "This ticket is already open or does not exist.",
         ),
         (
-            "Este ticket jÃ¡ estÃ¡ aberto ou nÃ£o existe.",
+            "Este ticket já está aberto ou não existe.",
             "This ticket is already open or does not exist.",
         ),
         (
@@ -8549,7 +8548,7 @@ fn english_bot_text(input: &str) -> String {
             "Your check-in is already recorded.",
         ),
         (
-            "O teu check-in jÃ¡ estÃ¡ registado.",
+            "O teu check-in já está registado.",
             "Your check-in is already recorded.",
         ),
         (
@@ -8557,7 +8556,7 @@ fn english_bot_text(input: &str) -> String {
             "You are not registered for this event.",
         ),
         (
-            "Não tens uma inscriÃ§Ã£o neste evento.",
+            "Não tens uma inscrição neste evento.",
             "You are not registered for this event.",
         ),
         (
@@ -8635,7 +8634,7 @@ fn english_bot_text(input: &str) -> String {
             "Ainda não existem casos neste servidor.",
             "There are no cases in this server yet.",
         ),
-        ("NÃ£o existem casos para", "There are no cases for"),
+        ("Não existem casos para", "There are no cases for"),
         ("Não existem casos para", "There are no cases for"),
         ("Aviso criado como caso", "Warning created as case"),
         ("Registo #", "Record #"),
@@ -8644,10 +8643,10 @@ fn english_bot_text(input: &str) -> String {
             "Caso não encontrado neste servidor.",
             "Case not found in this server.",
         ),
-        ("NÃ£o existem casos para", "There are no cases for"),
+        ("Não existem casos para", "There are no cases for"),
         ("Sem motivo", "No reason provided"),
         ("Sem conteúdo", "No content"),
-        ("Sem conteÃºdo", "No content"),
+        ("Sem conteúdo", "No content"),
         (
             "Não foi possível remover o timeout; confirma as permissões.",
             "Unable to remove the timeout; check permissions.",
@@ -8697,7 +8696,7 @@ fn english_bot_text(input: &str) -> String {
         ),
         ("Giveaway #", "Giveaway #"),
         (
-            "Giveaway nÃ£o encontrado, ainda ativo ou sem participantes.",
+            "Giveaway não encontrado, ainda ativo ou sem participantes.",
             "Giveaway not found, still active or without participants.",
         ),
         (
@@ -8880,11 +8879,11 @@ fn english_bot_text(input: &str) -> String {
         ("ativado", "enabled"),
         ("ativada", "enabled"),
         ("segurança", "security"),
-        ("seguranÃ§a", "security"),
+        ("segurança", "security"),
         ("observação", "monitoring"),
-        ("observaÃ§Ã£o", "monitoring"),
+        ("observação", "monitoring"),
         ("contenção", "containment"),
-        ("contenÃ§Ã£o", "containment"),
+        ("contenção", "containment"),
         ("Ativa-as no painel.", "Enable them in the dashboard."),
         ("Ativa-os no painel.", "Enable them in the dashboard."),
         ("Ativa-as", "Enable them"),
@@ -8899,7 +8898,7 @@ fn english_bot_text(input: &str) -> String {
         ("cargo", "role"),
         ("cargos", "roles"),
         ("permissões", "permissions"),
-        ("permissÃµes", "permissions"),
+        ("permissões", "permissions"),
         ("hierarquia", "hierarchy"),
         ("canal", "channel"),
         ("canais", "channels"),
@@ -8908,14 +8907,14 @@ fn english_bot_text(input: &str) -> String {
         ("utilizador", "user"),
         ("utilizadores", "users"),
         ("razão", "reason"),
-        ("razÃ£o", "reason"),
+        ("razão", "reason"),
         ("equipa", "team"),
         ("histórico", "history"),
-        ("histÃ³rico", "history"),
+        ("histórico", "history"),
         ("resposta", "response"),
         ("respostas", "responses"),
         ("não", "not"),
-        ("nÃ£o", "not"),
+        ("não", "not"),
     ];
     REPLACEMENTS
         .iter()
