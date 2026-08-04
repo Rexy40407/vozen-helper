@@ -75,6 +75,119 @@ pub struct RssFeed {
     pub latest: Option<RssItem>,
 }
 
+/// Client for the public Bluesky AppView API. Alerts only read public posts;
+/// no account token is required. The runtime polls the author's feed with a
+/// bounded page size and stores the last URI for idempotent delivery.
+#[derive(Clone)]
+pub struct BlueskyClient {
+    http: Client,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BlueskyPost {
+    pub uri: String,
+    pub handle: String,
+    pub text: String,
+    pub created_at: String,
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlueskyAuthorFeedResponse {
+    #[serde(default)]
+    feed: Vec<BlueskyFeedItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlueskyFeedItem {
+    post: BlueskyPostPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlueskyPostPayload {
+    uri: String,
+    author: BlueskyAuthor,
+    record: BlueskyRecord,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlueskyAuthor {
+    handle: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlueskyRecord {
+    #[serde(default)]
+    text: String,
+    #[serde(rename = "createdAt", default)]
+    created_at: String,
+}
+
+impl BlueskyClient {
+    pub fn new() -> Self {
+        Self {
+            http: Client::builder()
+                .timeout(Duration::from_secs(10))
+                .user_agent("Vozen-Helper/1.0 (+https://vozen.org)")
+                .build()
+                .expect("valid Bluesky HTTP client"),
+        }
+    }
+
+    pub async fn latest_post(&self, raw_handle: &str) -> anyhow::Result<Option<BlueskyPost>> {
+        let handle = normalize_bluesky_handle(raw_handle)?;
+        let response = self
+            .http
+            .get("https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed")
+            .query(&[("actor", handle.as_str()), ("limit", "10")])
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!("bluesky_api_error:{}", response.status());
+        }
+        let payload: BlueskyAuthorFeedResponse = response.json().await?;
+        Ok(payload.feed.into_iter().next().map(|item| {
+            let post = item.post;
+            let rkey = post.uri.rsplit('/').next().unwrap_or_default();
+            let url = format!(
+                "https://bsky.app/profile/{}/post/{}",
+                post.author.handle, rkey
+            );
+            BlueskyPost {
+                uri: post.uri,
+                handle: post.author.handle,
+                text: post.record.text,
+                created_at: post.record.created_at,
+                url,
+            }
+        }))
+    }
+}
+
+impl Default for BlueskyClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn normalize_bluesky_handle(raw_handle: &str) -> anyhow::Result<String> {
+    let handle = raw_handle
+        .trim()
+        .trim_start_matches('@')
+        .to_ascii_lowercase();
+    if !(3..=253).contains(&handle.len())
+        || handle.starts_with('.')
+        || handle.ends_with('.')
+        || handle.contains("..")
+        || !handle
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        anyhow::bail!("invalid_bluesky_handle");
+    }
+    Ok(handle)
+}
+
 /// Official Twitch Helix/EventSub client. Credentials and the EventSub
 /// signing secret are always read from the server environment.
 #[derive(Clone)]
@@ -856,6 +969,18 @@ mod tests {
         assert!(valid_channel_id("UC_abc-123"));
         assert!(!valid_channel_id("https://youtube.com/@vozen"));
         assert!(!valid_channel_id(""));
+    }
+
+    #[test]
+    fn bluesky_handles_are_normalized_and_bounded() {
+        assert_eq!(
+            normalize_bluesky_handle("  @Vozen.org ").unwrap(),
+            "vozen.org"
+        );
+        assert!(normalize_bluesky_handle("https://bsky.app/profile/vozen.org").is_err());
+        assert!(normalize_bluesky_handle(".invalid").is_err());
+        assert!(normalize_bluesky_handle("invalid..handle").is_err());
+        assert!(normalize_bluesky_handle(&"a".repeat(254)).is_err());
     }
 
     #[test]

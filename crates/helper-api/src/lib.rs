@@ -21,10 +21,11 @@ use helper_core::{
     evaluate_scam, feature_adapter, feature_is_configurable, feature_maturity, is_known_feature,
     quota_limit, scam_policy_from_json,
 };
-use helper_modules::{EntitlementClient, RssClient, TwitchClient, YouTubeClient};
+use helper_modules::{BlueskyClient, EntitlementClient, RssClient, TwitchClient, YouTubeClient};
 use helper_store::{
-    RssSubscriptionRecord, RssSubscriptionWrite, Store, TwitchSubscriptionRecord,
-    TwitchSubscriptionWrite, YouTubeSubscriptionRecord, YouTubeSubscriptionWrite,
+    BlueskySubscriptionRecord, BlueskySubscriptionWrite, RssSubscriptionRecord,
+    RssSubscriptionWrite, Store, TwitchSubscriptionRecord, TwitchSubscriptionWrite,
+    YouTubeSubscriptionRecord, YouTubeSubscriptionWrite,
 };
 use hmac::{Hmac, Mac};
 use reqwest::Client;
@@ -56,6 +57,7 @@ pub struct ApiState {
     pub youtube: Option<YouTubeClient>,
     pub rss: Option<RssClient>,
     pub twitch: Option<TwitchClient>,
+    pub bluesky: Option<BlueskyClient>,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,6 +98,14 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/api/config/rss/{id}",
             put(update_rss_subscription).delete(delete_rss_subscription),
+        )
+        .route(
+            "/api/config/bluesky",
+            get(bluesky_subscriptions).post(create_bluesky_subscription),
+        )
+        .route(
+            "/api/config/bluesky/{id}",
+            put(update_bluesky_subscription).delete(delete_bluesky_subscription),
         )
         .route("/api/providers/twitch/health", get(twitch_health))
         .route(
@@ -899,6 +909,83 @@ fn rss_record_json(record: RssSubscriptionRecord) -> serde_json::Value {
     })
 }
 
+async fn prepare_bluesky_feature(
+    state: &ApiState,
+    claims: &SessionClaims,
+    config: &serde_json::Value,
+    enabled: bool,
+) -> Result<Option<BlueskySubscriptionWrite>, (StatusCode, Json<ApiError>)> {
+    let existing = state
+        .store
+        .bluesky_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .next();
+    if !enabled {
+        return Ok(existing.map(|subscription| BlueskySubscriptionWrite {
+            source_handle: subscription.source_handle,
+            target_channel_id: subscription.target_channel_id,
+            message_template: subscription.message_template,
+            mention: subscription.mention,
+            enabled: false,
+            interval_seconds: subscription.interval_seconds,
+            created_by: subscription.created_by,
+        }));
+    }
+    let input = BlueskySubscriptionInput {
+        source_handle: config
+            .get("sourceHandle")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        target_channel_id: config
+            .get("targetChannelId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        message_template: config
+            .get("messageTemplate")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        mention: config
+            .get("mention")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        interval_seconds: config
+            .get("intervalSeconds")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(300),
+        enabled: true,
+    };
+    let (source_handle, target, template, mention, _, interval) =
+        validate_bluesky_subscription(input)
+            .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let client = state
+        .bluesky
+        .as_ref()
+        .expect("Bluesky client is always configured");
+    if client
+        .latest_post(&source_handle)
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "bluesky_provider_unavailable"))?
+        .is_none()
+    {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "bluesky_profile_not_found",
+        ));
+    }
+    Ok(Some(BlueskySubscriptionWrite {
+        source_handle,
+        target_channel_id: target,
+        message_template: template,
+        mention,
+        enabled: true,
+        interval_seconds: interval,
+        created_by: claims.user_id.clone(),
+    }))
+}
+
 async fn prepare_rss_feature(
     state: &ApiState,
     claims: &SessionClaims,
@@ -1102,6 +1189,230 @@ async fn delete_rss_subscription(
         return Err(client_error(
             StatusCode::NOT_FOUND,
             "rss_subscription_not_found",
+        ));
+    }
+    Ok(Json(serde_json::json!({"deleted": true, "id": id})))
+}
+
+#[derive(Debug, Deserialize)]
+struct BlueskySubscriptionInput {
+    #[serde(rename = "sourceHandle")]
+    source_handle: String,
+    #[serde(rename = "targetChannelId")]
+    target_channel_id: String,
+    #[serde(default, rename = "messageTemplate")]
+    message_template: Option<String>,
+    #[serde(default)]
+    mention: Option<String>,
+    #[serde(default = "default_bluesky_interval")]
+    interval_seconds: i64,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn default_bluesky_interval() -> i64 {
+    300
+}
+
+fn validate_bluesky_subscription(
+    input: BlueskySubscriptionInput,
+) -> Result<(String, String, String, String, bool, i64), &'static str> {
+    let handle = input
+        .source_handle
+        .trim()
+        .trim_start_matches('@')
+        .to_ascii_lowercase();
+    if !(3..=253).contains(&handle.len())
+        || !handle
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        || handle.starts_with('.')
+        || handle.ends_with('.')
+        || handle.contains("..")
+    {
+        return Err("invalid_bluesky_handle");
+    }
+    let target = input.target_channel_id.trim().to_string();
+    if target.len() < 15 || target.len() > 22 || !target.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("invalid_discord_channel_id");
+    }
+    let template = input
+        .message_template
+        .unwrap_or_else(|| "New Bluesky post from {handle}: **{text}**\n{url}".into());
+    if template.trim().is_empty() || template.chars().count() > 1_800 {
+        return Err("invalid_bluesky_template");
+    }
+    let mention = input.mention.unwrap_or_default().trim().to_string();
+    if mention.chars().count() > 100
+        || (!mention.is_empty()
+            && mention != "@everyone"
+            && mention != "@here"
+            && !(mention.starts_with("<@&")
+                && mention.ends_with('>')
+                && mention[3..mention.len() - 1]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit())))
+    {
+        return Err("invalid_bluesky_mention");
+    }
+    if !(300..=86_400).contains(&input.interval_seconds) {
+        return Err("invalid_bluesky_interval");
+    }
+    Ok((
+        handle,
+        target,
+        template,
+        mention,
+        input.enabled,
+        input.interval_seconds,
+    ))
+}
+
+fn bluesky_record_json(record: BlueskySubscriptionRecord) -> serde_json::Value {
+    serde_json::json!({
+        "id": record.id,
+        "guildId": record.guild_id,
+        "sourceHandle": record.source_handle,
+        "targetChannelId": record.target_channel_id,
+        "messageTemplate": record.message_template,
+        "mention": record.mention,
+        "enabled": record.enabled,
+        "intervalSeconds": record.interval_seconds,
+        "lastPostUri": record.last_post_uri,
+        "nextPollAt": record.next_poll_at,
+        "failureCount": record.failure_count,
+        "lastError": record.last_error,
+        "createdBy": record.created_by,
+        "createdAt": record.created_at,
+        "updatedAt": record.updated_at,
+    })
+}
+
+async fn bluesky_subscriptions(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let subscriptions = state
+        .store
+        .bluesky_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .map(bluesky_record_json)
+        .collect::<Vec<_>>();
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "subscriptions": subscriptions,
+        "provider": "bluesky"
+    })))
+}
+
+async fn create_bluesky_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(input): Json<BlueskySubscriptionInput>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let (handle, target, template, mention, enabled, interval) =
+        validate_bluesky_subscription(input)
+            .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let client = state
+        .bluesky
+        .as_ref()
+        .expect("Bluesky client is always configured");
+    if client
+        .latest_post(&handle)
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "bluesky_provider_unavailable"))?
+        .is_none()
+    {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "bluesky_profile_not_found",
+        ));
+    }
+    let record = state
+        .store
+        .create_bluesky_subscription(
+            &claims.guild_id,
+            &handle,
+            &target,
+            &template,
+            &mention,
+            enabled,
+            interval,
+            &claims.user_id,
+        )
+        .map_err(|error| {
+            if error.to_string() == "bluesky_subscription_exists" {
+                client_error(StatusCode::CONFLICT, "bluesky_subscription_exists")
+            } else {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
+            }
+        })?;
+    Ok((StatusCode::CREATED, Json(bluesky_record_json(record))))
+}
+
+async fn update_bluesky_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(input): Json<BlueskySubscriptionInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let (handle, target, template, mention, enabled, interval) =
+        validate_bluesky_subscription(input)
+            .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let client = state
+        .bluesky
+        .as_ref()
+        .expect("Bluesky client is always configured");
+    client
+        .latest_post(&handle)
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "bluesky_provider_unavailable"))?;
+    let record = state
+        .store
+        .update_bluesky_subscription(
+            &claims.guild_id,
+            id,
+            &handle,
+            &target,
+            &template,
+            &mention,
+            enabled,
+            interval,
+        )
+        .map_err(|error| {
+            if error.to_string().contains("UNIQUE") {
+                client_error(StatusCode::CONFLICT, "bluesky_subscription_exists")
+            } else {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
+            }
+        })?;
+    let Some(record) = record else {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "bluesky_subscription_not_found",
+        ));
+    };
+    Ok(Json(bluesky_record_json(record)))
+}
+
+async fn delete_bluesky_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let deleted = state
+        .store
+        .delete_bluesky_subscription(&claims.guild_id, id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    if !deleted {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "bluesky_subscription_not_found",
         ));
     }
     Ok(Json(serde_json::json!({"deleted": true, "id": id})))
@@ -4150,9 +4461,6 @@ fn lifecycle_issues(key: &str, maturity: FeatureMaturity) -> Vec<ValidationIssue
         "social.kick" => {
             "Blocked until an approved Kick developer app and official webhook/API access are available."
         }
-        "social.bluesky" => {
-            "Blocked until the persistent Bluesky stream consumer, cursor recovery and duplicate protection are enabled."
-        }
         "growth.monetization" => {
             "Blocked until Stripe Connect onboarding, KYC, tax, refunds and chargeback support are approved."
         }
@@ -4464,6 +4772,11 @@ async fn update_feature_detail(
     } else {
         None
     };
+    let bluesky_subscription = if key == "social.bluesky" {
+        prepare_bluesky_feature(&state, &claims, &update.config, update.enabled).await?
+    } else {
+        None
+    };
     let enabled_value = if update.enabled { "true" } else { "false" };
     let mut projections = vec![
         (feature_key(&key), enabled_value.to_string()),
@@ -4506,6 +4819,17 @@ async fn update_feature_detail(
             &claims.user_id,
             &projections,
             twitch_subscription.as_ref(),
+        )
+    } else if key == "social.bluesky" {
+        state.store.publish_bluesky_feature_setting(
+            &claims.guild_id,
+            &key,
+            update.enabled,
+            &config_json,
+            update.expected_revision,
+            &claims.user_id,
+            &projections,
+            bluesky_subscription.as_ref(),
         )
     } else {
         state.store.publish_feature_setting(
@@ -6121,6 +6445,7 @@ mod tests {
             youtube: None,
             rss: None,
             twitch: None,
+            bluesky: Some(BlueskyClient::new()),
         }
     }
 

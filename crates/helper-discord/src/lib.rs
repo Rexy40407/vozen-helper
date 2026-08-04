@@ -8,10 +8,12 @@ use helper_core::{
     scam_policy_from_json,
 };
 use helper_modules::{
-    EntitlementClient, RssClient, RssItem, TwitchClient, YouTubeClient, YouTubeVideo,
+    BlueskyClient, BlueskyPost, EntitlementClient, RssClient, RssItem, TwitchClient, YouTubeClient,
+    YouTubeVideo,
 };
 use helper_store::{
-    RssSubscriptionRecord, Store, TwitchSubscriptionRecord, YouTubeSubscriptionRecord,
+    BlueskySubscriptionRecord, RssSubscriptionRecord, Store, TwitchSubscriptionRecord,
+    YouTubeSubscriptionRecord,
 };
 use rand::seq::SliceRandom;
 use reqwest::Client as HttpClient;
@@ -155,6 +157,7 @@ struct Handler {
     youtube: Option<YouTubeClient>,
     rss: Option<RssClient>,
     twitch: Option<TwitchClient>,
+    bluesky: Option<BlueskyClient>,
 }
 
 #[async_trait]
@@ -235,6 +238,13 @@ impl EventHandler for Handler {
                 let http = ctx.http.clone();
                 tokio::spawn(async move {
                     run_twitch_worker(http, store).await;
+                });
+            }
+            if let Some(bluesky) = self.bluesky.clone() {
+                let store = self.store.clone();
+                let http = ctx.http.clone();
+                tokio::spawn(async move {
+                    run_bluesky_worker(http, store, bluesky).await;
                 });
             }
         }
@@ -2747,6 +2757,7 @@ pub async fn run(config: &Config) -> Result<()> {
             youtube: YouTubeClient::from_env(),
             rss: Some(RssClient::new()),
             twitch: TwitchClient::from_env(),
+            bluesky: Some(BlueskyClient::new()),
         })
         .application_id(config.discord_application_id.into())
         .await?;
@@ -2980,6 +2991,108 @@ fn format_rss_message(template: &str, mention: &str, item: &RssItem) -> String {
         .replace("{url}", &item.url)
         .replace("{published_at}", &item.published_at)
         .replace("{description}", &item.description);
+    let rendered = if mention.is_empty() {
+        rendered
+    } else {
+        format!("{mention} {rendered}")
+    };
+    rendered.chars().take(2_000).collect()
+}
+
+async fn run_bluesky_worker(http: Arc<serenity::http::Http>, store: Store, bluesky: BlueskyClient) {
+    let mut interval = tokio::time::interval(Duration::from_secs(15));
+    loop {
+        interval.tick().await;
+        let due = match store.due_bluesky_subscriptions(Utc::now().timestamp_millis(), 25) {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::error!(%error, "bluesky worker could not load subscriptions");
+                continue;
+            }
+        };
+        for subscription in due {
+            if !feature_enabled(&store, &subscription.guild_id, "social.bluesky", None) {
+                let next = Utc::now().timestamp_millis() + subscription.interval_seconds * 1_000;
+                let _ = store.update_bluesky_poll(
+                    subscription.id,
+                    subscription.last_post_uri.as_deref(),
+                    next,
+                    subscription.failure_count,
+                    Some("feature_disabled"),
+                );
+                continue;
+            }
+            if let Err(error) =
+                process_bluesky_subscription(&http, &store, &bluesky, &subscription).await
+            {
+                tracing::warn!(%error, subscription_id = subscription.id, "bluesky notification failed");
+            }
+        }
+    }
+}
+
+async fn process_bluesky_subscription(
+    http: &serenity::http::Http,
+    store: &Store,
+    bluesky: &BlueskyClient,
+    subscription: &BlueskySubscriptionRecord,
+) -> Result<()> {
+    let now = Utc::now().timestamp_millis();
+    let interval_ms = subscription.interval_seconds.clamp(300, 86_400) * 1_000;
+    let next = || now + interval_ms;
+    let latest = match bluesky.latest_post(&subscription.source_handle).await {
+        Ok(post) => post,
+        Err(error) => {
+            let failures = subscription.failure_count.saturating_add(1).min(8);
+            let backoff = (subscription.interval_seconds * (1_i64 << failures.min(4))).min(3_600);
+            store.update_bluesky_poll(
+                subscription.id,
+                subscription.last_post_uri.as_deref(),
+                now + backoff * 1_000,
+                failures,
+                Some("bluesky_provider_failed"),
+            )?;
+            return Err(error);
+        }
+    };
+    let Some(post) = latest else {
+        store.update_bluesky_poll(
+            subscription.id,
+            subscription.last_post_uri.as_deref(),
+            next(),
+            0,
+            None,
+        )?;
+        return Ok(());
+    };
+    if subscription.last_post_uri.is_none() {
+        // Establish a baseline on first poll to avoid a burst of historical
+        // posts when a profile alert is enabled.
+        store.update_bluesky_poll(subscription.id, Some(&post.uri), next(), 0, None)?;
+        return Ok(());
+    }
+    if subscription.last_post_uri.as_deref() == Some(post.uri.as_str()) {
+        store.update_bluesky_poll(subscription.id, Some(&post.uri), next(), 0, None)?;
+        return Ok(());
+    }
+    let content =
+        format_bluesky_message(&subscription.message_template, &subscription.mention, &post);
+    let channel_id = subscription
+        .target_channel_id
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("invalid_discord_channel_id"))?;
+    ChannelId::new(channel_id).say(http, content).await?;
+    store.update_bluesky_poll(subscription.id, Some(&post.uri), next(), 0, None)?;
+    Ok(())
+}
+
+fn format_bluesky_message(template: &str, mention: &str, post: &BlueskyPost) -> String {
+    let rendered = template
+        .replace("{handle}", &post.handle)
+        .replace("{text}", &post.text)
+        .replace("{url}", &post.url)
+        .replace("{created_at}", &post.created_at)
+        .replace("{uri}", &post.uri);
     let rendered = if mention.is_empty() {
         rendered
     } else {

@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use helper_api::{ApiState, serve as serve_api};
 use helper_core::Config;
-use helper_modules::{EntitlementClient, RssClient, TwitchClient, YouTubeClient};
+use helper_modules::{BlueskyClient, EntitlementClient, RssClient, TwitchClient, YouTubeClient};
 use helper_store::Store;
 use std::time::Instant;
 use tokio::{select, signal};
@@ -83,6 +83,7 @@ async fn main() -> Result<()> {
                     youtube: YouTubeClient::from_env(),
                     rss: Some(RssClient::new()),
                     twitch: TwitchClient::from_env(),
+                    bluesky: Some(BlueskyClient::new()),
                 },
             );
             let discord = async {

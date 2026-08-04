@@ -139,6 +139,36 @@ pub struct RssSubscriptionWrite {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct BlueskySubscriptionRecord {
+    pub id: i64,
+    pub guild_id: String,
+    pub source_handle: String,
+    pub target_channel_id: String,
+    pub message_template: String,
+    pub mention: String,
+    pub enabled: bool,
+    pub interval_seconds: i64,
+    pub last_post_uri: Option<String>,
+    pub next_poll_at: i64,
+    pub failure_count: i64,
+    pub last_error: Option<String>,
+    pub created_by: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlueskySubscriptionWrite {
+    pub source_handle: String,
+    pub target_channel_id: String,
+    pub message_template: String,
+    pub mention: String,
+    pub enabled: bool,
+    pub interval_seconds: i64,
+    pub created_by: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TwitchSubscriptionRecord {
     pub id: i64,
     pub guild_id: String,
@@ -204,6 +234,28 @@ fn rss_subscription_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RssSub
         enabled: row.get::<_, i64>(6)? != 0,
         interval_seconds: row.get(7)?,
         last_item_id: row.get(8)?,
+        next_poll_at: row.get(9)?,
+        failure_count: row.get(10)?,
+        last_error: row.get(11)?,
+        created_by: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+    })
+}
+
+fn bluesky_subscription_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<BlueskySubscriptionRecord> {
+    Ok(BlueskySubscriptionRecord {
+        id: row.get(0)?,
+        guild_id: row.get(1)?,
+        source_handle: row.get(2)?,
+        target_channel_id: row.get(3)?,
+        message_template: row.get(4)?,
+        mention: row.get(5)?,
+        enabled: row.get::<_, i64>(6)? != 0,
+        interval_seconds: row.get(7)?,
+        last_post_uri: row.get(8)?,
         next_poll_at: row.get(9)?,
         failure_count: row.get(10)?,
         last_error: row.get(11)?,
@@ -476,6 +528,7 @@ impl Store {
         }
         conn.execute_batch("CREATE TABLE IF NOT EXISTS youtube_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, source_channel_id TEXT NOT NULL, target_channel_id TEXT NOT NULL, message_template TEXT NOT NULL DEFAULT 'New video from {channel}: **{title}**\\n{url}', mention TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 300, last_video_id TEXT, next_poll_at INTEGER NOT NULL, failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(guild_id,source_channel_id,target_channel_id)); CREATE INDEX IF NOT EXISTS idx_youtube_due ON youtube_subscriptions(enabled,next_poll_at); CREATE INDEX IF NOT EXISTS idx_youtube_guild ON youtube_subscriptions(guild_id,updated_at DESC);")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS rss_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, feed_url TEXT NOT NULL, target_channel_id TEXT NOT NULL, message_template TEXT NOT NULL DEFAULT 'New post from {feed}: **{title}**\\n{url}', mention TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 300, last_item_id TEXT, next_poll_at INTEGER NOT NULL, failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(guild_id,feed_url,target_channel_id)); CREATE INDEX IF NOT EXISTS idx_rss_due ON rss_subscriptions(enabled,next_poll_at); CREATE INDEX IF NOT EXISTS idx_rss_guild ON rss_subscriptions(guild_id,updated_at DESC);")?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS bluesky_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, source_handle TEXT NOT NULL, target_channel_id TEXT NOT NULL, message_template TEXT NOT NULL DEFAULT 'New post from {handle}: **{text}**\\n{url}', mention TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 300, last_post_uri TEXT, next_poll_at INTEGER NOT NULL, failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(guild_id,source_handle,target_channel_id)); CREATE INDEX IF NOT EXISTS idx_bluesky_due ON bluesky_subscriptions(enabled,next_poll_at); CREATE INDEX IF NOT EXISTS idx_bluesky_guild ON bluesky_subscriptions(guild_id,updated_at DESC);")?;
         Ok(())
     }
 
@@ -1441,6 +1494,95 @@ impl Store {
         })
     }
 
+    /// Publishes the Bluesky alert feature and its polling subscription in one
+    /// transaction so a revision can never report enabled while the worker is
+    /// missing its source configuration.
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish_bluesky_feature_setting(
+        &self,
+        guild_id: &str,
+        key: &str,
+        enabled: bool,
+        config_json: &str,
+        expected_revision: Option<u64>,
+        updated_by: &str,
+        projections: &[(String, String)],
+        subscription: Option<&BlueskySubscriptionWrite>,
+    ) -> Result<FeatureSettingRecord> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let current: Option<(i64, i64, String)> = tx
+            .query_row(
+                "SELECT revision,enabled,config_json FROM feature_settings WHERE guild_id=?1 AND key=?2",
+                params![guild_id, key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let current_revision = current
+            .as_ref()
+            .and_then(|item| u64::try_from(item.0).ok())
+            .unwrap_or(0);
+        if expected_revision.is_some_and(|value| value != current_revision) {
+            bail!("feature_revision_conflict:{current_revision}");
+        }
+        let next_revision = current_revision.saturating_add(1);
+        let now = Utc::now().timestamp_millis();
+        tx.execute(
+            "INSERT INTO feature_settings(guild_id,key,enabled,config_json,revision,updated_at,updated_by) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(guild_id,key) DO UPDATE SET enabled=excluded.enabled,config_json=excluded.config_json,revision=excluded.revision,updated_at=excluded.updated_at,updated_by=excluded.updated_by",
+            params![guild_id, key, if enabled { 1_i64 } else { 0_i64 }, config_json, i64::try_from(next_revision).unwrap_or(i64::MAX), now, updated_by],
+        )?;
+        tx.execute(
+            "INSERT INTO feature_revisions(guild_id,key,revision,enabled,config_json,updated_at,updated_by) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![guild_id, key, i64::try_from(next_revision).unwrap_or(i64::MAX), if enabled { 1_i64 } else { 0_i64 }, config_json, now, updated_by],
+        )?;
+        for (projection_key, projection_value) in projections {
+            tx.execute(
+                "INSERT INTO settings(guild_id,key,value,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(guild_id,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                params![guild_id, projection_key, projection_value, now],
+            )?;
+        }
+        if let Some(subscription) = subscription {
+            let existing_id: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM bluesky_subscriptions WHERE guild_id=?1 ORDER BY updated_at DESC, id DESC LIMIT 1",
+                    [guild_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(id) = existing_id {
+                tx.execute(
+                    "UPDATE bluesky_subscriptions SET source_handle=?2,target_channel_id=?3,message_template=?4,mention=?5,enabled=?6,interval_seconds=?7,last_post_uri=NULL,next_poll_at=?8,failure_count=0,last_error=NULL,updated_at=?8 WHERE guild_id=?1 AND id=?9",
+                    params![guild_id, subscription.source_handle, subscription.target_channel_id, subscription.message_template, subscription.mention, if subscription.enabled { 1_i64 } else { 0_i64 }, subscription.interval_seconds, now, id],
+                )?;
+            } else if subscription.enabled {
+                tx.execute(
+                    "INSERT INTO bluesky_subscriptions(guild_id,source_handle,target_channel_id,message_template,mention,enabled,interval_seconds,next_poll_at,created_by,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,1,?6,?7,?8,?7,?7)",
+                    params![guild_id, subscription.source_handle, subscription.target_channel_id, subscription.message_template, subscription.mention, subscription.interval_seconds, now, subscription.created_by],
+                )?;
+            }
+        }
+        let correlation_id = Uuid::new_v4().to_string();
+        let before_json = current
+            .as_ref()
+            .map(|item| serde_json::json!({"enabled": item.1 != 0, "config": item.2, "revision": item.0}))
+            .unwrap_or_else(|| serde_json::json!({}));
+        let after_json = serde_json::json!({"enabled": enabled, "config": serde_json::from_str::<serde_json::Value>(config_json).unwrap_or_else(|_| serde_json::json!({})), "revision": next_revision});
+        tx.execute(
+            "INSERT INTO audit_events(correlation_id,guild_id,actor_id,action,reason,before_json,after_json,outcome,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![correlation_id, guild_id, updated_by, "feature.publish", key, before_json.to_string(), after_json.to_string(), "published", now],
+        )?;
+        tx.commit()?;
+        Ok(FeatureSettingRecord {
+            guild_id: guild_id.to_string(),
+            key: key.to_string(),
+            enabled,
+            config_json: config_json.to_string(),
+            revision: next_revision,
+            updated_at: now,
+            updated_by: updated_by.to_string(),
+        })
+    }
+
     pub fn youtube_subscriptions(&self, guild_id: &str) -> Result<Vec<YouTubeSubscriptionRecord>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut stmt = conn.prepare("SELECT id,guild_id,source_channel_id,target_channel_id,message_template,mention,enabled,interval_seconds,last_video_id,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM youtube_subscriptions WHERE guild_id=?1 ORDER BY updated_at DESC, id DESC")?;
@@ -1786,6 +1928,86 @@ impl Store {
     ) -> Result<()> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute("UPDATE rss_subscriptions SET last_item_id=?2,next_poll_at=?3,failure_count=?4,last_error=?5,updated_at=?3 WHERE id=?1", params![id, last_item_id, next_poll_at, failure_count, last_error])?;
+        Ok(())
+    }
+
+    pub fn bluesky_subscriptions(&self, guild_id: &str) -> Result<Vec<BlueskySubscriptionRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id,guild_id,source_handle,target_channel_id,message_template,mention,enabled,interval_seconds,last_post_uri,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM bluesky_subscriptions WHERE guild_id=?1 ORDER BY updated_at DESC, id DESC")?;
+        let rows = stmt.query_map([guild_id], bluesky_subscription_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_bluesky_subscription(
+        &self,
+        guild_id: &str,
+        source_handle: &str,
+        target_channel_id: &str,
+        message_template: &str,
+        mention: &str,
+        enabled: bool,
+        interval_seconds: i64,
+        created_by: &str,
+    ) -> Result<BlueskySubscriptionRecord> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("INSERT INTO bluesky_subscriptions(guild_id,source_handle,target_channel_id,message_template,mention,enabled,interval_seconds,next_poll_at,created_by,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?8,?8)", params![guild_id, source_handle, target_channel_id, message_template, mention, if enabled { 1_i64 } else { 0_i64 }, interval_seconds, now, created_by])
+            .map_err(|error| if error.to_string().contains("UNIQUE") { anyhow!("bluesky_subscription_exists") } else { error.into() })?;
+        let id = conn.last_insert_rowid();
+        conn.query_row("SELECT id,guild_id,source_handle,target_channel_id,message_template,mention,enabled,interval_seconds,last_post_uri,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM bluesky_subscriptions WHERE id=?1", [id], bluesky_subscription_from_row).map_err(Into::into)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_bluesky_subscription(
+        &self,
+        guild_id: &str,
+        id: i64,
+        source_handle: &str,
+        target_channel_id: &str,
+        message_template: &str,
+        mention: &str,
+        enabled: bool,
+        interval_seconds: i64,
+    ) -> Result<Option<BlueskySubscriptionRecord>> {
+        let now = Utc::now().timestamp_millis();
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("UPDATE bluesky_subscriptions SET source_handle=?3,target_channel_id=?4,message_template=?5,mention=?6,enabled=?7,interval_seconds=?8,updated_at=?9 WHERE guild_id=?1 AND id=?2", params![guild_id, id, source_handle, target_channel_id, message_template, mention, if enabled { 1_i64 } else { 0_i64 }, interval_seconds, now])?;
+        conn.query_row("SELECT id,guild_id,source_handle,target_channel_id,message_template,mention,enabled,interval_seconds,last_post_uri,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM bluesky_subscriptions WHERE guild_id=?1 AND id=?2", params![guild_id, id], bluesky_subscription_from_row).optional()?.map_or(Ok(None), |record| Ok(Some(record)))
+    }
+
+    pub fn delete_bluesky_subscription(&self, guild_id: &str, id: i64) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "DELETE FROM bluesky_subscriptions WHERE guild_id=?1 AND id=?2",
+            params![guild_id, id],
+        )? > 0)
+    }
+
+    pub fn due_bluesky_subscriptions(
+        &self,
+        now_ms: i64,
+        limit: u32,
+    ) -> Result<Vec<BlueskySubscriptionRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id,guild_id,source_handle,target_channel_id,message_template,mention,enabled,interval_seconds,last_post_uri,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM bluesky_subscriptions WHERE enabled=1 AND next_poll_at<=?1 ORDER BY next_poll_at ASC LIMIT ?2")?;
+        let rows = stmt.query_map(
+            params![now_ms, i64::from(limit.min(100))],
+            bluesky_subscription_from_row,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn update_bluesky_poll(
+        &self,
+        id: i64,
+        last_post_uri: Option<&str>,
+        next_poll_at: i64,
+        failure_count: i64,
+        last_error: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute("UPDATE bluesky_subscriptions SET last_post_uri=?2,next_poll_at=?3,failure_count=?4,last_error=?5,updated_at=?3 WHERE id=?1", params![id, last_post_uri, next_poll_at, failure_count, last_error])?;
         Ok(())
     }
 
@@ -3669,6 +3891,68 @@ mod tests {
             .unwrap();
         assert_eq!(second.revision, 2);
         assert!(!store.youtube_subscriptions("guild-a").unwrap()[0].enabled);
+    }
+
+    #[test]
+    fn bluesky_subscription_round_trip_and_poll_state_are_guild_scoped() {
+        let store = Store::open(":memory:").unwrap();
+        let first = store
+            .create_bluesky_subscription(
+                "guild-a",
+                "vozen.org",
+                "123456789012345678",
+                "New post: {text} {url}",
+                "",
+                true,
+                300,
+                "owner-a",
+            )
+            .unwrap();
+        assert_eq!(first.source_handle, "vozen.org");
+        assert!(store.bluesky_subscriptions("guild-b").unwrap().is_empty());
+        assert_eq!(store.bluesky_subscriptions("guild-a").unwrap().len(), 1);
+
+        store
+            .update_bluesky_poll(
+                first.id,
+                Some("at://did:plc:test/app.bsky.feed.post/abc"),
+                0,
+                0,
+                None,
+            )
+            .unwrap();
+        let due = store.due_bluesky_subscriptions(1, 10).unwrap();
+        assert_eq!(
+            due[0].last_post_uri.as_deref(),
+            Some("at://did:plc:test/app.bsky.feed.post/abc")
+        );
+
+        let updated = store
+            .update_bluesky_subscription(
+                "guild-a",
+                first.id,
+                "updates.vozen.org",
+                "987654321098765432",
+                "{handle}: {text}",
+                "@here",
+                false,
+                900,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.source_handle, "updates.vozen.org");
+        assert!(!updated.enabled);
+        assert!(
+            !store
+                .delete_bluesky_subscription("guild-b", first.id)
+                .unwrap()
+        );
+        assert!(
+            store
+                .delete_bluesky_subscription("guild-a", first.id)
+                .unwrap()
+        );
+        assert!(store.bluesky_subscriptions("guild-a").unwrap().is_empty());
     }
 
     #[test]

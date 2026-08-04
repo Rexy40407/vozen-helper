@@ -1335,6 +1335,152 @@ impl FeatureAdapter for FeedAdapter {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+pub struct BlueskyAdapter;
+
+impl BlueskyAdapter {
+    pub const KEY: &'static str = "social.bluesky";
+    pub const SOURCE: &'static str = "bluesky_public_feed_v1";
+}
+
+impl FeatureAdapter for BlueskyAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Bluesky alerts",
+                    "description": "Poll a public profile through the official Bluesky AppView API and post new updates in Discord.",
+                    "fields": [
+                        {"key":"sourceHandle","label":"Bluesky handle","kind":"text","help":"For example: vozen.org or @vozen.org."},
+                        {"key":"targetChannelId","label":"Discord channel","kind":"channel"},
+                        {"key":"intervalSeconds","label":"Polling interval (seconds)","kind":"number","min":300,"max":86400},
+                        {"key":"messageTemplate","label":"Alert message","kind":"textarea","advanced":true},
+                        {"key":"mention","label":"Optional mention","kind":"text","advanced":true}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({
+                "sourceHandle": "",
+                "targetChannelId": "",
+                "intervalSeconds": 900,
+                "messageTemplate": "New Bluesky post from {handle}: **{text}**\\n{url}",
+                "mention": ""
+            }),
+            dependencies: vec!["Bluesky public AppView API".into(), "Send Messages".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "Bluesky alert configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        let handle = object
+            .get("sourceHandle")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if handle.is_empty()
+            || handle.len() > 253
+            || !handle.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'@')
+            })
+        {
+            issues.push(ValidationIssue {
+                path: "sourceHandle".into(),
+                code: "invalid_handle".into(),
+                message: "Use a valid public Bluesky handle, such as vozen.org.".into(),
+                severity: "error".into(),
+            });
+        }
+        let target = object
+            .get("targetChannelId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if target.is_empty() || target.parse::<u64>().is_err() {
+            issues.push(ValidationIssue {
+                path: "targetChannelId".into(),
+                code: "invalid_discord_id".into(),
+                message: "Choose a real Discord channel for alerts.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(value) = object
+            .get("intervalSeconds")
+            .and_then(serde_json::Value::as_i64)
+            && !(300..=86_400).contains(&value)
+        {
+            issues.push(ValidationIssue {
+                path: "intervalSeconds".into(),
+                code: "out_of_range".into(),
+                message: "Polling interval must be between 300 and 86400 seconds.".into(),
+                severity: "error".into(),
+            });
+        }
+        if object.get("messageTemplate").is_some_and(|value| {
+            value
+                .as_str()
+                .is_none_or(|text| text.trim().is_empty() || text.chars().count() > 1_800)
+        }) {
+            issues.push(ValidationIssue {
+                path: "messageTemplate".into(),
+                code: "invalid_template".into(),
+                message: "Alert messages must be non-empty and at most 1800 characters.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(value) = object.get("mention").and_then(serde_json::Value::as_str)
+            && !value.trim().is_empty()
+            && value.trim() != "@here"
+            && value.trim() != "@everyone"
+            && !(value.trim().starts_with("<@&") && value.trim().ends_with('>'))
+        {
+            issues.push(ValidationIssue {
+                path: "mention".into(),
+                code: "invalid_mention".into(),
+                message: "Mention must be empty, @here, @everyone or a role mention.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut projection = Vec::new();
+        for (field, key) in [
+            ("sourceHandle", "social.bluesky.handle"),
+            ("targetChannelId", "social.bluesky.target_channel_id"),
+            ("messageTemplate", "social.bluesky.message_template"),
+            ("mention", "social.bluesky.mention"),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
+                projection.push((key.into(), value.into()));
+            }
+        }
+        if let Some(value) = object
+            .get("intervalSeconds")
+            .and_then(serde_json::Value::as_i64)
+        {
+            projection.push(("social.bluesky.interval_seconds".into(), value.to_string()));
+        }
+        projection
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct TicketsAdapter;
 
 impl TicketsAdapter {
@@ -4134,6 +4280,7 @@ impl FeatureAdapter for SearchAdapter {
 }
 static EMBEDS_ADAPTER: EmbedsAdapter = EmbedsAdapter;
 static ECONOMY_ADAPTER: EconomyAdapter = EconomyAdapter;
+static BLUESKY_ADAPTER: BlueskyAdapter = BlueskyAdapter;
 
 pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
     match key {
@@ -4172,6 +4319,7 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         "social.rss" => Some(&RSS_ADAPTER as &dyn FeatureAdapter),
         "social.podcasts" => Some(&PODCASTS_ADAPTER as &dyn FeatureAdapter),
         "social.twitch" => Some(&TWITCH_ADAPTER as &dyn FeatureAdapter),
+        BlueskyAdapter::KEY => Some(&BLUESKY_ADAPTER as &dyn FeatureAdapter),
         "studio.rank_card" => Some(&RANK_CARD_ADAPTER as &dyn FeatureAdapter),
         EmbedsAdapter::KEY => Some(&EMBEDS_ADAPTER as &dyn FeatureAdapter),
         EconomyAdapter::KEY => Some(&ECONOMY_ADAPTER as &dyn FeatureAdapter),
@@ -4270,7 +4418,8 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "utility.search"
         | "utility.temp_channels"
         | "community.economy"
-        | "studio.rank_card" => FeatureMaturity::Operational,
+        | "studio.rank_card"
+        | "social.bluesky" => FeatureMaturity::Operational,
         "social.youtube" | "social.rss" | "social.twitch" => FeatureMaturity::Beta,
         // Podcast feeds reuse the official RSS/Atom transport and its SSRF
         // protection, so they do not require a second provider or secret.
@@ -4282,7 +4431,6 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "social.x"
         | "social.tiktok"
         | "social.kick"
-        | "social.bluesky"
         | "growth.monetization"
         | "web3.nft_stats"
         | "web3.nft_queries"
@@ -4416,6 +4564,7 @@ mod tests {
             "community.birthdays",
             "community.economy",
             "social.podcasts",
+            "social.bluesky",
         ];
         for key in internal {
             assert!(feature_adapter(key).is_some(), "missing adapter for {key}");
@@ -4430,7 +4579,6 @@ mod tests {
             "social.x",
             "social.tiktok",
             "social.kick",
-            "social.bluesky",
             "growth.monetization",
             "web3.nft_stats",
             "web3.nft_queries",
