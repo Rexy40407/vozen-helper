@@ -188,6 +188,134 @@ pub fn normalize_bluesky_handle(raw_handle: &str) -> anyhow::Result<String> {
     Ok(handle)
 }
 
+/// Read-only CoinGecko client used by the crypto query and statistics
+/// features. The public API is used by default; an optional
+/// COINGECKO_API_KEY is sent as a demo key when the operator has one, but it
+/// is never exposed to the panel or stored in guild configuration.
+#[derive(Clone)]
+pub struct CoinGeckoClient {
+    api_key: Option<Arc<str>>,
+    http: Client,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CoinGeckoQuote {
+    pub id: String,
+    pub currency: String,
+    pub price: f64,
+    pub change_24h: Option<f64>,
+    pub last_updated_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoinGeckoPrice {
+    #[serde(flatten)]
+    values: HashMap<String, serde_json::Value>,
+}
+
+impl CoinGeckoClient {
+    pub fn new() -> Self {
+        let api_key = std::env::var("COINGECKO_API_KEY")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(Arc::<str>::from);
+        Self {
+            api_key,
+            http: Client::builder()
+                .timeout(Duration::from_secs(10))
+                .user_agent("Vozen-Helper/1.0 (+https://vozen.org)")
+                .build()
+                .expect("valid CoinGecko HTTP client"),
+        }
+    }
+
+    pub fn has_api_key(&self) -> bool {
+        self.api_key.is_some()
+    }
+
+    pub async fn quotes(
+        &self,
+        ids: &[String],
+        currency: &str,
+    ) -> anyhow::Result<Vec<CoinGeckoQuote>> {
+        if ids.is_empty() || ids.len() > 20 {
+            anyhow::bail!("invalid_coingecko_ids");
+        }
+        let normalized_ids = ids
+            .iter()
+            .map(|id| normalize_coingecko_id(id))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let currency = normalize_currency(currency)?;
+        let mut request = self
+            .http
+            .get("https://api.coingecko.com/api/v3/simple/price")
+            .query(&[
+                ("ids", normalized_ids.join(",")),
+                ("vs_currencies", currency.clone()),
+                ("include_24hr_change", "true".to_string()),
+                ("include_last_updated_at", "true".to_string()),
+            ]);
+        if let Some(api_key) = &self.api_key {
+            request = request.header("x-cg-demo-api-key", api_key.as_ref());
+        }
+        let response = request.send().await?.error_for_status()?;
+        let payload: HashMap<String, CoinGeckoPrice> = response.json().await?;
+        Ok(normalized_ids
+            .into_iter()
+            .filter_map(|id| {
+                let entry = payload.get(&id)?;
+                let price = entry.values.get(&currency)?.as_f64()?;
+                let change_24h = entry
+                    .values
+                    .get(&format!("{currency}_24h_change"))
+                    .and_then(serde_json::Value::as_f64);
+                let last_updated_at = entry
+                    .values
+                    .get("last_updated_at")
+                    .and_then(serde_json::Value::as_i64);
+                Some(CoinGeckoQuote {
+                    id,
+                    currency: currency.clone(),
+                    price,
+                    change_24h,
+                    last_updated_at,
+                })
+            })
+            .collect())
+    }
+}
+
+impl Default for CoinGeckoClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn normalize_coingecko_id(raw_id: &str) -> anyhow::Result<String> {
+    let id = raw_id.trim().to_ascii_lowercase();
+    if !(1..=64).contains(&id.len())
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || id.starts_with('-')
+        || id.ends_with('-')
+    {
+        anyhow::bail!("invalid_coingecko_id");
+    }
+    Ok(id)
+}
+
+fn normalize_currency(raw_currency: &str) -> anyhow::Result<String> {
+    let currency = raw_currency.trim().to_ascii_lowercase();
+    if !(3..=10).contains(&currency.len())
+        || !currency.bytes().all(|byte| byte.is_ascii_lowercase())
+    {
+        anyhow::bail!("invalid_currency");
+    }
+    Ok(currency)
+}
+
 /// Official Twitch Helix/EventSub client. Credentials and the EventSub
 /// signing secret are always read from the server environment.
 #[derive(Clone)]
@@ -981,6 +1109,15 @@ mod tests {
         assert!(normalize_bluesky_handle(".invalid").is_err());
         assert!(normalize_bluesky_handle("invalid..handle").is_err());
         assert!(normalize_bluesky_handle(&"a".repeat(254)).is_err());
+    }
+
+    #[test]
+    fn coingecko_ids_and_currency_are_bounded() {
+        assert_eq!(normalize_coingecko_id(" Bitcoin ").unwrap(), "bitcoin");
+        assert!(normalize_coingecko_id("bitcoin/usd").is_err());
+        assert!(normalize_coingecko_id("-bitcoin").is_err());
+        assert!(normalize_currency("EUR").is_ok());
+        assert!(normalize_currency("u$ d").is_err());
     }
 
     #[test]

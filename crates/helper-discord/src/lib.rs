@@ -8,8 +8,8 @@ use helper_core::{
     scam_policy_from_json,
 };
 use helper_modules::{
-    BlueskyClient, BlueskyPost, EntitlementClient, RssClient, RssItem, TwitchClient, YouTubeClient,
-    YouTubeVideo,
+    BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient, RssClient,
+    RssItem, TwitchClient, YouTubeClient, YouTubeVideo,
 };
 use helper_store::{
     BlueskySubscriptionRecord, RssSubscriptionRecord, Store, TwitchSubscriptionRecord,
@@ -22,9 +22,9 @@ use serenity::{
         ButtonStyle, ChannelId, ChannelType, Client, Command, CommandDataOptionValue,
         CommandInteraction, Context, CreateActionRow, CreateAttachment, CreateButton,
         CreateChannel, CreateCommand, CreateCommandOption, CreateEmbed, CreateInteractionResponse,
-        CreateInteractionResponseMessage, CreateMessage, EditChannel, EventHandler, GatewayIntents,
-        Interaction, MessageUpdateEvent, PermissionOverwrite, PermissionOverwriteType, Permissions,
-        Ready, RoleId,
+        CreateInteractionResponseMessage, CreateMessage, EditChannel, EditMessage, EventHandler,
+        GatewayIntents, Interaction, MessageId, MessageUpdateEvent, PermissionOverwrite,
+        PermissionOverwriteType, Permissions, Ready, RoleId,
     },
     async_trait,
 };
@@ -158,6 +158,7 @@ struct Handler {
     rss: Option<RssClient>,
     twitch: Option<TwitchClient>,
     bluesky: Option<BlueskyClient>,
+    coingecko: Option<CoinGeckoClient>,
 }
 
 #[async_trait]
@@ -245,6 +246,13 @@ impl EventHandler for Handler {
                 let http = ctx.http.clone();
                 tokio::spawn(async move {
                     run_bluesky_worker(http, store, bluesky).await;
+                });
+            }
+            if let Some(coingecko) = self.coingecko.clone() {
+                let store = self.store.clone();
+                let http = ctx.http.clone();
+                tokio::spawn(async move {
+                    run_crypto_stats_worker(http, store, coingecko).await;
                 });
             }
         }
@@ -645,6 +653,24 @@ impl EventHandler for Handler {
             CreateCommand::new("leaderboard").description("Show the XP leaderboard"),
             CreateCommand::new("achievements").description("Show your community achievements"),
             CreateCommand::new("serverstats").description("Show basic server statistics"),
+            CreateCommand::new("crypto")
+                .description("Show read-only CoinGecko prices")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "coins",
+                        "CoinGecko IDs separated by commas",
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "currency",
+                        "Currency such as usd or eur",
+                    )
+                    .required(false),
+                ),
             CreateCommand::new("search")
                 .description("Search an approved knowledge provider")
                 .add_option(
@@ -2758,6 +2784,7 @@ pub async fn run(config: &Config) -> Result<()> {
             rss: Some(RssClient::new()),
             twitch: TwitchClient::from_env(),
             bluesky: Some(BlueskyClient::new()),
+            coingecko: Some(CoinGeckoClient::new()),
         })
         .application_id(config.discord_application_id.into())
         .await?;
@@ -3027,6 +3054,150 @@ async fn run_bluesky_worker(http: Arc<serenity::http::Http>, store: Store, blues
             {
                 tracing::warn!(%error, subscription_id = subscription.id, "bluesky notification failed");
             }
+        }
+    }
+}
+
+fn format_crypto_quotes(quotes: &[CoinGeckoQuote]) -> String {
+    let rows = quotes.iter().take(20).map(|quote| {
+        let change = quote
+            .change_24h
+            .map(|value| format!(" ({value:+.2}% 24h)"))
+            .unwrap_or_default();
+        format!(
+            "**{}**: {:.8} {}{}",
+            quote.id,
+            quote.price,
+            quote.currency.to_ascii_uppercase(),
+            change
+        )
+    });
+    let mut content = rows.collect::<Vec<_>>().join("\n");
+    content.push_str("\n\nSource: CoinGecko. Read-only market data, not financial advice.");
+    content.chars().take(2_000).collect()
+}
+
+async fn run_crypto_stats_worker(
+    http: Arc<serenity::http::Http>,
+    store: Store,
+    coingecko: CoinGeckoClient,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        let rows = match store.enabled_feature_settings("web3.crypto_stats") {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::error!(%error, "crypto stats worker could not load settings");
+                continue;
+            }
+        };
+        let now = Utc::now().timestamp_millis();
+        for setting in rows {
+            if !feature_enabled(&store, &setting.guild_id, "web3.crypto_stats", None) {
+                continue;
+            }
+            let config =
+                serde_json::from_str::<serde_json::Value>(&setting.config_json).unwrap_or_default();
+            let Some(object) = config.as_object() else {
+                continue;
+            };
+            let interval_seconds = object
+                .get("intervalSeconds")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(900)
+                .clamp(300, 86_400);
+            let last_poll = setting_i64(
+                &store,
+                &setting.guild_id,
+                "web3_crypto_stats.last_poll_at",
+                0,
+            );
+            if last_poll > 0 && now.saturating_sub(last_poll) < interval_seconds * 1_000 {
+                continue;
+            }
+            let ids = object
+                .get("coinIds")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("bitcoin")
+                .split(',')
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .take(20)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            let currency = object
+                .get("currency")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("usd");
+            let Some(channel_id) = object
+                .get("targetChannelId")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let quotes = match coingecko.quotes(&ids, currency).await {
+                Ok(quotes) => quotes,
+                Err(error) => {
+                    tracing::warn!(%error, guild_id = %setting.guild_id, "crypto stats provider request failed");
+                    continue;
+                }
+            };
+            if quotes.is_empty() {
+                let _ = store.set_setting(
+                    &setting.guild_id,
+                    "web3_crypto_stats.last_poll_at",
+                    &now.to_string(),
+                );
+                continue;
+            }
+            let template = object
+                .get("messageTemplate")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Crypto update: {coins}");
+            let content = template
+                .replace("{coins}", &format_crypto_quotes(&quotes))
+                .replace("{currency}", &currency.to_ascii_uppercase())
+                .chars()
+                .take(2_000)
+                .collect::<String>();
+            let channel = ChannelId::new(channel_id);
+            let message_key = "web3_crypto_stats.message_id";
+            let existing = setting_string(&store, &setting.guild_id, message_key)
+                .and_then(|value| value.parse::<u64>().ok());
+            let delivered = if let Some(message_id) = existing {
+                channel
+                    .edit_message(
+                        &http,
+                        MessageId::new(message_id),
+                        EditMessage::new().content(content.clone()),
+                    )
+                    .await
+                    .is_ok()
+            } else {
+                false
+            };
+            if !delivered {
+                match channel.say(&http, content).await {
+                    Ok(message) => {
+                        let _ = store.set_setting(
+                            &setting.guild_id,
+                            message_key,
+                            &message.id.to_string(),
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, guild_id = %setting.guild_id, "crypto stats Discord delivery failed");
+                        continue;
+                    }
+                }
+            }
+            let _ = store.set_setting(
+                &setting.guild_id,
+                "web3_crypto_stats.last_poll_at",
+                &now.to_string(),
+            );
         }
     }
 }
@@ -4176,6 +4347,37 @@ impl Handler {
                 let rows = self.store.stats_for(&guild_text, window_days)?;
                 let messages: i64 = rows.iter().map(|(_, messages, _, _)| messages).sum();
                 format!("Mensagens registadas nos últimos {} dias: {}.", rows.len(), messages)
+            }
+            "crypto" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "web3.crypto_queries", None) {
+                    return respond(ctx, command, "Crypto queries are disabled in this server. Enable them in the dashboard.").await;
+                }
+                let coins = option_string(command, "coins").unwrap_or_default();
+                let ids = coins
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>();
+                if ids.is_empty() || ids.len() > 10 {
+                    return respond(ctx, command, "Choose between 1 and 10 CoinGecko coin IDs, separated by commas.").await;
+                }
+                let currency = option_string(command, "currency").unwrap_or("usd");
+                let Some(client) = self.coingecko.as_ref() else {
+                    return respond(ctx, command, "The CoinGecko provider is not available right now.").await;
+                };
+                match client.quotes(&ids, currency).await {
+                    Ok(quotes) if quotes.is_empty() => "No price data was found for those CoinGecko IDs.".to_string(),
+                    Ok(quotes) => format_crypto_quotes(&quotes),
+                    Err(error) => {
+                        warn!(%error, guild_id = %guild_text, "CoinGecko query failed");
+                        "CoinGecko is temporarily unavailable. Please try again later.".to_string()
+                    }
+                }
             }
             "emojis" => {
                 let Some(guild_id) = command.guild_id else {

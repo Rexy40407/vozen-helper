@@ -21,7 +21,9 @@ use helper_core::{
     evaluate_scam, feature_adapter, feature_is_configurable, feature_maturity, is_known_feature,
     quota_limit, scam_policy_from_json,
 };
-use helper_modules::{BlueskyClient, EntitlementClient, RssClient, TwitchClient, YouTubeClient};
+use helper_modules::{
+    BlueskyClient, CoinGeckoClient, EntitlementClient, RssClient, TwitchClient, YouTubeClient,
+};
 use helper_store::{
     BlueskySubscriptionRecord, BlueskySubscriptionWrite, RssSubscriptionRecord,
     RssSubscriptionWrite, Store, TwitchSubscriptionRecord, TwitchSubscriptionWrite,
@@ -58,6 +60,7 @@ pub struct ApiState {
     pub rss: Option<RssClient>,
     pub twitch: Option<TwitchClient>,
     pub bluesky: Option<BlueskyClient>,
+    pub coingecko: Option<CoinGeckoClient>,
 }
 
 #[derive(Debug, Serialize)]
@@ -107,6 +110,7 @@ pub fn router(state: ApiState) -> Router {
             "/api/config/bluesky/{id}",
             put(update_bluesky_subscription).delete(delete_bluesky_subscription),
         )
+        .route("/api/providers/coingecko/health", get(coingecko_health))
         .route("/api/providers/twitch/health", get(twitch_health))
         .route(
             "/api/providers/twitch/channels/{login}",
@@ -444,6 +448,32 @@ async fn youtube_health(
         } else {
             "Adiciona YOUTUBE_API_KEY apenas no ambiente do servidor."
         }
+    })))
+}
+
+async fn coingecko_health(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let Some(client) = state.coingecko.as_ref() else {
+        return Ok(Json(serde_json::json!({
+            "guildId": claims.guild_id,
+            "provider": "coingecko",
+            "feature": "web3.crypto_queries",
+            "configured": false,
+            "status": "missing_provider",
+            "message": "The CoinGecko client is not available in this release."
+        })));
+    };
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "provider": "coingecko",
+        "feature": "web3.crypto_queries",
+        "configured": true,
+        "mode": if client.has_api_key() { "api_key" } else { "public_keyless" },
+        "status": "ready",
+        "message": "Read-only CoinGecko prices are available; never treat them as financial advice."
     })))
 }
 
@@ -4467,9 +4497,6 @@ fn lifecycle_issues(key: &str, maturity: FeatureMaturity) -> Vec<ValidationIssue
         "web3.nft_stats" | "web3.nft_queries" | "web3.nft_sales" => {
             "Blocked until an OpenSea production API key and collection/event policy are configured."
         }
-        "web3.crypto_stats" | "web3.crypto_queries" => {
-            "Blocked until a CoinGecko API key, quota budget and freshness policy are configured."
-        }
         "web3.gas_tracker" => {
             "Blocked until an approved RPC endpoint and network allow-list are configured."
         }
@@ -6446,6 +6473,7 @@ mod tests {
             rss: None,
             twitch: None,
             bluesky: Some(BlueskyClient::new()),
+            coingecko: Some(CoinGeckoClient::new()),
         }
     }
 

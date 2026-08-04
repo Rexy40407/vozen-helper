@@ -1200,6 +1200,25 @@ impl Store {
             .optional()?)
     }
 
+    pub fn enabled_feature_settings(&self, key: &str) -> Result<Vec<FeatureSettingRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT guild_id,key,enabled,config_json,revision,updated_at,updated_by FROM feature_settings WHERE key=?1 AND enabled=1 ORDER BY updated_at ASC",
+        )?;
+        let rows = stmt.query_map([key], |row| {
+            Ok(FeatureSettingRecord {
+                guild_id: row.get(0)?,
+                key: row.get(1)?,
+                enabled: row.get::<_, i64>(2)? != 0,
+                config_json: row.get(3)?,
+                revision: row.get::<_, i64>(4)?.try_into().unwrap_or(0),
+                updated_at: row.get(5)?,
+                updated_by: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn feature_revision(
         &self,
         guild_id: &str,
@@ -3763,6 +3782,37 @@ mod tests {
                 .delete_setting("guild-a", "studio.template.one")
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn enabled_feature_settings_are_guild_scoped_and_filter_disabled_rows() {
+        let store = Store::open(":memory:").unwrap();
+        store
+            .publish_feature_setting(
+                "guild-a",
+                "web3.crypto_stats",
+                true,
+                r#"{"coinIds":"bitcoin"}"#,
+                None,
+                "owner-a",
+                &[],
+            )
+            .unwrap();
+        store
+            .publish_feature_setting(
+                "guild-b",
+                "web3.crypto_stats",
+                false,
+                r#"{"coinIds":"ethereum"}"#,
+                None,
+                "owner-b",
+                &[],
+            )
+            .unwrap();
+        let rows = store.enabled_feature_settings("web3.crypto_stats").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].guild_id, "guild-a");
+        assert_eq!(rows[0].config_json, r#"{"coinIds":"bitcoin"}"#);
     }
 
     #[test]

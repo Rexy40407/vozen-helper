@@ -1480,6 +1480,237 @@ impl FeatureAdapter for BlueskyAdapter {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct CryptoAdapter {
+    pub key: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub stats: bool,
+}
+
+impl FeatureAdapter for CryptoAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        let mut fields = vec![
+            serde_json::json!({
+                "key": "coinIds",
+                "label": "CoinGecko IDs",
+                "kind": "text",
+                "help": "Comma-separated IDs such as bitcoin, ethereum or solana."
+            }),
+            serde_json::json!({
+                "key": "currency",
+                "label": "Currency",
+                "kind": "text",
+                "help": "Three to ten lowercase letters, for example usd or eur."
+            }),
+        ];
+        if self.stats {
+            fields.extend([
+                serde_json::json!({"key":"targetChannelId","label":"Discord channel","kind":"channel"}),
+                serde_json::json!({"key":"intervalSeconds","label":"Update interval (seconds)","kind":"number","min":300,"max":86400}),
+                serde_json::json!({"key":"messageTemplate","label":"Statistics message","kind":"textarea","advanced":true}),
+            ]);
+        } else {
+            fields.push(serde_json::json!({
+                "key": "maxResults",
+                "label": "Maximum results",
+                "kind": "number",
+                "min": 1,
+                "max": 10,
+                "advanced": true
+            }));
+        }
+        FeatureAdapterDescriptor {
+            key: self.key.into(),
+            source: "coingecko_simple_price_v1".into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": "coingecko_simple_price_v1",
+                "sections": [{
+                    "title": self.title,
+                    "description": self.description,
+                    "fields": fields
+                }]
+            }),
+            defaults: if self.stats {
+                serde_json::json!({
+                    "coinIds": "bitcoin",
+                    "currency": "usd",
+                    "targetChannelId": "",
+                    "intervalSeconds": 900,
+                    "messageTemplate": "Crypto update: {coins}"
+                })
+            } else {
+                serde_json::json!({
+                    "coinIds": "bitcoin",
+                    "currency": "usd",
+                    "maxResults": 5
+                })
+            },
+            dependencies: vec![
+                "CoinGecko public API".into(),
+                if self.stats {
+                    "Send Messages".into()
+                } else {
+                    "Use Application Commands".into()
+                },
+            ],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "Crypto configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        let coins = object
+            .get("coinIds")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let coin_list = coins
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        if coin_list.is_empty() || coin_list.len() > 20 {
+            issues.push(ValidationIssue {
+                path: "coinIds".into(),
+                code: "invalid_coin_ids".into(),
+                message: "Choose between one and twenty CoinGecko IDs.".into(),
+                severity: "error".into(),
+            });
+        } else if coin_list.iter().any(|coin| {
+            !(1..=64).contains(&coin.len())
+                || !coin
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                || coin.starts_with('-')
+                || coin.ends_with('-')
+        }) {
+            issues.push(ValidationIssue {
+                path: "coinIds".into(),
+                code: "invalid_coin_id".into(),
+                message: "Coin IDs may contain only letters, numbers and hyphens.".into(),
+                severity: "error".into(),
+            });
+        }
+        let currency = object
+            .get("currency")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if !(3..=10).contains(&currency.len())
+            || !currency.bytes().all(|byte| byte.is_ascii_lowercase())
+        {
+            issues.push(ValidationIssue {
+                path: "currency".into(),
+                code: "invalid_currency".into(),
+                message: "Currency must use three to ten lowercase letters, such as usd.".into(),
+                severity: "error".into(),
+            });
+        }
+        if self.stats {
+            let target = object
+                .get("targetChannelId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if target.is_empty() || target.parse::<u64>().is_err() {
+                issues.push(ValidationIssue {
+                    path: "targetChannelId".into(),
+                    code: "invalid_discord_id".into(),
+                    message: "Choose a real Discord channel for statistics.".into(),
+                    severity: "error".into(),
+                });
+            }
+            if let Some(interval) = object
+                .get("intervalSeconds")
+                .and_then(serde_json::Value::as_i64)
+                && !(300..=86_400).contains(&interval)
+            {
+                issues.push(ValidationIssue {
+                    path: "intervalSeconds".into(),
+                    code: "out_of_range".into(),
+                    message: "Update interval must be between 300 and 86400 seconds.".into(),
+                    severity: "error".into(),
+                });
+            }
+            if object.get("messageTemplate").is_some_and(|value| {
+                value.as_str().is_none_or(|template| {
+                    template.trim().is_empty() || template.chars().count() > 1_800
+                })
+            }) {
+                issues.push(ValidationIssue {
+                    path: "messageTemplate".into(),
+                    code: "invalid_template".into(),
+                    message: "Statistics messages must be non-empty and at most 1800 characters."
+                        .into(),
+                    severity: "error".into(),
+                });
+            }
+        } else if let Some(max_results) =
+            object.get("maxResults").and_then(serde_json::Value::as_i64)
+            && !(1..=10).contains(&max_results)
+        {
+            issues.push(ValidationIssue {
+                path: "maxResults".into(),
+                code: "out_of_range".into(),
+                message: "Maximum results must be between 1 and 10.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let prefix = self.key.replace('.', "_");
+        let mut projection = Vec::new();
+        if let Some(coins) = object.get("coinIds").and_then(serde_json::Value::as_str) {
+            projection.push((
+                format!("{prefix}.coin_ids"),
+                coins.trim().to_ascii_lowercase(),
+            ));
+        }
+        if let Some(currency) = object.get("currency").and_then(serde_json::Value::as_str) {
+            projection.push((
+                format!("{prefix}.currency"),
+                currency.trim().to_ascii_lowercase(),
+            ));
+        }
+        if let Some(max_results) = object.get("maxResults").and_then(serde_json::Value::as_i64) {
+            projection.push((format!("{prefix}.max_results"), max_results.to_string()));
+        }
+        if let Some(channel) = object
+            .get("targetChannelId")
+            .and_then(serde_json::Value::as_str)
+        {
+            projection.push((format!("{prefix}.target_channel_id"), channel.to_string()));
+        }
+        if let Some(interval) = object
+            .get("intervalSeconds")
+            .and_then(serde_json::Value::as_i64)
+        {
+            projection.push((format!("{prefix}.interval_seconds"), interval.to_string()));
+        }
+        if let Some(template) = object
+            .get("messageTemplate")
+            .and_then(serde_json::Value::as_str)
+        {
+            projection.push((format!("{prefix}.message_template"), template.to_string()));
+        }
+        projection
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TicketsAdapter;
 
@@ -4281,6 +4512,18 @@ impl FeatureAdapter for SearchAdapter {
 static EMBEDS_ADAPTER: EmbedsAdapter = EmbedsAdapter;
 static ECONOMY_ADAPTER: EconomyAdapter = EconomyAdapter;
 static BLUESKY_ADAPTER: BlueskyAdapter = BlueskyAdapter;
+static CRYPTO_STATS_ADAPTER: CryptoAdapter = CryptoAdapter {
+    key: "web3.crypto_stats",
+    title: "Crypto statistics",
+    description: "Publish bounded CoinGecko price updates to a Discord channel.",
+    stats: true,
+};
+static CRYPTO_QUERIES_ADAPTER: CryptoAdapter = CryptoAdapter {
+    key: "web3.crypto_queries",
+    title: "Crypto queries",
+    description: "Query read-only CoinGecko prices from an application command.",
+    stats: false,
+};
 
 pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
     match key {
@@ -4323,6 +4566,8 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         "studio.rank_card" => Some(&RANK_CARD_ADAPTER as &dyn FeatureAdapter),
         EmbedsAdapter::KEY => Some(&EMBEDS_ADAPTER as &dyn FeatureAdapter),
         EconomyAdapter::KEY => Some(&ECONOMY_ADAPTER as &dyn FeatureAdapter),
+        "web3.crypto_stats" => Some(&CRYPTO_STATS_ADAPTER as &dyn FeatureAdapter),
+        "web3.crypto_queries" => Some(&CRYPTO_QUERIES_ADAPTER as &dyn FeatureAdapter),
         _ => None,
     }
 }
@@ -4419,7 +4664,9 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "utility.temp_channels"
         | "community.economy"
         | "studio.rank_card"
-        | "social.bluesky" => FeatureMaturity::Operational,
+        | "social.bluesky"
+        | "web3.crypto_stats"
+        | "web3.crypto_queries" => FeatureMaturity::Operational,
         "social.youtube" | "social.rss" | "social.twitch" => FeatureMaturity::Beta,
         // Podcast feeds reuse the official RSS/Atom transport and its SSRF
         // protection, so they do not require a second provider or secret.
@@ -4435,8 +4682,6 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "web3.nft_stats"
         | "web3.nft_queries"
         | "web3.nft_sales"
-        | "web3.crypto_stats"
-        | "web3.crypto_queries"
         | "web3.gas_tracker"
         | "web3.gating" => FeatureMaturity::Blocked,
         _ => FeatureMaturity::Planned,
@@ -4565,6 +4810,8 @@ mod tests {
             "community.economy",
             "social.podcasts",
             "social.bluesky",
+            "web3.crypto_stats",
+            "web3.crypto_queries",
         ];
         for key in internal {
             assert!(feature_adapter(key).is_some(), "missing adapter for {key}");
@@ -4583,8 +4830,6 @@ mod tests {
             "web3.nft_stats",
             "web3.nft_queries",
             "web3.nft_sales",
-            "web3.crypto_stats",
-            "web3.crypto_queries",
             "web3.gas_tracker",
             "web3.gating",
         ] {
