@@ -3493,7 +3493,7 @@ function FeatureCatalogue({
           <b>{uniqueFeatures.length}</b> módulos no catálogo
         </span>
         <span className="summary-item summary-configurable">
-          <b>{configurableCount}</b> configurÃ¡veis
+          <b>{configurableCount}</b> configuráveis
         </span>
         <span className="summary-item summary-ready">
           <b>{operationalCount}</b> operacionais
