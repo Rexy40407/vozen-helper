@@ -1,16 +1,22 @@
 //! Module registry for Core, Studio, Security, Support, Events, Community,
 //! Automate and Insights. Feature handlers are added behind these boundaries.
 
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use chrono::Utc;
 use helper_contracts::{EntitlementSnapshot, Plan};
 use helper_core::Capability;
 use helper_store::Store;
 use hmac::{Hmac, Mac};
+use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use quick_xml::{Reader, escape::unescape, events::Event};
+use rand::RngCore;
 use reqwest::Client;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use sha3::Keccak256;
 use std::{
     collections::HashMap,
     net::IpAddr,
@@ -81,6 +87,1186 @@ pub struct RssFeed {
 #[derive(Clone)]
 pub struct BlueskyClient {
     http: Client,
+}
+
+/// Official Reddit API client.  It deliberately supports only the OAuth
+/// application-only, read-only endpoints used by alerts.  There is no
+/// scraping fallback: without an approved Reddit application and credentials
+/// the provider remains unavailable and the feature stays blocked.
+#[derive(Clone)]
+pub struct RedditClient {
+    client_id: Arc<str>,
+    client_secret: Arc<str>,
+    http: Client,
+    token: Arc<AsyncMutex<Option<RedditToken>>>,
+}
+
+/// Official X API v2 read-only client.  It intentionally accepts only a
+/// bearer token and a handle, never scraping HTML or accepting arbitrary
+/// URLs.  The production feature remains gated by the X app/plan approval;
+/// this boundary makes the runtime ready once those credentials exist.
+#[derive(Clone)]
+pub struct XClient {
+    bearer_token: Arc<str>,
+    base_url: Arc<str>,
+    http: Client,
+}
+
+/// Official TikTok Display API client. Access is limited to videos from the
+/// creator who granted the Display API token; the runtime never scrapes
+/// TikTok pages or accepts arbitrary profile URLs.
+#[derive(Clone)]
+pub struct TikTokClient {
+    access_token: Arc<str>,
+    base_url: Arc<str>,
+    http: Client,
+}
+
+/// Official Meta Graph API client for Instagram professional accounts.
+///
+/// Only media belonging to the explicitly authorised Instagram user is read;
+/// the access token and account id are process secrets and never leave the
+/// server.  The client deliberately does not accept profile URLs or scrape
+/// Instagram pages.
+#[derive(Clone)]
+pub struct InstagramClient {
+    access_token: Arc<str>,
+    user_id: Arc<str>,
+    base_url: Arc<str>,
+    http: Client,
+}
+
+/// Official Kick public API client. It only reads the documented channel
+/// endpoint and never scrapes kick.com pages. A token is required by the
+/// current API and is kept exclusively in the process environment.
+#[derive(Clone)]
+pub struct KickClient {
+    access_token: Arc<str>,
+    base_url: Arc<str>,
+    http: Client,
+}
+
+/// Minimal Stripe Connect boundary for server monetization. It verifies
+/// signed webhook envelopes and keeps all Stripe credentials server-side;
+/// card data never enters the Helper API or SQLite.
+#[derive(Clone)]
+pub struct StripeConnectClient {
+    secret_key: Arc<str>,
+    webhook_secret: Arc<str>,
+}
+
+/// Verifies EIP-4361 messages without ever accepting a private key. The
+/// domain, URI, version and nonce are checked by the caller before a role
+/// mutation is queued. Signature recovery uses secp256k1 + Ethereum Keccak;
+/// SHA3-256 is deliberately not used because its padding differs.
+#[derive(Clone)]
+pub struct SiweVerifier {
+    domain: Arc<str>,
+    uri: Arc<str>,
+    session_secret: Arc<str>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SiweClaims {
+    pub address: String,
+    pub domain: String,
+    pub uri: String,
+    pub chain_id: u64,
+    pub nonce: String,
+    pub issued_at: String,
+    pub expiration_time: Option<String>,
+}
+
+/// Bounded, read-only Ethereum JSON-RPC client used by wallet gating. It
+/// supports only the standard `balanceOf` calls and never signs or submits a
+/// transaction. RPC URLs are selected by chain from the server environment.
+#[derive(Clone)]
+pub struct EthereumRpcClient {
+    chain: Arc<str>,
+    endpoint: Arc<str>,
+    http: Client,
+}
+
+impl EthereumRpcClient {
+    pub fn from_env(chain: &str) -> Option<Self> {
+        let variable = match chain {
+            "ethereum" => "ETHEREUM_RPC_URL",
+            "polygon" => "POLYGON_RPC_URL",
+            "arbitrum" => "ARBITRUM_RPC_URL",
+            "base" => "BASE_RPC_URL",
+            _ => return None,
+        };
+        Self::new(chain, std::env::var(variable).ok()?)
+    }
+
+    pub fn new(chain: &str, endpoint: impl Into<String>) -> Option<Self> {
+        if !matches!(chain, "ethereum" | "polygon" | "arbitrum" | "base") {
+            return None;
+        }
+        let endpoint = endpoint.into().trim().trim_end_matches('/').to_owned();
+        let parsed = Url::parse(&endpoint).ok()?;
+        if parsed.scheme() != "https" && parsed.host_str() != Some("localhost") {
+            return None;
+        }
+        Some(Self {
+            chain: Arc::from(chain.to_owned()),
+            endpoint: Arc::from(endpoint),
+            http: Client::builder()
+                .timeout(Duration::from_secs(8))
+                .user_agent("Vozen-Helper/1.0 (+https://vozen.org)")
+                .build()
+                .ok()?,
+        })
+    }
+
+    pub fn chain(&self) -> &str {
+        &self.chain
+    }
+
+    pub async fn token_balance(
+        &self,
+        contract: &str,
+        wallet: &str,
+        asset_type: &str,
+        token_id: Option<&str>,
+    ) -> anyhow::Result<u128> {
+        if !is_eth_address(contract) || !is_eth_address(wallet) {
+            anyhow::bail!("ethereum_address_invalid");
+        }
+        let wallet_word = format!(
+            "{:0>64}",
+            wallet.trim_start_matches("0x").to_ascii_lowercase()
+        );
+        let data = match asset_type {
+            "erc20" | "erc721" => format!("0x70a08231{wallet_word}"),
+            "erc1155" => {
+                let token = token_id.ok_or_else(|| anyhow::anyhow!("token_id_required"))?;
+                let token = parse_uint_hex_or_decimal(token)?;
+                format!("0x00fdd58e{wallet_word}{token:0>64x}")
+            }
+            _ => anyhow::bail!("asset_type_invalid"),
+        };
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_call",
+            "params": [{"to": contract, "data": data}, "latest"]
+        });
+        let response = self
+            .http
+            .post(self.endpoint.as_ref())
+            .json(&body)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!("rpc_http_error:{}", response.status());
+        }
+        let payload: serde_json::Value = response.json().await?;
+        if let Some(error) = payload.get("error") {
+            anyhow::bail!(
+                "rpc_error:{}",
+                error
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+            );
+        }
+        let result = payload
+            .get("result")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("rpc_result_missing"))?;
+        parse_rpc_uint(result)
+    }
+}
+
+fn parse_uint_hex_or_decimal(raw: &str) -> anyhow::Result<u128> {
+    let value = raw.trim();
+    if value.is_empty() || value.len() > 78 {
+        anyhow::bail!("uint_invalid");
+    }
+    if let Some(hex_value) = value.strip_prefix("0x") {
+        u128::from_str_radix(hex_value, 16).map_err(|_| anyhow::anyhow!("uint_invalid"))
+    } else {
+        value
+            .parse::<u128>()
+            .map_err(|_| anyhow::anyhow!("uint_invalid"))
+    }
+}
+
+fn parse_rpc_uint(raw: &str) -> anyhow::Result<u128> {
+    let value = raw.strip_prefix("0x").unwrap_or(raw);
+    if value.is_empty() || value.len() > 32 {
+        anyhow::bail!("rpc_balance_too_large");
+    }
+    u128::from_str_radix(value, 16).map_err(|_| anyhow::anyhow!("rpc_result_invalid"))
+}
+
+impl SiweVerifier {
+    pub fn from_env() -> Option<Self> {
+        Self::new(
+            std::env::var("SIWE_DOMAIN").ok()?,
+            std::env::var("SIWE_URI").ok()?,
+            std::env::var("SIWE_SESSION_SECRET").ok()?,
+        )
+    }
+
+    pub fn new(
+        domain: impl Into<String>,
+        uri: impl Into<String>,
+        session_secret: impl Into<String>,
+    ) -> Option<Self> {
+        let domain = domain.into().trim().to_owned();
+        let uri = uri.into().trim().to_owned();
+        let session_secret = session_secret.into().trim().to_owned();
+        if domain.is_empty()
+            || domain.len() > 255
+            || uri.is_empty()
+            || uri.len() > 2_048
+            || session_secret.len() < 32
+            || session_secret.len() > 512
+        {
+            return None;
+        }
+        let parsed = Url::parse(&uri).ok()?;
+        if parsed.scheme() != "https" && parsed.host_str() != Some("localhost") {
+            return None;
+        }
+        Some(Self {
+            domain: Arc::from(domain),
+            uri: Arc::from(uri),
+            session_secret: Arc::from(session_secret),
+        })
+    }
+
+    pub fn is_configured(&self) -> bool {
+        !self.domain.is_empty() && !self.uri.is_empty() && self.session_secret.len() >= 32
+    }
+
+    pub fn issue_nonce(&self) -> String {
+        let mut bytes = [0_u8; 24];
+        rand::rng().fill_bytes(&mut bytes);
+        // EIP-4361 nonces are alphanumeric. Hex avoids '-'/'_' from a
+        // URL-safe alphabet and therefore cannot be rejected by the parser.
+        hex::encode(bytes)
+    }
+
+    pub fn expected_domain(&self) -> &str {
+        &self.domain
+    }
+
+    pub fn expected_uri(&self) -> &str {
+        &self.uri
+    }
+
+    pub fn verify(
+        &self,
+        message: &str,
+        signature: &str,
+        expected_nonce: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> anyhow::Result<SiweClaims> {
+        let claims = parse_siwe_message(message)?;
+        if claims.domain != self.domain.as_ref() || claims.uri != self.uri.as_ref() {
+            anyhow::bail!("siwe_domain_or_uri_mismatch");
+        }
+        if claims.nonce != expected_nonce || expected_nonce.len() < 8 {
+            anyhow::bail!("siwe_nonce_mismatch");
+        }
+        let issued = chrono::DateTime::parse_from_rfc3339(&claims.issued_at)
+            .map_err(|_| anyhow::anyhow!("siwe_invalid_issued_at"))?
+            .with_timezone(&Utc);
+        if issued > now + chrono::Duration::minutes(5)
+            || issued < now - chrono::Duration::minutes(10)
+        {
+            anyhow::bail!("siwe_issued_at_out_of_window");
+        }
+        if let Some(expiration) = &claims.expiration_time {
+            let expiry = chrono::DateTime::parse_from_rfc3339(expiration)
+                .map_err(|_| anyhow::anyhow!("siwe_invalid_expiration"))?
+                .with_timezone(&Utc);
+            if expiry <= now {
+                anyhow::bail!("siwe_expired");
+            }
+            if expiry > now + chrono::Duration::hours(24) {
+                anyhow::bail!("siwe_expiration_too_long");
+            }
+        }
+        let recovered = recover_eth_address(message, signature)?;
+        if !recovered.eq_ignore_ascii_case(&claims.address) {
+            anyhow::bail!("siwe_address_mismatch");
+        }
+        Ok(claims)
+    }
+}
+
+fn parse_siwe_message(message: &str) -> anyhow::Result<SiweClaims> {
+    if message.len() > 8_192 || !message.is_ascii() {
+        anyhow::bail!("siwe_message_invalid");
+    }
+    let lines: Vec<&str> = message.lines().collect();
+    if lines.len() < 8 || !lines[2].trim().is_empty() {
+        anyhow::bail!("siwe_message_invalid");
+    }
+    let (domain, suffix) = lines[0]
+        .split_once(" wants you to sign in with your Ethereum account:")
+        .ok_or_else(|| anyhow::anyhow!("siwe_message_invalid"))?;
+    if domain.trim().is_empty() || !suffix.is_empty() {
+        anyhow::bail!("siwe_message_invalid");
+    }
+    let address = lines[1].trim().to_owned();
+    if !is_eth_address(&address) {
+        anyhow::bail!("siwe_address_invalid");
+    }
+    let mut fields = std::collections::HashMap::<&str, &str>::new();
+    for line in lines.iter().skip(3) {
+        if let Some((key, value)) = line.split_once(':') {
+            fields.insert(key.trim(), value.trim());
+        }
+    }
+    if fields.get("Version").copied() != Some("1") {
+        anyhow::bail!("siwe_version_invalid");
+    }
+    let uri = fields
+        .get("URI")
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("siwe_uri_missing"))?;
+    let chain_id = fields
+        .get("Chain ID")
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| anyhow::anyhow!("siwe_chain_id_invalid"))?;
+    if chain_id == 0 {
+        anyhow::bail!("siwe_chain_id_invalid");
+    }
+    let nonce = fields
+        .get("Nonce")
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("siwe_nonce_missing"))?;
+    if nonce.len() < 8
+        || nonce.len() > 128
+        || !nonce.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        anyhow::bail!("siwe_nonce_invalid");
+    }
+    let issued_at = fields
+        .get("Issued At")
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("siwe_issued_at_missing"))?;
+    let expiration_time = fields.get("Expiration Time").copied().map(str::to_owned);
+    Ok(SiweClaims {
+        address,
+        domain: domain.to_owned(),
+        uri: uri.to_owned(),
+        chain_id,
+        nonce: nonce.to_owned(),
+        issued_at: issued_at.to_owned(),
+        expiration_time,
+    })
+}
+
+fn is_eth_address(address: &str) -> bool {
+    let body = address
+        .strip_prefix("0x")
+        .or_else(|| address.strip_prefix("0X"));
+    body.is_some_and(|value| {
+        value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn recover_eth_address(message: &str, signature: &str) -> anyhow::Result<String> {
+    let encoded = signature.strip_prefix("0x").unwrap_or(signature);
+    let bytes = hex::decode(encoded).map_err(|_| anyhow::anyhow!("siwe_signature_invalid"))?;
+    if bytes.len() != 65 {
+        anyhow::bail!("siwe_signature_invalid");
+    }
+    let recovery = match bytes[64] {
+        0 | 1 => bytes[64],
+        27 | 28 => bytes[64] - 27,
+        _ => anyhow::bail!("siwe_recovery_id_invalid"),
+    };
+    let signature =
+        Signature::try_from(&bytes[..64]).map_err(|_| anyhow::anyhow!("siwe_signature_invalid"))?;
+    let recovery =
+        RecoveryId::try_from(recovery).map_err(|_| anyhow::anyhow!("siwe_recovery_id_invalid"))?;
+    let mut payload = format!("\x19Ethereum Signed Message:\n{}", message.len()).into_bytes();
+    payload.extend_from_slice(message.as_bytes());
+    let key = VerifyingKey::recover_from_digest(
+        Keccak256::new_with_prefix(payload),
+        &signature,
+        recovery,
+    )
+    .map_err(|_| anyhow::anyhow!("siwe_signature_invalid"))?;
+    Ok(eth_address_from_key(&key))
+}
+
+fn eth_address_from_key(key: &VerifyingKey) -> String {
+    let point = key.to_encoded_point(false);
+    let digest = Keccak256::digest(&point.as_bytes()[1..]);
+    format!("0x{}", hex::encode(&digest[12..]))
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KickStream {
+    pub id: String,
+    pub slug: String,
+    pub title: String,
+    pub category: String,
+    pub url: String,
+    pub started_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InstagramMedia {
+    pub id: String,
+    pub caption: String,
+    pub media_type: String,
+    pub url: String,
+    pub timestamp: String,
+    pub permalink: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct InstagramMediaResponse {
+    #[serde(default)]
+    data: Vec<InstagramMediaPayload>,
+    #[serde(default)]
+    error: Option<InstagramApiError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InstagramApiError {
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    code: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InstagramMediaPayload {
+    id: String,
+    #[serde(default)]
+    caption: String,
+    #[serde(default)]
+    media_type: String,
+    #[serde(default)]
+    media_url: String,
+    #[serde(default)]
+    permalink: String,
+    #[serde(default)]
+    timestamp: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TikTokVideo {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub created_at: String,
+    pub url: String,
+    pub embed_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TikTokVideoResponse {
+    #[serde(default)]
+    data: TikTokVideoData,
+    #[serde(default)]
+    error: TikTokApiError,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TikTokVideoData {
+    #[serde(default)]
+    videos: Vec<TikTokVideoPayload>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TikTokApiError {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TikTokVideoPayload {
+    id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    video_description: String,
+    #[serde(default)]
+    create_time: i64,
+    #[serde(default)]
+    share_url: String,
+    #[serde(default)]
+    embed_link: Option<String>,
+}
+
+impl TikTokClient {
+    pub fn from_env() -> Option<Self> {
+        Self::new(
+            std::env::var("TIKTOK_ACCESS_TOKEN").ok()?,
+            std::env::var("TIKTOK_API_BASE_URL")
+                .unwrap_or_else(|_| "https://open.tiktokapis.com".into()),
+        )
+    }
+
+    pub fn new(access_token: impl Into<String>, base_url: impl Into<String>) -> Option<Self> {
+        let access_token = access_token.into().trim().to_owned();
+        let base_url = base_url.into().trim().trim_end_matches('/').to_owned();
+        if access_token.is_empty()
+            || access_token.len() > 2_000
+            || !(base_url.starts_with("https://") || base_url.starts_with("http://localhost"))
+        {
+            return None;
+        }
+        Some(Self {
+            access_token: Arc::from(access_token),
+            base_url: Arc::from(base_url),
+            http: Client::builder()
+                .timeout(Duration::from_secs(10))
+                .user_agent("Vozen-Helper/1.0 (+https://vozen.org)")
+                .build()
+                .expect("valid TikTok HTTP client"),
+        })
+    }
+
+    pub fn is_configured(&self) -> bool {
+        !self.access_token.is_empty()
+    }
+
+    pub async fn latest_videos(&self) -> anyhow::Result<Vec<TikTokVideo>> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/v2/video/list/?fields=id,title,video_description,create_time,share_url,embed_link",
+                self.base_url
+            ))
+            .bearer_auth(self.access_token.as_ref())
+            .json(&serde_json::json!({ "max_count": 20 }))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!("tiktok_api_error:{}", response.status());
+        }
+        let payload: TikTokVideoResponse = response.json().await?;
+        if !payload.error.code.is_empty() {
+            anyhow::bail!(
+                "tiktok_api_error:{}:{}",
+                payload.error.code,
+                payload.error.message
+            );
+        }
+        Ok(payload
+            .data
+            .videos
+            .into_iter()
+            .filter(|video| !video.id.trim().is_empty())
+            .map(|video| TikTokVideo {
+                id: video.id,
+                title: video.title,
+                description: video.video_description,
+                created_at: video.create_time.to_string(),
+                url: video.share_url,
+                embed_url: video.embed_link,
+            })
+            .collect())
+    }
+}
+
+impl Default for TikTokClient {
+    fn default() -> Self {
+        Self::new("missing-access-token", "https://open.tiktokapis.com").expect("valid default")
+    }
+}
+
+impl InstagramClient {
+    pub fn from_env() -> Option<Self> {
+        Self::new(
+            std::env::var("META_INSTAGRAM_ACCESS_TOKEN").ok()?,
+            std::env::var("META_INSTAGRAM_USER_ID").ok()?,
+            std::env::var("META_GRAPH_API_BASE_URL")
+                .unwrap_or_else(|_| "https://graph.facebook.com/v22.0".into()),
+        )
+    }
+
+    pub fn new(
+        access_token: impl Into<String>,
+        user_id: impl Into<String>,
+        base_url: impl Into<String>,
+    ) -> Option<Self> {
+        let access_token = access_token.into().trim().to_owned();
+        let user_id = user_id.into().trim().to_owned();
+        let base_url = base_url.into().trim().trim_end_matches('/').to_owned();
+        if access_token.is_empty()
+            || access_token.len() > 8_000
+            || user_id.is_empty()
+            || user_id.len() > 64
+            || !user_id.chars().all(|character| character.is_ascii_digit())
+            || !(base_url.starts_with("https://") || base_url.starts_with("http://localhost"))
+        {
+            return None;
+        }
+        Some(Self {
+            access_token: Arc::from(access_token),
+            user_id: Arc::from(user_id),
+            base_url: Arc::from(base_url),
+            http: Client::builder()
+                .timeout(Duration::from_secs(10))
+                .user_agent("Vozen-Helper/1.0 (+https://vozen.org)")
+                .build()
+                .expect("valid Meta HTTP client"),
+        })
+    }
+
+    pub fn is_configured(&self) -> bool {
+        !self.access_token.is_empty() && !self.user_id.is_empty()
+    }
+
+    pub async fn latest_media(&self) -> anyhow::Result<Vec<InstagramMedia>> {
+        let response = self
+            .http
+            .get(format!("{}/{}/media", self.base_url, self.user_id))
+            .bearer_auth(self.access_token.as_ref())
+            .query(&[
+                (
+                    "fields",
+                    "id,caption,media_type,media_url,permalink,timestamp",
+                ),
+                ("limit", "25"),
+            ])
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!("instagram_api_error:{}", response.status());
+        }
+        let payload: InstagramMediaResponse = response.json().await?;
+        if let Some(error) = payload.error {
+            anyhow::bail!(
+                "instagram_api_error:{}:{}",
+                error
+                    .code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "unknown".into()),
+                error.message
+            );
+        }
+        Ok(payload
+            .data
+            .into_iter()
+            .filter(|media| !media.id.trim().is_empty() && !media.permalink.trim().is_empty())
+            .take(25)
+            .map(|media| InstagramMedia {
+                id: media.id,
+                caption: media.caption.chars().take(2_000).collect(),
+                media_type: media.media_type.chars().take(40).collect(),
+                url: media.media_url.chars().take(2_000).collect(),
+                timestamp: media.timestamp.chars().take(80).collect(),
+                permalink: media.permalink.chars().take(2_000).collect(),
+            })
+            .collect())
+    }
+}
+
+impl Default for InstagramClient {
+    fn default() -> Self {
+        Self::new(
+            "missing-access-token",
+            "0",
+            "https://graph.facebook.com/v22.0",
+        )
+        .expect("valid default")
+    }
+}
+
+impl KickClient {
+    pub fn from_env() -> Option<Self> {
+        Self::new(
+            std::env::var("KICK_ACCESS_TOKEN").ok()?,
+            std::env::var("KICK_API_BASE_URL")
+                .unwrap_or_else(|_| "https://api.kick.com/public/v1".into()),
+        )
+    }
+
+    pub fn new(access_token: impl Into<String>, base_url: impl Into<String>) -> Option<Self> {
+        let access_token = access_token.into().trim().to_owned();
+        let base_url = base_url.into().trim().trim_end_matches('/').to_owned();
+        if access_token.is_empty()
+            || access_token.len() > 8_000
+            || !(base_url.starts_with("https://") || base_url.starts_with("http://localhost"))
+        {
+            return None;
+        }
+        Some(Self {
+            access_token: Arc::from(access_token),
+            base_url: Arc::from(base_url),
+            http: Client::builder()
+                .timeout(Duration::from_secs(10))
+                .user_agent("Vozen-Helper/1.0 (+https://vozen.org)")
+                .build()
+                .expect("valid Kick HTTP client"),
+        })
+    }
+
+    pub fn is_configured(&self) -> bool {
+        !self.access_token.is_empty()
+    }
+
+    /// Returns the current live stream for a channel slug, if any.
+    pub async fn latest_stream(&self, slug: &str) -> anyhow::Result<Option<KickStream>> {
+        let response = self
+            .http
+            .get(format!("{}/channels", self.base_url))
+            .bearer_auth(self.access_token.as_ref())
+            .query(&[("slug", slug)])
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!("kick_api_error:{}", response.status());
+        }
+        let payload: serde_json::Value = response.json().await?;
+        if let Some(error) = payload.get("message").and_then(serde_json::Value::as_str)
+            && payload.get("data").is_none()
+        {
+            anyhow::bail!("kick_api_error:{error}");
+        }
+        let data = payload
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let channel = data.into_iter().next().unwrap_or(serde_json::Value::Null);
+        let Some(stream) = channel.get("stream").filter(|value| !value.is_null()) else {
+            return Ok(None);
+        };
+        let is_live = stream
+            .get("is_live")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        if !is_live {
+            return Ok(None);
+        }
+        let id = stream
+            .get("id")
+            .or_else(|| stream.get("stream_id"))
+            .map(|value| value.to_string().trim_matches('"').to_string())
+            .filter(|value| !value.is_empty() && value.len() <= 128)
+            .unwrap_or_else(|| format!("{}-live", slug));
+        let title = stream
+            .get("stream_title")
+            .or_else(|| stream.get("title"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .take(300)
+            .collect::<String>();
+        let category = stream
+            .get("category")
+            .and_then(|value| value.get("name").or(Some(value)))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .take(160)
+            .collect::<String>();
+        let resolved_slug = channel
+            .get("slug")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(slug)
+            .chars()
+            .take(80)
+            .collect::<String>();
+        let started_at = stream
+            .get("start_time")
+            .or_else(|| stream.get("started_at"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .take(80)
+            .collect::<String>();
+        Ok(Some(KickStream {
+            id,
+            slug: resolved_slug.clone(),
+            title,
+            category,
+            url: format!("https://kick.com/{resolved_slug}"),
+            started_at,
+        }))
+    }
+}
+
+impl Default for KickClient {
+    fn default() -> Self {
+        Self::new("missing-access-token", "https://api.kick.com/public/v1").expect("valid default")
+    }
+}
+
+impl StripeConnectClient {
+    pub fn from_env() -> Option<Self> {
+        Self::new(
+            std::env::var("STRIPE_SECRET_KEY").ok()?,
+            std::env::var("STRIPE_WEBHOOK_SECRET").ok()?,
+        )
+    }
+
+    pub fn new(secret_key: impl Into<String>, webhook_secret: impl Into<String>) -> Option<Self> {
+        let secret_key = secret_key.into().trim().to_owned();
+        let webhook_secret = webhook_secret.into().trim().to_owned();
+        if secret_key.len() < 16
+            || secret_key.len() > 8_000
+            || webhook_secret.len() < 16
+            || webhook_secret.len() > 8_000
+            || !(secret_key.starts_with("sk_") || secret_key.starts_with("rk_"))
+            || !webhook_secret.starts_with("whsec_")
+        {
+            return None;
+        }
+        Some(Self {
+            secret_key: Arc::from(secret_key),
+            webhook_secret: Arc::from(webhook_secret),
+        })
+    }
+
+    pub fn is_configured(&self) -> bool {
+        !self.secret_key.is_empty()
+    }
+
+    pub fn verify_webhook(&self, payload: &[u8], signature: &str, now: i64) -> bool {
+        let mut timestamp = None;
+        let mut signatures = Vec::new();
+        for item in signature.split(',') {
+            if let Some(value) = item.strip_prefix("t=") {
+                timestamp = value.parse::<i64>().ok();
+            }
+            if let Some(value) = item.strip_prefix("v1=") {
+                signatures.push(value.to_owned());
+            }
+        }
+        let Some(timestamp) = timestamp else {
+            return false;
+        };
+        if (now - timestamp).abs() > 300 || signatures.is_empty() {
+            return false;
+        }
+        let mut mac = Hmac::<Sha256>::new_from_slice(self.webhook_secret.as_bytes())
+            .expect("valid stripe hmac key");
+        mac.update(timestamp.to_string().as_bytes());
+        mac.update(b".");
+        mac.update(payload);
+        let expected = hex::encode(mac.finalize().into_bytes());
+        signatures.into_iter().any(|candidate| {
+            subtle::ConstantTimeEq::ct_eq(candidate.as_bytes(), expected.as_bytes()).into()
+        })
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct XPost {
+    pub id: String,
+    pub handle: String,
+    pub text: String,
+    pub created_at: String,
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct XUserResponse {
+    data: Option<XUserPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct XUserPayload {
+    id: String,
+    username: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct XPostsResponse {
+    #[serde(default)]
+    data: Vec<XPostPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct XPostPayload {
+    id: String,
+    text: String,
+    #[serde(default)]
+    created_at: String,
+}
+
+impl XClient {
+    pub fn from_env() -> Option<Self> {
+        Self::new(
+            std::env::var("X_BEARER_TOKEN").ok()?,
+            std::env::var("X_API_BASE_URL").unwrap_or_else(|_| "https://api.x.com".into()),
+        )
+    }
+
+    pub fn new(bearer_token: impl Into<String>, base_url: impl Into<String>) -> Option<Self> {
+        let bearer_token = bearer_token.into().trim().to_owned();
+        let base_url = base_url.into().trim().trim_end_matches('/').to_owned();
+        if bearer_token.is_empty()
+            || bearer_token.len() > 500
+            || !(base_url.starts_with("https://") || base_url.starts_with("http://localhost"))
+        {
+            return None;
+        }
+        Some(Self {
+            bearer_token: Arc::from(bearer_token),
+            base_url: Arc::from(base_url),
+            http: Client::builder()
+                .timeout(Duration::from_secs(10))
+                .user_agent("Vozen-Helper/1.0 (+https://vozen.org)")
+                .build()
+                .expect("valid X HTTP client"),
+        })
+    }
+
+    pub fn is_configured(&self) -> bool {
+        !self.bearer_token.is_empty()
+    }
+
+    pub async fn latest_post(&self, raw_handle: &str) -> anyhow::Result<Option<XPost>> {
+        let handle = normalize_x_handle(raw_handle)?;
+        let user: XUserResponse = self
+            .http
+            .get(format!("{}/2/users/by/username/{}", self.base_url, handle))
+            .bearer_auth(self.bearer_token.as_ref())
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let Some(user) = user.data else {
+            return Ok(None);
+        };
+        let posts: XPostsResponse = self
+            .http
+            .get(format!("{}/2/users/{}/tweets", self.base_url, user.id))
+            .query(&[("max_results", "5"), ("tweet.fields", "created_at")])
+            .bearer_auth(self.bearer_token.as_ref())
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(posts.data.into_iter().next().map(|post| XPost {
+            url: format!("https://x.com/{}/status/{}", user.username, post.id),
+            id: post.id,
+            handle: user.username,
+            text: post.text,
+            created_at: post.created_at,
+        }))
+    }
+}
+
+impl Default for XClient {
+    fn default() -> Self {
+        Self::new("missing-bearer-token", "https://api.x.com").expect("valid default")
+    }
+}
+
+pub fn normalize_x_handle(raw: &str) -> anyhow::Result<String> {
+    let mut value = raw.trim().trim_start_matches('@').to_owned();
+    if let Some(rest) = value.strip_prefix("https://x.com/") {
+        value = rest.to_owned();
+    }
+    if let Some(rest) = value.strip_prefix("https://twitter.com/") {
+        value = rest.to_owned();
+    }
+    if value.contains('/') {
+        anyhow::bail!("invalid_x_handle");
+    }
+    value.make_ascii_lowercase();
+    if !(1..=15).contains(&value.len())
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        anyhow::bail!("invalid_x_handle");
+    }
+    Ok(value)
+}
+
+#[derive(Clone)]
+struct RedditToken {
+    access_token: String,
+    expires_at: Instant,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RedditPost {
+    pub id: String,
+    pub subreddit: String,
+    pub title: String,
+    pub text: String,
+    pub url: String,
+    pub permalink: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RedditListing {
+    data: RedditListingData,
+}
+
+#[derive(Debug, Deserialize)]
+struct RedditListingData {
+    #[serde(default)]
+    children: Vec<RedditChild>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RedditChild {
+    data: RedditPostPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct RedditPostPayload {
+    id: String,
+    subreddit: String,
+    title: String,
+    #[serde(default)]
+    selftext: String,
+    #[serde(default)]
+    url: String,
+    permalink: String,
+    created_utc: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RedditTokenResponse {
+    access_token: String,
+    expires_in: u64,
+}
+
+impl RedditClient {
+    pub fn from_env() -> Option<Self> {
+        Self::new(
+            std::env::var("REDDIT_CLIENT_ID").ok()?,
+            std::env::var("REDDIT_CLIENT_SECRET").ok()?,
+            std::env::var("REDDIT_USER_AGENT")
+                .ok()
+                .unwrap_or_else(|| "Vozen-Helper/1.0 (+https://vozen.org)".into()),
+        )
+    }
+
+    pub fn new(
+        client_id: impl Into<String>,
+        client_secret: impl Into<String>,
+        user_agent: impl Into<String>,
+    ) -> Option<Self> {
+        let client_id = client_id.into().trim().to_owned();
+        let client_secret = client_secret.into().trim().to_owned();
+        let user_agent = user_agent.into().trim().to_owned();
+        if client_id.is_empty()
+            || client_secret.is_empty()
+            || user_agent.is_empty()
+            || user_agent.chars().count() > 200
+        {
+            return None;
+        }
+        Some(Self {
+            client_id: Arc::from(client_id),
+            client_secret: Arc::from(client_secret),
+            http: Client::builder()
+                .timeout(Duration::from_secs(10))
+                .user_agent(user_agent)
+                .build()
+                .expect("valid Reddit HTTP client"),
+            token: Arc::new(AsyncMutex::new(None)),
+        })
+    }
+
+    pub fn is_configured(&self) -> bool {
+        !self.client_id.is_empty() && !self.client_secret.is_empty()
+    }
+
+    pub async fn latest_post(&self, raw_subreddit: &str) -> anyhow::Result<Option<RedditPost>> {
+        let subreddit = normalize_reddit_subreddit(raw_subreddit)?;
+        let token = self.app_token().await?;
+        let response = self
+            .http
+            .get(format!("https://oauth.reddit.com/r/{subreddit}/new"))
+            .query(&[("limit", "10"), ("raw_json", "1")])
+            .bearer_auth(token)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!("reddit_api_error:{}", response.status());
+        }
+        let payload: RedditListing = response.json().await?;
+        Ok(payload.data.children.into_iter().next().map(|child| {
+            let post = child.data;
+            let permalink = format!("https://www.reddit.com{}", post.permalink);
+            RedditPost {
+                id: post.id,
+                subreddit: post.subreddit,
+                title: post.title,
+                text: post.selftext,
+                url: if post.url.is_empty() {
+                    permalink.clone()
+                } else {
+                    post.url
+                },
+                permalink,
+                created_at: post.created_utc.to_string(),
+            }
+        }))
+    }
+
+    async fn app_token(&self) -> anyhow::Result<String> {
+        let mut cached = self.token.lock().await;
+        if let Some(value) = cached.as_ref()
+            && value.expires_at > Instant::now() + Duration::from_secs(60)
+        {
+            return Ok(value.access_token.clone());
+        }
+        let credentials = STANDARD.encode(format!("{}:{}", self.client_id, self.client_secret));
+        let response = self
+            .http
+            .post("https://www.reddit.com/api/v1/access_token")
+            .header("Authorization", format!("Basic {credentials}"))
+            .form(&[("grant_type", "client_credentials")])
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!("reddit_auth_error:{}", response.status());
+        }
+        let value: RedditTokenResponse = response.json().await?;
+        if value.access_token.trim().is_empty() {
+            anyhow::bail!("reddit_auth_missing_token");
+        }
+        let token = RedditToken {
+            access_token: value.access_token.clone(),
+            expires_at: Instant::now() + Duration::from_secs(value.expires_in.max(60)),
+        };
+        *cached = Some(token);
+        Ok(value.access_token)
+    }
+}
+
+impl Default for RedditClient {
+    fn default() -> Self {
+        Self::new("missing-client", "missing-secret", "Vozen-Helper/1.0").expect("valid default")
+    }
+}
+
+pub fn normalize_reddit_subreddit(raw: &str) -> anyhow::Result<String> {
+    let mut value = raw.trim().trim_start_matches('/').to_ascii_lowercase();
+    if let Some(rest) = value.strip_prefix("r/") {
+        value = rest.to_owned();
+    }
+    if let Some(rest) = value.strip_prefix("subreddit/") {
+        value = rest.to_owned();
+    }
+    if !(2..=50).contains(&value.len())
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        anyhow::bail!("invalid_reddit_subreddit");
+    }
+    Ok(value)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -290,6 +1476,321 @@ impl Default for CoinGeckoClient {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Read-only JSON-RPC client for gas estimates. Endpoints are deliberately
+/// supplied by the operator through the environment; the Helper never
+/// accepts arbitrary RPC URLs from guild configuration.
+#[derive(Clone)]
+pub struct GasClient {
+    endpoints: Arc<HashMap<String, Arc<str>>>,
+    http: Client,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GasQuote {
+    pub network: String,
+    pub gas_price_gwei: f64,
+    pub block_number: Option<u64>,
+}
+
+impl GasClient {
+    pub fn new() -> Self {
+        let mut endpoints = HashMap::new();
+        for (network, variable) in [
+            ("ethereum", "ETHEREUM_RPC_URL"),
+            ("polygon", "POLYGON_RPC_URL"),
+            ("arbitrum", "ARBITRUM_RPC_URL"),
+            ("base", "BASE_RPC_URL"),
+        ] {
+            let Some(value) = std::env::var(variable)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if validate_rpc_url(&value).is_ok() {
+                endpoints.insert(network.to_string(), Arc::<str>::from(value));
+            }
+        }
+        Self {
+            endpoints: Arc::new(endpoints),
+            http: Client::builder()
+                .timeout(Duration::from_secs(8))
+                .user_agent("Vozen-Helper/1.0 (+https://vozen.org)")
+                .build()
+                .expect("valid gas HTTP client"),
+        }
+    }
+
+    pub fn configured_networks(&self) -> Vec<String> {
+        let mut networks = self.endpoints.keys().cloned().collect::<Vec<_>>();
+        networks.sort();
+        networks
+    }
+
+    pub async fn quote(&self, raw_network: &str) -> anyhow::Result<GasQuote> {
+        let network = normalize_network(raw_network)?;
+        let endpoint = self
+            .endpoints
+            .get(&network)
+            .ok_or_else(|| anyhow::anyhow!("rpc_network_not_configured"))?;
+        let request = |method: &str| {
+            self.http.post(endpoint.as_ref()).json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": method,
+                "params": []
+            }))
+        };
+        let gas_response = request("eth_gasPrice").send().await?.error_for_status()?;
+        let gas_payload: serde_json::Value = gas_response.json().await?;
+        let gas_hex = gas_payload
+            .get("result")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("rpc_missing_gas_price"))?;
+        let gas_wei = u128::from_str_radix(gas_hex.trim_start_matches("0x"), 16)
+            .map_err(|_| anyhow::anyhow!("rpc_invalid_gas_price"))?;
+        let block_number = match request("eth_blockNumber").send().await {
+            Ok(response) => response
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("result")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .and_then(|value| u64::from_str_radix(value.trim_start_matches("0x"), 16).ok()),
+            Err(_) => None,
+        };
+        Ok(GasQuote {
+            network,
+            gas_price_gwei: gas_wei as f64 / 1_000_000_000.0,
+            block_number,
+        })
+    }
+}
+
+impl Default for GasClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn normalize_network(raw_network: &str) -> anyhow::Result<String> {
+    let network = raw_network.trim().to_ascii_lowercase();
+    if !matches!(
+        network.as_str(),
+        "ethereum" | "polygon" | "arbitrum" | "base"
+    ) {
+        anyhow::bail!("unsupported_rpc_network");
+    }
+    Ok(network)
+}
+
+fn validate_rpc_url(raw_url: &str) -> anyhow::Result<()> {
+    let url = Url::parse(raw_url).map_err(|_| anyhow::anyhow!("invalid_rpc_url"))?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || url.username() != ""
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        anyhow::bail!("invalid_rpc_url");
+    }
+    Ok(())
+}
+
+/// Read-only OpenSea client. A production API key is required by OpenSea;
+/// the key stays in the process environment and is never returned to a guild.
+#[derive(Clone)]
+pub struct OpenSeaClient {
+    api_key: Option<Arc<str>>,
+    http: Client,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OpenSeaCollectionStats {
+    pub slug: String,
+    pub floor_price: Option<f64>,
+    pub volume: Option<f64>,
+    pub sales: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OpenSeaCollectionInfo {
+    pub slug: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub image_url: Option<String>,
+    pub external_url: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OpenSeaSale {
+    pub event_id: String,
+    pub timestamp: Option<String>,
+    pub collection: String,
+    pub item: Option<String>,
+    pub price: Option<String>,
+}
+
+impl OpenSeaClient {
+    pub fn new() -> Self {
+        let api_key = std::env::var("OPENSEA_API_KEY")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(Arc::<str>::from);
+        Self {
+            api_key,
+            http: Client::builder()
+                .timeout(Duration::from_secs(10))
+                .user_agent("Vozen-Helper/1.0 (+https://vozen.org)")
+                .build()
+                .expect("valid OpenSea HTTP client"),
+        }
+    }
+
+    pub fn has_api_key(&self) -> bool {
+        self.api_key.is_some()
+    }
+
+    pub async fn collection_info(&self, raw_slug: &str) -> anyhow::Result<OpenSeaCollectionInfo> {
+        let slug = normalize_opensea_slug(raw_slug)?;
+        let api_key = self
+            .api_key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("opensea_api_key_missing"))?;
+        let value = self
+            .http
+            .get(format!("https://api.opensea.io/api/v2/collections/{slug}"))
+            .header("X-API-KEY", api_key)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?;
+        Ok(OpenSeaCollectionInfo {
+            slug,
+            name: value
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            description: value
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            image_url: value
+                .get("image_url")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            external_url: value
+                .get("external_url")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        })
+    }
+
+    pub async fn collection_stats(&self, raw_slug: &str) -> anyhow::Result<OpenSeaCollectionStats> {
+        let slug = normalize_opensea_slug(raw_slug)?;
+        let api_key = self
+            .api_key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("opensea_api_key_missing"))?;
+        let value = self
+            .http
+            .get(format!(
+                "https://api.opensea.io/api/v2/collections/{slug}/stats"
+            ))
+            .header("X-API-KEY", api_key)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?;
+        let total = value.get("total").unwrap_or(&value);
+        Ok(OpenSeaCollectionStats {
+            slug,
+            floor_price: total.get("floor_price").and_then(serde_json::Value::as_f64),
+            volume: total.get("volume").and_then(serde_json::Value::as_f64),
+            sales: total.get("sales").and_then(serde_json::Value::as_u64),
+        })
+    }
+
+    pub async fn sales(&self, raw_slug: &str, limit: usize) -> anyhow::Result<Vec<OpenSeaSale>> {
+        let slug = normalize_opensea_slug(raw_slug)?;
+        let api_key = self
+            .api_key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("opensea_api_key_missing"))?;
+        let limit = limit.clamp(1, 50);
+        let limit_text = limit.to_string();
+        let value = self
+            .http
+            .get(format!(
+                "https://api.opensea.io/api/v2/events/collection/{slug}"
+            ))
+            .query(&[("event_type", "sale"), ("limit", limit_text.as_str())])
+            .header("X-API-KEY", api_key)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?;
+        Ok(value
+            .get("asset_events")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|event| {
+                let event_id = event
+                    .get("event_id")
+                    .and_then(serde_json::Value::as_str)?
+                    .to_string();
+                Some(OpenSeaSale {
+                    event_id,
+                    timestamp: event
+                        .get("event_timestamp")
+                        .and_then(serde_json::Value::as_i64)
+                        .map(|value| value.to_string()),
+                    collection: slug.clone(),
+                    item: event
+                        .pointer("/nft/identifier")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    price: event
+                        .pointer("/payment/quantity")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                })
+            })
+            .collect())
+    }
+}
+
+impl Default for OpenSeaClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn normalize_opensea_slug(raw_slug: &str) -> anyhow::Result<String> {
+    let slug = raw_slug.trim().to_ascii_lowercase();
+    if !(1..=128).contains(&slug.len())
+        || !slug
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        || slug.starts_with('-')
+        || slug.ends_with('-')
+    {
+        anyhow::bail!("invalid_opensea_slug");
+    }
+    Ok(slug)
 }
 
 pub fn normalize_coingecko_id(raw_id: &str) -> anyhow::Result<String> {
@@ -1112,12 +2613,188 @@ mod tests {
     }
 
     #[test]
+    fn reddit_subreddits_are_normalized_without_accepting_urls() {
+        assert_eq!(normalize_reddit_subreddit(" r/vozen ").unwrap(), "vozen");
+        assert_eq!(
+            normalize_reddit_subreddit("/subreddit/rust").unwrap(),
+            "rust"
+        );
+        assert!(normalize_reddit_subreddit("https://reddit.com/r/vozen").is_err());
+        assert!(normalize_reddit_subreddit("vozen-news!").is_err());
+    }
+
+    #[test]
+    fn x_handles_are_normalized_without_accepting_arbitrary_urls() {
+        assert_eq!(normalize_x_handle(" @Vozen ").unwrap(), "vozen");
+        assert_eq!(normalize_x_handle("https://x.com/Vozen").unwrap(), "vozen");
+        assert!(normalize_x_handle("https://example.com/vozen").is_err());
+        assert!(normalize_x_handle("vozen/status/123").is_err());
+        assert!(normalize_x_handle("too-long-handle-name").is_err());
+    }
+
+    #[test]
+    fn tiktok_display_payload_uses_official_fields_and_is_bounded() {
+        let payload: TikTokVideoResponse = serde_json::from_value(serde_json::json!({
+            "data": {"videos": [{
+                "id": "734",
+                "title": "Hello",
+                "video_description": "A short update",
+                "create_time": 1720000000,
+                "share_url": "https://www.tiktok.com/@vozen/video/734",
+                "embed_link": "https://www.tiktok.com/player/v1/734"
+            }]},
+            "error": {"code": "ok", "message": ""}
+        }))
+        .expect("TikTok Display payload should decode");
+        assert_eq!(payload.data.videos.len(), 1);
+        assert_eq!(payload.data.videos[0].id, "734");
+        assert!(TikTokClient::new("token", "https://open.tiktokapis.com").is_some());
+        assert!(TikTokClient::new("", "https://open.tiktokapis.com").is_none());
+    }
+
+    #[test]
+    fn instagram_graph_payload_is_bounded_and_requires_numeric_user_id() {
+        let payload: InstagramMediaResponse = serde_json::from_value(serde_json::json!({
+            "data": [{
+                "id": "media-1",
+                "caption": "Launch",
+                "media_type": "IMAGE",
+                "media_url": "https://cdn.example/media.jpg",
+                "permalink": "https://www.instagram.com/p/media-1/",
+                "timestamp": "2026-08-04T00:00:00+0000"
+            }]
+        }))
+        .expect("Meta media payload should decode");
+        assert_eq!(payload.data.len(), 1);
+        assert_eq!(payload.data[0].id, "media-1");
+        assert!(
+            InstagramClient::new(
+                "token",
+                "17841400000000000",
+                "https://graph.facebook.com/v22.0"
+            )
+            .is_some()
+        );
+        assert!(
+            InstagramClient::new("token", "creator-name", "https://graph.facebook.com/v22.0")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn kick_public_payload_is_parsed_without_accepting_insecure_clients() {
+        let payload = serde_json::json!({
+            "data": [{
+                "slug": "vozen",
+                "stream": {
+                    "id": 42,
+                    "is_live": true,
+                    "stream_title": "Building safely",
+                    "category": {"name": "Software Development"},
+                    "start_time": "2026-08-04T12:00:00Z"
+                }
+            }]
+        });
+        let channel = payload["data"].as_array().unwrap().first().unwrap();
+        assert_eq!(channel["slug"], "vozen");
+        assert_eq!(channel["stream"]["is_live"], true);
+        assert!(KickClient::new("token", "https://api.kick.com/public/v1").is_some());
+        assert!(KickClient::new("token", "http://example.com").is_none());
+    }
+
+    #[test]
+    fn stripe_webhook_signature_is_time_bounded_and_constant_time_checked() {
+        let client =
+            StripeConnectClient::new("sk_test_123456789012345", "whsec_123456789012345").unwrap();
+        let payload = br#"{"id":"evt_1"}"#;
+        let timestamp = 1_000_i64;
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"whsec_123456789012345").unwrap();
+        mac.update(timestamp.to_string().as_bytes());
+        mac.update(b".");
+        mac.update(payload);
+        let signature = format!(
+            "t={timestamp},v1={}",
+            hex::encode(mac.finalize().into_bytes())
+        );
+        assert!(client.verify_webhook(payload, &signature, timestamp));
+        assert!(!client.verify_webhook(payload, &signature, timestamp + 301));
+    }
+
+    #[test]
+    fn siwe_rejects_wrong_context_and_recovers_ethereum_address() {
+        use k256::ecdsa::SigningKey;
+
+        let verifier = SiweVerifier::new(
+            "panel.vozen.org",
+            "https://panel.vozen.org/",
+            "01234567890123456789012345678901",
+        )
+        .expect("valid SIWE verifier");
+        let key_bytes: [u8; 32] =
+            hex::decode("4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let signing_key = SigningKey::from_bytes((&key_bytes).into()).unwrap();
+        let address = eth_address_from_key(signing_key.verifying_key());
+        let now = Utc::now();
+        let message = format!(
+            "panel.vozen.org wants you to sign in with your Ethereum account:\n{}\n\nVozen wallet verification\n\nURI: https://panel.vozen.org/\nVersion: 1\nChain ID: 1\nNonce: ABCD1234\nIssued At: {}\nExpiration Time: {}",
+            address,
+            now.to_rfc3339(),
+            (now + chrono::Duration::minutes(5)).to_rfc3339()
+        );
+        let mut payload = format!("\x19Ethereum Signed Message:\n{}", message.len()).into_bytes();
+        payload.extend_from_slice(message.as_bytes());
+        let (signature, recovery) = signing_key
+            .sign_digest_recoverable(Keccak256::new_with_prefix(payload))
+            .unwrap();
+        let encoded = format!(
+            "0x{}{:02x}",
+            hex::encode(signature.to_bytes()),
+            recovery.to_byte() + 27
+        );
+        let claims = verifier
+            .verify(&message, &encoded, "ABCD1234", now)
+            .expect("valid SIWE message");
+        assert_eq!(claims.address, address);
+        assert!(
+            verifier
+                .verify(&message, &encoded, "WRONG123", now)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn siwe_nonces_are_eip4361_alphanumeric() {
+        let verifier = SiweVerifier::new(
+            "example.test",
+            "https://example.test/",
+            "12345678901234567890123456789012",
+        )
+        .expect("valid verifier");
+        let nonce = verifier.issue_nonce();
+        assert!((8..=128).contains(&nonce.len()));
+        assert!(nonce.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+    }
+
+    #[test]
     fn coingecko_ids_and_currency_are_bounded() {
         assert_eq!(normalize_coingecko_id(" Bitcoin ").unwrap(), "bitcoin");
         assert!(normalize_coingecko_id("bitcoin/usd").is_err());
         assert!(normalize_coingecko_id("-bitcoin").is_err());
         assert!(normalize_currency("EUR").is_ok());
         assert!(normalize_currency("u$ d").is_err());
+    }
+
+    #[test]
+    fn rpc_and_opensea_identifiers_are_bounded() {
+        assert_eq!(normalize_network(" Ethereum ").unwrap(), "ethereum");
+        assert!(normalize_network("mainnet").is_err());
+        assert!(validate_rpc_url("http://rpc.example").is_err());
+        assert!(validate_rpc_url("https://rpc.example/key?secret=1").is_err());
+        assert_eq!(normalize_opensea_slug(" Cool-Cats ").unwrap(), "cool-cats");
+        assert!(normalize_opensea_slug("https://opensea.io/collection/cool-cats").is_err());
     }
 
     #[test]

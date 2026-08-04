@@ -7,6 +7,8 @@ import {
   type Feature,
   type FeatureConfig,
   type FeatureSchema,
+  type ExternalProvider,
+  type ExternalSubscription,
   type Guild,
   type GuildContext,
   type Me,
@@ -44,7 +46,11 @@ const presetOptions = [
   ['starship-hangar', 'Starship Hangar', './rank-card-banners/banner-09-starship-hangar.png'],
   ['lavender-storm', 'Lavender Storm', './rank-card-banners/banner-10-lavender-storm.png'],
 ] as const;
-const localPreviewMode = !(import.meta.env.VITE_HELPER_API_BASE as string | undefined);
+// Production builds must talk to the Rust API even when GitHub Pages does not
+// inject Vite environment variables. Local preview is opt-in so a missing build
+// variable cannot silently hide the real catalogue and guild state.
+const localPreviewMode =
+  (import.meta.env.VITE_HELPER_LOCAL_PREVIEW as string | undefined)?.toLowerCase() === 'true';
 
 type Category =
   'all' | 'protection' | 'community' | 'management' | 'utility' | 'social' | 'growth' | 'web3';
@@ -68,7 +74,7 @@ type FieldSpec = {
     | 'role'
     | 'roles';
   help?: string;
-  options?: [string, string][];
+  options?: Array<[string, string] | string>;
   min?: number;
   max?: number;
   maxLength?: number;
@@ -76,6 +82,23 @@ type FieldSpec = {
   advanced?: boolean;
 };
 type SectionSpec = { title: string; description: string; fields: FieldSpec[] };
+
+// The API adapter owns the schema.  Persisted settings can outlive a schema
+// revision, so remove fields that no longer have a runtime projection before
+// they reach the editor or a subsequent publish.  Provider adapters with an
+// intentionally empty schema keep their dedicated subscription payload intact.
+function configForSchema(
+  schema: FeatureSchema,
+  defaults: FeatureConfig,
+  stored: FeatureConfig,
+): FeatureConfig {
+  const fields = schema.sections.flatMap((section) => section.fields);
+  if (fields.length === 0) return { ...defaults, ...stored };
+  const supported = new Set(fields.map((field) => field.key));
+  return Object.fromEntries(
+    Object.entries({ ...defaults, ...stored }).filter(([key]) => supported.has(key)),
+  );
+}
 
 const pages = [
   { id: 'overview', label: 'Painel', icon: '⌂', hint: 'Visão geral' },
@@ -412,7 +435,9 @@ const additionalFeatures: Feature[] = [
     description: 'Acompanha novas publicações de contas escolhidas.',
     category: 'social',
     capability: 'alerts',
-    available: false,
+    available: true,
+    maturity: 'blocked',
+    configurable: true,
     enabled: false,
   },
   {
@@ -421,7 +446,9 @@ const additionalFeatures: Feature[] = [
     description: 'Envia avisos quando aparece uma nova publicação.',
     category: 'social',
     capability: 'alerts',
-    available: false,
+    available: true,
+    maturity: 'blocked',
+    configurable: true,
     enabled: false,
   },
   {
@@ -430,7 +457,9 @@ const additionalFeatures: Feature[] = [
     description: 'Acompanha publicações de contas importantes para a comunidade.',
     category: 'social',
     capability: 'alerts',
-    available: false,
+    available: true,
+    maturity: 'blocked',
+    configurable: true,
     enabled: false,
   },
   {
@@ -439,7 +468,9 @@ const additionalFeatures: Feature[] = [
     description: 'Notifica o servidor sobre novos vídeos.',
     category: 'social',
     capability: 'alerts',
-    available: false,
+    available: true,
+    maturity: 'blocked',
+    configurable: true,
     enabled: false,
   },
   {
@@ -466,7 +497,9 @@ const additionalFeatures: Feature[] = [
     description: 'Notifica quando um criador começa uma transmissão.',
     category: 'social',
     capability: 'alerts',
-    available: false,
+    available: true,
+    maturity: 'blocked',
+    configurable: true,
     enabled: false,
   },
   {
@@ -475,7 +508,7 @@ const additionalFeatures: Feature[] = [
     description: 'Acompanha novas publicações de perfis escolhidos.',
     category: 'social',
     capability: 'alerts',
-    available: false,
+    available: true,
     enabled: false,
   },
   {
@@ -502,7 +535,9 @@ const additionalFeatures: Feature[] = [
     description: 'Prepara benefícios e cargos para apoiar o servidor.',
     category: 'growth',
     capability: 'billing',
-    available: false,
+    available: true,
+    maturity: 'blocked',
+    configurable: true,
     enabled: false,
   },
   {
@@ -511,8 +546,10 @@ const additionalFeatures: Feature[] = [
     description: 'Mostra dados de coleções NFT para a comunidade.',
     category: 'web3',
     capability: 'web3',
-    available: false,
+    available: true,
     enabled: false,
+    maturity: 'beta',
+    configurable: true,
   },
   {
     key: 'web3.nft_queries',
@@ -520,8 +557,10 @@ const additionalFeatures: Feature[] = [
     description: 'Consulta coleções NFT diretamente no servidor.',
     category: 'web3',
     capability: 'web3',
-    available: false,
+    available: true,
     enabled: false,
+    maturity: 'beta',
+    configurable: true,
   },
   {
     key: 'web3.nft_sales',
@@ -529,8 +568,10 @@ const additionalFeatures: Feature[] = [
     description: 'Acompanha vendas e listagens de coleções escolhidas.',
     category: 'web3',
     capability: 'web3',
-    available: false,
+    available: true,
     enabled: false,
+    maturity: 'beta',
+    configurable: true,
   },
   {
     key: 'web3.crypto_stats',
@@ -538,7 +579,7 @@ const additionalFeatures: Feature[] = [
     description: 'Acompanha indicadores de moedas digitais.',
     category: 'web3',
     capability: 'web3',
-    available: false,
+    available: true,
     enabled: false,
   },
   {
@@ -547,7 +588,7 @@ const additionalFeatures: Feature[] = [
     description: 'Consulta informação de criptomoedas dentro do servidor.',
     category: 'web3',
     capability: 'web3',
-    available: false,
+    available: true,
     enabled: false,
   },
   {
@@ -556,8 +597,10 @@ const additionalFeatures: Feature[] = [
     description: 'Mostra as taxas de rede atuais para a comunidade.',
     category: 'web3',
     capability: 'web3',
-    available: false,
+    available: true,
     enabled: false,
+    maturity: 'beta',
+    configurable: true,
   },
   {
     key: 'web3.gating',
@@ -565,7 +608,9 @@ const additionalFeatures: Feature[] = [
     description: 'Controla acesso e cargos com base em coleções verificadas.',
     category: 'web3',
     capability: 'web3',
-    available: false,
+    available: true,
+    maturity: 'blocked',
+    configurable: true,
     enabled: false,
   },
 ];
@@ -665,13 +710,14 @@ const defaults: Record<string, FeatureConfig> = {
     dmMessage: 'Olá {member}, bem-vindo(a) ao servidor!',
     autoRole: '',
     delaySeconds: 0,
+    farewellChannel: '',
+    farewellMessage: 'Goodbye {member}. We hope to see you again!',
+    templateId: '',
   },
   'support.welcome_channel': {
-    channel: '',
-    title: 'Começa por aqui',
-    description: 'Lê as regras e descobre os primeiros passos da comunidade.',
-    rulesChannel: '',
-    confirmationRequired: false,
+    channelId: '',
+    message: 'Welcome {member}! Start with the rules, introduce yourself and check the server channels.',
+    templateId: '',
   },
   'management.nickname': { nickname: '' },
   'management.workflows': {
@@ -688,11 +734,11 @@ const defaults: Record<string, FeatureConfig> = {
     channel: '',
   },
   'insights.stats': {
-    channel: '',
-    refreshMinutes: 15,
-    showMembers: true,
-    showMessages: true,
-    showVoice: true,
+    windowDays: 7,
+    public: false,
+    channelId: '',
+    intervalMinutes: 15,
+    nameTemplate: 'messages-{messages}',
   },
   'social.youtube': {
     sourceChannelId: '',
@@ -797,11 +843,9 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       title: 'Primeiros passos',
       description: 'Escolhe onde novos membros encontram as informações essenciais.',
       fields: [
-        { key: 'channel', label: 'Canal de entrada', kind: 'text' },
-        { key: 'title', label: 'Título do painel', kind: 'text', maxLength: 80 },
-        { key: 'description', label: 'Texto de apresentação', kind: 'textarea' },
-        { key: 'rulesChannel', label: 'Canal de regras', kind: 'text' },
-        { key: 'confirmationRequired', label: 'Pedir confirmação das regras', kind: 'toggle' },
+        { key: 'channelId', label: 'Canal de entrada', kind: 'channel' },
+        { key: 'message', label: 'Mensagem de primeiros passos', kind: 'textarea', maxLength: 2000 },
+        { key: 'templateId', label: 'Modelo reutilizável', kind: 'select', advanced: true },
       ],
     },
   ],
@@ -897,6 +941,129 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       fields: [
         { key: 'allowMemberExport', label: 'Permitir exportação pelo membro', kind: 'toggle' },
         { key: 'logChannel', label: 'Canal de registo', kind: 'text', advanced: true },
+      ],
+    },
+  ],
+  'social.reddit': [
+    {
+      title: 'Subreddit acompanhado',
+      description: 'Usa a API oficial do Reddit para avisar sobre novas publicações.',
+      fields: [
+        { key: 'sourceSubreddit', label: 'Subreddit', kind: 'text', help: 'Exemplo: discordapp (sem r/).' },
+        { key: 'targetChannelId', label: 'Canal Discord', kind: 'channel' },
+      ],
+    },
+    {
+      title: 'Mensagem',
+      description: 'Define o formato do aviso e a menção opcional.',
+      fields: [
+        { key: 'messageTemplate', label: 'Mensagem', kind: 'textarea', maxLength: 1800 },
+        { key: 'mention', label: 'Menção opcional', kind: 'text', advanced: true },
+        { key: 'intervalSeconds', label: 'Intervalo (segundos)', kind: 'number', min: 300, max: 86400, advanced: true },
+      ],
+    },
+  ],
+  'social.x': [
+    {
+      title: 'Conta acompanhada',
+      description: 'Lê publicações através da API oficial do X, quando a aplicação está aprovada.',
+      fields: [
+        { key: 'sourceHandle', label: 'Handle do X', kind: 'text', help: 'Exemplo: discord (sem @).' },
+        { key: 'targetChannelId', label: 'Canal Discord', kind: 'channel' },
+      ],
+    },
+    {
+      title: 'Mensagem',
+      description: 'Personaliza o aviso enviado para o servidor.',
+      fields: [
+        { key: 'messageTemplate', label: 'Mensagem', kind: 'textarea', maxLength: 1800 },
+        { key: 'mention', label: 'Menção opcional', kind: 'text', advanced: true },
+        { key: 'intervalSeconds', label: 'Intervalo (segundos)', kind: 'number', min: 900, max: 86400, advanced: true },
+      ],
+    },
+  ],
+  'social.tiktok': [
+    {
+      title: 'Criador acompanhado',
+      description: 'Acompanha vídeos de um criador que autorizou o Vozen pela Display API.',
+      fields: [
+        { key: 'username', label: 'Nome do criador', kind: 'text' },
+        { key: 'targetChannelId', label: 'Canal Discord', kind: 'channel' },
+      ],
+    },
+    {
+      title: 'Mensagem',
+      description: 'Define o formato dos alertas de vídeo.',
+      fields: [
+        { key: 'messageTemplate', label: 'Mensagem', kind: 'textarea', maxLength: 1800 },
+        { key: 'mention', label: 'Menção opcional', kind: 'text', advanced: true },
+        { key: 'intervalSeconds', label: 'Intervalo (segundos)', kind: 'number', min: 900, max: 86400, advanced: true },
+      ],
+    },
+  ],
+  'social.instagram': [
+    {
+      title: 'Conta acompanhada',
+      description: 'Acompanha publicações de uma conta profissional autorizada pela Meta.',
+      fields: [
+        { key: 'username', label: 'Nome de utilizador', kind: 'text' },
+        { key: 'targetChannelId', label: 'Canal Discord', kind: 'channel' },
+      ],
+    },
+    {
+      title: 'Mensagem',
+      description: 'Define o formato dos alertas de publicação.',
+      fields: [
+        { key: 'messageTemplate', label: 'Mensagem', kind: 'textarea', maxLength: 1800 },
+        { key: 'mention', label: 'Menção opcional', kind: 'text', advanced: true },
+        { key: 'intervalSeconds', label: 'Intervalo (segundos)', kind: 'number', min: 900, max: 86400, advanced: true },
+      ],
+    },
+  ],
+  'social.kick': [
+    {
+      title: 'Canal acompanhado',
+      description: 'Acompanha transmissões através da API oficial da Kick, quando disponível.',
+      fields: [
+        { key: 'sourceHandle', label: 'Handle da Kick', kind: 'text', help: 'Exemplo: vozen (sem @).' },
+        { key: 'targetChannelId', label: 'Canal Discord', kind: 'channel' },
+      ],
+    },
+    {
+      title: 'Mensagem',
+      description: 'Personaliza o alerta de transmissão.',
+      fields: [
+        { key: 'messageTemplate', label: 'Mensagem', kind: 'textarea', maxLength: 1800 },
+        { key: 'mention', label: 'Menção opcional', kind: 'text', advanced: true },
+        { key: 'intervalSeconds', label: 'Intervalo (segundos)', kind: 'number', min: 300, max: 86400, advanced: true },
+      ],
+    },
+  ],
+  'growth.monetization': [
+    {
+      title: 'Benefício do servidor',
+      description: 'Define um produto de apoio; pagamentos a servidores só ficam disponíveis após a configuração legal do Stripe Connect.',
+      fields: [
+        { key: 'productName', label: 'Nome do produto', kind: 'text' },
+        { key: 'targetRoleId', label: 'Cargo atribuído', kind: 'role' },
+        { key: 'priceCents', label: 'Preço (cêntimos)', kind: 'number', min: 50, max: 100000, advanced: true },
+        { key: 'currency', label: 'Moeda', kind: 'select', options: [['eur', 'EUR'], ['usd', 'USD']], advanced: true },
+        { key: 'trialDays', label: 'Período experimental (dias)', kind: 'number', min: 0, max: 90, advanced: true },
+      ],
+    },
+  ],
+  'web3.gating': [
+    {
+      title: 'Regra de acesso',
+      description: 'Configura uma verificação read-only; nunca introduzas uma seed phrase ou chave privada.',
+      fields: [
+        { key: 'chain', label: 'Rede', kind: 'select', options: [['ethereum', 'Ethereum'], ['polygon', 'Polygon'], ['base', 'Base']] },
+        { key: 'contractAddress', label: 'Endereço do contrato', kind: 'text' },
+        { key: 'assetType', label: 'Tipo de ativo', kind: 'select', options: [['erc20', 'ERC-20'], ['erc721', 'ERC-721'], ['erc1155', 'ERC-1155']] },
+        { key: 'tokenId', label: 'Token ID', kind: 'text', advanced: true },
+        { key: 'targetRoleId', label: 'Cargo atribuído', kind: 'role' },
+        { key: 'minimumBalance', label: 'Saldo mínimo', kind: 'number', min: 0, max: 1000000000, advanced: true },
+        { key: 'intervalSeconds', label: 'Intervalo de verificação (segundos)', kind: 'number', min: 300, max: 86400, advanced: true },
       ],
     },
   ],
@@ -1532,6 +1699,90 @@ const spec = (key: string): SectionSpec[] => {
       },
     ],
   };
+  // Keep the offline preview aligned with the Rust adapter contracts.  When
+  // the API is available it is still the source of truth; these entries only
+  // prevent the fallback page from rendering fields that the runtime ignores.
+  if (key === 'insights.stats') {
+    return [
+      {
+        title: 'Server statistics',
+        description: 'Control the reporting window and an optional live counter channel.',
+        fields: [
+          { key: 'windowDays', label: 'Reporting window (days)', kind: 'number', min: 1, max: 30 },
+          { key: 'public', label: 'Show publicly', kind: 'toggle' },
+          { key: 'channelId', label: 'Live counter channel', kind: 'text' },
+          { key: 'intervalMinutes', label: 'Counter refresh (minutes)', kind: 'number', min: 5, max: 1440, advanced: true },
+          { key: 'nameTemplate', label: 'Channel name template', kind: 'text', maxLength: 100 },
+        ] as FieldSpec[],
+      },
+    ];
+  }
+  if (key === 'web3.gas_tracker') {
+    return [
+      {
+        title: 'Gas tracker',
+        description: 'Publish read-only gas prices from an approved HTTPS RPC.',
+        fields: [
+          { key: 'network', label: 'Network', kind: 'select', options: [['ethereum', 'Ethereum'], ['polygon', 'Polygon'], ['arbitrum', 'Arbitrum'], ['base', 'Base']] },
+          { key: 'targetChannelId', label: 'Discord channel', kind: 'text' },
+          { key: 'intervalSeconds', label: 'Update interval (seconds)', kind: 'number', min: 300, max: 86400 },
+          { key: 'messageTemplate', label: 'Statistics message', kind: 'textarea', advanced: true },
+        ] as FieldSpec[],
+      },
+    ];
+  }
+  if (key === 'web3.nft_stats' || key === 'web3.nft_queries' || key === 'web3.nft_sales') {
+    const query = key === 'web3.nft_queries';
+    const title = query ? 'NFT collection query' : key === 'web3.nft_sales' ? 'NFT sales and listings' : 'NFT collection statistics';
+    return [
+      {
+        title,
+        description: 'Use the official OpenSea read-only API; no wallet or transaction access is required.',
+        fields: [
+          { key: 'collectionSlug', label: 'OpenSea collection slug', kind: 'text' },
+          ...(query
+            ? [{ key: 'maxResults', label: 'Maximum events', kind: 'number', min: 1, max: 10, advanced: true }]
+            : [
+                { key: 'targetChannelId', label: 'Discord channel', kind: 'text' },
+                { key: 'intervalSeconds', label: 'Update interval (seconds)', kind: 'number', min: 300, max: 86400 },
+                { key: 'messageTemplate', label: 'Statistics message', kind: 'textarea', advanced: true },
+                ...(key === 'web3.nft_sales' ? [{ key: 'maxResults', label: 'Maximum events', kind: 'number', min: 1, max: 10, advanced: true }] : []),
+              ]),
+        ] as FieldSpec[],
+      },
+    ];
+  }
+  if (key === 'web3.crypto_stats' || key === 'web3.crypto_queries') {
+    const stats = key === 'web3.crypto_stats';
+    return [
+      {
+        title: stats ? 'Crypto statistics' : 'Crypto queries',
+        description: 'Use the official CoinGecko read-only API with bounded symbols and results.',
+        fields: [
+          { key: 'coinIds', label: 'CoinGecko IDs', kind: 'text' },
+          { key: 'currency', label: 'Currency', kind: 'text' },
+          ...(stats
+            ? [{ key: 'targetChannelId', label: 'Discord channel', kind: 'text' }, { key: 'intervalSeconds', label: 'Update interval (seconds)', kind: 'number', min: 300, max: 86400 }, { key: 'messageTemplate', label: 'Statistics message', kind: 'textarea', advanced: true }]
+            : [{ key: 'maxResults', label: 'Maximum results', kind: 'number', min: 1, max: 10, advanced: true }]),
+        ] as FieldSpec[],
+      },
+    ];
+  }
+  if (key === 'social.bluesky') {
+    return [
+      {
+        title: 'Bluesky alerts',
+        description: 'Poll a public profile through the official Bluesky AppView API.',
+        fields: [
+          { key: 'sourceHandle', label: 'Bluesky handle', kind: 'text' },
+          { key: 'targetChannelId', label: 'Discord channel', kind: 'text' },
+          { key: 'intervalSeconds', label: 'Polling interval (seconds)', kind: 'number', min: 300, max: 86400 },
+          { key: 'messageTemplate', label: 'Alert message', kind: 'textarea', advanced: true },
+          { key: 'mention', label: 'Optional mention', kind: 'text', advanced: true },
+        ] as FieldSpec[],
+      },
+    ];
+  }
   return (
     map[key] ??
     additionalSpecs[key] ?? [
@@ -1566,6 +1817,22 @@ const quickSetupSteps: Array<{ key: QuickSetupStepKey; label: string; descriptio
   { key: 'protection', label: 'Proteção automática', description: 'Perfis anti-spam e anti-raid.' },
 ];
 
+const externalProviderForFeature = (key: string): ExternalProvider | null => {
+  if (key === 'social.reddit') return 'reddit';
+  if (key === 'social.x') return 'x';
+  if (key === 'social.tiktok') return 'tiktok';
+  if (key === 'social.instagram') return 'instagram';
+  if (key === 'social.kick') return 'kick';
+  if (key === 'social.bluesky') return 'bluesky';
+  return null;
+};
+
+const externalSourceKey = (provider: ExternalProvider): string => {
+  if (provider === 'reddit') return 'sourceSubreddit';
+  if (provider === 'tiktok' || provider === 'instagram') return 'username';
+  return 'sourceHandle';
+};
+
 function defaultQuickSetupState(guildId: string): QuickSetupState {
   return {
     guildId,
@@ -1581,6 +1848,9 @@ function App() {
   const [youtubeSubscriptions, setYoutubeSubscriptions] = useState<YouTubeSubscription[]>([]);
   const [rssSubscriptions, setRssSubscriptions] = useState<RssSubscription[]>([]);
   const [twitchSubscriptions, setTwitchSubscriptions] = useState<TwitchSubscription[]>([]);
+  const [externalSubscriptions, setExternalSubscriptions] = useState<
+    Partial<Record<ExternalProvider, ExternalSubscription[]>>
+  >({});
   const [studioTemplates, setStudioTemplates] = useState<StudioTemplate[]>([]);
   const [route, setRoute] = useState<Route>(() => parseRoute(window.location.hash));
   const [me, setMe] = useState<Me | null>(null);
@@ -1753,12 +2023,24 @@ function App() {
         .twitchSubscriptions()
         .then((result) => setTwitchSubscriptions(result.subscriptions))
         .catch(() => undefined);
+      (['reddit', 'x', 'tiktok', 'instagram', 'kick', 'bluesky'] as ExternalProvider[]).forEach((provider) => {
+        void api
+          .externalSubscriptions(provider)
+          .then((result) =>
+            setExternalSubscriptions((current) => ({ ...current, [provider]: result.subscriptions })),
+          )
+          .catch(() => undefined);
+      });
     }
   }, []);
   useEffect(() => {
     if (route.page !== 'detail' || !route.key) return;
     setDetailLoading(true);
-    const fallback = defaults[route.key] ?? {};
+    // Production configuration must never be reconstructed from a stale
+    // client-side form.  Local defaults remain useful for the explicit
+    // preview mode, but the Rust adapter is the only source of truth for the
+    // deployed panel.
+    const fallback = localPreviewMode ? defaults[route.key] ?? {} : {};
     if (localPreviewMode) {
       setDetailSchema(null);
       setDetailConfig({ ...fallback });
@@ -1773,11 +2055,14 @@ function App() {
         setDetailSchema(result.schema ?? null);
         const apiDefaults = result.defaults ?? {};
         // The API adapter is the source of truth whenever it exposes a schema.
-        // Local specs are only a compatibility fallback for legacy/preview
-        // features that have not migrated to an adapter yet. This prevents
-        // unsupported controls from being sent back to the runtime.
-        const baseConfig = result.schema ? apiDefaults : { ...fallback, ...apiDefaults };
-        const resolvedConfig = { ...baseConfig, ...result.config };
+        // Local specs are only a compatibility fallback for the explicit
+        // preview mode. In production, an API response without a schema is an
+        // adapter outage, not permission to invent controls in the browser.
+        const resolvedConfig = result.schema
+          ? configForSchema(result.schema, apiDefaults, result.config)
+          : localPreviewMode
+            ? { ...fallback, ...apiDefaults, ...result.config }
+            : { ...apiDefaults, ...result.config };
         setDetailConfig(resolvedConfig);
         setSavedDetailConfig(resolvedConfig);
         setDetailEnabled(result.enabled);
@@ -1785,15 +2070,20 @@ function App() {
       })
       .catch(() => {
         setDetailSchema(null);
-        setDetailConfig({ ...fallback });
-        setSavedDetailConfig({ ...fallback });
+        setDetailConfig(localPreviewMode ? { ...fallback } : {});
+        setSavedDetailConfig(localPreviewMode ? { ...fallback } : {});
         setDetailEnabled(features.find((item) => item.key === route.key)?.enabled ?? false);
         setDetailRevision(0);
       })
       .finally(() => setDetailLoading(false));
   }, [route.page, route.key, features]);
   useEffect(() => {
-    if (route.page !== 'detail' || route.key !== 'management.templates' || localPreviewMode) return;
+    if (
+      route.page !== 'detail' ||
+      !route.key ||
+      !['management.templates', 'support.welcome', 'support.welcome_channel'].includes(route.key) ||
+      localPreviewMode
+    ) return;
     void api
       .studioTemplates()
       .then((result) => setStudioTemplates(result.templates))
@@ -1870,6 +2160,30 @@ function App() {
       setDetailEnabled(subscription.enabled);
     }
   }, [route.page, route.key, twitchSubscriptions]);
+  useEffect(() => {
+    const provider = route.key ? externalProviderForFeature(route.key) : null;
+    const subscription = provider ? externalSubscriptions[provider]?.[0] : undefined;
+    if (route.page !== 'detail' || !provider || !subscription) return;
+    const sourceKey = externalSourceKey(provider);
+    const sourceValue = subscription[sourceKey as keyof ExternalSubscription];
+    setDetailConfig((current) => ({
+      ...current,
+      [sourceKey]: typeof sourceValue === 'string' ? sourceValue : '',
+      targetChannelId: subscription.targetChannelId,
+      messageTemplate: subscription.messageTemplate,
+      mention: subscription.mention,
+      intervalSeconds: subscription.intervalSeconds,
+    }));
+    setSavedDetailConfig((current) => ({
+      ...current,
+      [sourceKey]: typeof sourceValue === 'string' ? sourceValue : '',
+      targetChannelId: subscription.targetChannelId,
+      messageTemplate: subscription.messageTemplate,
+      mention: subscription.mention,
+      intervalSeconds: subscription.intervalSeconds,
+    }));
+    setDetailEnabled(subscription.enabled);
+  }, [route.page, route.key, externalSubscriptions]);
 
   const currentGuild = guilds.find((guild) => guild.id === me?.guildId) ?? guilds[0];
   const currentFeature = features.find((item) => item.key === route.key);
@@ -1927,6 +2241,29 @@ function App() {
     } catch (cause) {
       setStatus('error');
       setMessage(cause instanceof Error ? cause.message : 'Não foi possível guardar.');
+    }
+  }
+  async function repairDetail() {
+    if (!route.key || localPreviewMode) return;
+    setStatus('saving');
+    try {
+      const result = await api.repairFeature(route.key);
+      setDetailConfig(result.config);
+      setSavedDetailConfig(result.config);
+      setDetailEnabled(result.enabled);
+      setDetailRevision(result.revision ?? detailRevision);
+      setFeatures((items) =>
+        items.map((item) =>
+          item.key === route.key
+            ? { ...item, enabled: result.enabled, health: result.health, maturity: result.maturity }
+            : item,
+        ),
+      );
+      setStatus('ready');
+      setMessage('A publicação foi reparada e uma nova revisão foi criada.');
+    } catch (cause) {
+      setStatus('error');
+      setMessage(cause instanceof Error ? cause.message : 'Não foi possível reparar a publicação.');
     }
   }
   async function testDetail() {
@@ -2353,6 +2690,7 @@ function App() {
                 setDetailConfig((current) => ({ ...current, [key]: value }))
               }
               onSave={() => void saveDetail()}
+              onRepair={() => void repairDetail()}
               onDiscard={() => {
                 setDetailConfig(savedDetailConfig);
                 setDetailEnabled(features.find((item) => item.key === route.key)?.enabled ?? false);
@@ -3118,6 +3456,19 @@ function FeatureCatalogue({
   setSearch: (value: string) => void;
   onOpen: (key: string) => void;
 }) {
+  const uniqueFeatures = Array.from(new Map(features.map((item) => [item.key, item])).values());
+  const maturityCounts = uniqueFeatures.reduce(
+    (counts, feature) => {
+      const maturity = feature.maturity ?? (feature.available ? 'operational' : 'planned');
+      counts[maturity] = (counts[maturity] ?? 0) + 1;
+      return counts;
+    },
+    {} as Record<string, number>,
+  );
+  const operationalCount = maturityCounts.operational ?? 0;
+  const betaCount = maturityCounts.beta ?? 0;
+  const requirementCount = maturityCounts.blocked ?? 0;
+  const configurableCount = uniqueFeatures.filter((feature) => feature.configurable !== false).length;
   return (
     <section>
       <div className="catalog-toolbar">
@@ -3137,6 +3488,25 @@ function FeatureCatalogue({
           aria-label="Pesquisar funcionalidade"
         />
       </div>
+      <div className="feature-summary" aria-label="Estado do catálogo">
+        <span className="summary-item">
+          <b>{uniqueFeatures.length}</b> módulos no catálogo
+        </span>
+        <span className="summary-item summary-configurable">
+          <b>{configurableCount}</b> configurÃ¡veis
+        </span>
+        <span className="summary-item summary-ready">
+          <b>{operationalCount}</b> operacionais
+        </span>
+        <span className="summary-item summary-beta">
+          <b>{betaCount}</b> em beta
+        </span>
+        {requirementCount > 0 && (
+          <span className="summary-item summary-requirements">
+            <b>{requirementCount}</b> aguardam credenciais ou aprovação
+          </span>
+        )}
+      </div>
       <div className="filters">
         {categories.map((category) => (
           <button
@@ -3153,6 +3523,7 @@ function FeatureCatalogue({
           const maturity = feature.maturity ?? (feature.available ? 'operational' : 'planned');
           const configurable = feature.configurable ?? feature.available;
           const healthStatus = feature.health?.status;
+          const dependencies = feature.health?.dependencies ?? [];
           const label =
             healthStatus === 'misconfigured'
               ? 'Verificar configuração'
@@ -3195,16 +3566,31 @@ function FeatureCatalogue({
               </div>
               <h3>{feature.label}</h3>
               <p>{feature.description}</p>
+              {maturity === 'blocked' && feature.issues?.[0]?.message && (
+                <p className="tip feature-requirement">{feature.issues[0].message}</p>
+              )}
+              {maturity === 'blocked' && dependencies.length > 0 && (
+                <details className="feature-dependencies">
+                  <summary>Requisitos para ativar</summary>
+                  <ul>
+                    {dependencies.slice(0, 4).map((dependency) => (
+                      <li key={dependency}>{dependency}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
               <button
                 className="secondary full"
-                disabled={!configurable}
+                disabled={!configurable && maturity !== 'blocked'}
                 onClick={() => onOpen(feature.key)}
               >
                 {feature.key === 'studio.rank_card'
                   ? 'Personalizar'
                   : configurable
                     ? 'Configurar'
-                    : 'Ver plano'}
+                    : maturity === 'blocked'
+                      ? 'Ver requisitos'
+                      : 'Ver plano'}
               </button>
             </article>
           );
@@ -3226,6 +3612,7 @@ function FeatureDetail({
   onEnabled,
   onChange,
   onSave,
+  onRepair,
   onDiscard,
   onTest,
   templates,
@@ -3241,6 +3628,7 @@ function FeatureDetail({
   onEnabled: (value: boolean) => void;
   onChange: (key: string, value: unknown) => void;
   onSave: () => void;
+  onRepair: () => void;
   onDiscard: () => void;
   onTest: () => void;
   templates: StudioTemplate[];
@@ -3248,10 +3636,18 @@ function FeatureDetail({
   saving: boolean;
   onBack: () => void;
 }) {
+  const templateOptions: [string, string][] = [
+    ['', 'No template'],
+    ...templates.map((template) => [template.id, `${template.name} (v${template.version})`] as [string, string]),
+  ];
   const sections: SectionSpec[] = schema?.sections.map((section) => ({
     ...section,
-    fields: section.fields.map((field) => ({ ...field, kind: field.kind as FieldSpec['kind'] })),
-  })) ?? spec(feature?.key ?? '');
+    fields: section.fields.map((field) => ({
+      ...field,
+      kind: field.kind as FieldSpec['kind'],
+      options: field.key === 'templateId' ? templateOptions : field.options,
+    })),
+  })) ?? (localPreviewMode ? spec(feature?.key ?? '') : []);
   const configurable = feature?.configurable ?? true;
   if (!configurable)
     return (
@@ -3260,13 +3656,43 @@ function FeatureDetail({
           ← Voltar às funcionalidades
         </button>
         <div className="detail-intro card">
-          <small className="eyebrow">ROADMAP</small>
-          <h2>{feature?.label ?? 'Funcionalidade'}</h2>
-          <p>{feature?.description ?? 'Esta área está no plano do Vozen Helper.'}</p>
-          <p className="tip">
-            Ainda não existe um adaptador operacional para este servidor. Não há ativação disponível
-            até a integração, permissões e rollback estarem prontos.
-          </p>
+          <div>
+            <small className="eyebrow">{feature?.maturity === 'blocked' ? 'REQUISITOS EXTERNOS' : 'ROADMAP'}</small>
+            <h2>{feature?.label ?? 'Funcionalidade'}</h2>
+            <p>{feature?.description ?? 'Esta área está no plano do Vozen Helper.'}</p>
+            <p className="tip">
+              {feature?.issues?.[0]?.message ??
+                'Ainda não existe um adaptador operacional para este servidor. Não há ativação disponível até a integração, permissões e rollback estarem prontos.'}
+            </p>
+            {feature?.health?.dependencies && feature.health.dependencies.length > 0 && (
+              <div className="requirement-list">
+                <strong>O que falta</strong>
+                <ul>
+                  {feature.health.dependencies.map((dependency) => (
+                    <li key={dependency}>{dependency}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+    );
+  if (!schema && !localPreviewMode)
+    return (
+      <section className="detail-page">
+        <button className="back-link" onClick={onBack}>
+          ← Voltar às funcionalidades
+        </button>
+        <div className="detail-intro card">
+          <div>
+            <small className="eyebrow">ADAPTER INDISPONÍVEL</small>
+            <h2>{feature?.label ?? 'Funcionalidade'}</h2>
+            <p>
+              O painel não recebeu o contrato desta funcionalidade. Atualiza a página ou verifica o
+              estado da API antes de publicar alterações.
+            </p>
+          </div>
         </div>
       </section>
     );
@@ -3331,6 +3757,11 @@ function FeatureDetail({
           <button className="secondary full" onClick={onTest}>
             Simular configuração
           </button>
+          {!localPreviewMode && feature?.health?.status && feature.health.status !== 'ready' && (
+            <button className="secondary full" onClick={onRepair} disabled={saving}>
+              Reparar publicação
+            </button>
+          )}
           <div className="tip">
             <b>Precisas de ajuda?</b>
             <span>Os campos avançados estão fechados para manter o primeiro passo simples.</span>
@@ -3360,6 +3791,7 @@ function TemplateManager({
 }) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [content, setContent] = useState('');
   const [modules, setModules] = useState<string[]>(['core', 'security', 'support']);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -3382,11 +3814,12 @@ function TemplateManager({
         name: name.trim(),
         description: description.trim(),
         modules,
-        config: {},
+        config: { content: content.trim() },
       });
       onChange([...templates, result.template]);
       setName('');
       setDescription('');
+      setContent('');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not save the template.');
     } finally {
@@ -3427,6 +3860,10 @@ function TemplateManager({
         <label className="field">
           <span><b>Description</b><small>Optional context for the next administrator.</small></span>
           <input value={description} maxLength={500} onChange={(event) => setDescription(event.target.value)} />
+        </label>
+        <label className="field">
+          <span><b>Default message</b><small>Optional content used by welcome, goodbye and guided-channel templates. Supports {'{member}'} and {'{server}'}.</small></span>
+          <textarea value={content} maxLength={2000} rows={3} onChange={(event) => setContent(event.target.value)} />
         </label>
       </div>
       <div className="template-module-grid" aria-label="Template modules">
@@ -3623,11 +4060,14 @@ function FieldControl({
           value={String(normalized)}
           onChange={(event) => onChange(field.key, event.target.value)}
         >
-          {field.options?.map(([option, label]) => (
-            <option value={option} key={option}>
-              {label}
-            </option>
-          ))}
+          {field.options?.map((entry) => {
+            const [option, label] = Array.isArray(entry) ? entry : [entry, entry];
+            return (
+              <option value={option} key={option}>
+                {label}
+              </option>
+            );
+          })}
         </select>
       </label>
     );

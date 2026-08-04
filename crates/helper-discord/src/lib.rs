@@ -4,16 +4,22 @@ use anyhow::Result;
 use chrono::{Datelike, Utc};
 use helper_contracts::{AntiSpamObservation, AntiSpamPolicy, Plan};
 use helper_core::{
-    Config, anti_spam_policy_from_json, evaluate_anti_spam, evaluate_scam, quota_limit,
-    scam_policy_from_json,
+    AntiRaidPolicy, Config, JoinGateObservation, JoinGatePolicy, StarboardObservation,
+    anti_spam_policy_from_json, evaluate_anti_raid, evaluate_anti_spam, evaluate_join_gate,
+    evaluate_scam, evaluate_starboard, feature_is_configurable, feature_maturity, quota_limit,
+    scam_policy_from_json, starboard_policy_from_json,
 };
 use helper_modules::{
-    BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient, RssClient,
-    RssItem, TwitchClient, YouTubeClient, YouTubeVideo,
+    BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
+    EthereumRpcClient, GasClient, GasQuote, InstagramClient, InstagramMedia, KickClient,
+    KickStream, OpenSeaClient, OpenSeaCollectionInfo, OpenSeaCollectionStats, OpenSeaSale,
+    RedditClient, RedditPost, RssClient, RssItem, TikTokClient, TikTokVideo, TwitchClient, XClient,
+    XPost, YouTubeClient, YouTubeVideo,
 };
 use helper_store::{
-    BlueskySubscriptionRecord, RssSubscriptionRecord, Store, TwitchSubscriptionRecord,
-    YouTubeSubscriptionRecord,
+    BlueskySubscriptionRecord, InstagramSubscriptionRecord, KickSubscriptionRecord,
+    RedditSubscriptionRecord, RssSubscriptionRecord, Store, TikTokSubscriptionRecord,
+    TwitchSubscriptionRecord, XSubscriptionRecord, YouTubeSubscriptionRecord,
 };
 use rand::seq::SliceRandom;
 use reqwest::Client as HttpClient;
@@ -60,6 +66,34 @@ pub mod adapter {
             channel_id: String,
             content: String,
         },
+        CreateChannel {
+            guild_id: String,
+            channel_id: String,
+            name: String,
+            kind: String,
+        },
+        EditChannel {
+            channel_id: String,
+            name: String,
+        },
+        DeleteChannel {
+            channel_id: String,
+        },
+        AssignRole {
+            guild_id: String,
+            member_id: String,
+            role_id: String,
+        },
+        RemoveRole {
+            guild_id: String,
+            member_id: String,
+            role_id: String,
+        },
+        PublishEvent {
+            guild_id: String,
+            event_id: String,
+            name: String,
+        },
     }
 
     pub trait DiscordAdapter {
@@ -72,6 +106,33 @@ pub mod adapter {
         ) -> Result<(), String>;
         fn log(&mut self, channel_id: &str, content: &str) -> Result<(), String>;
         fn reply(&mut self, channel_id: &str, content: &str) -> Result<(), String>;
+        fn create_channel(
+            &mut self,
+            guild_id: &str,
+            channel_id: &str,
+            name: &str,
+            kind: &str,
+        ) -> Result<(), String>;
+        fn edit_channel(&mut self, channel_id: &str, name: &str) -> Result<(), String>;
+        fn delete_channel(&mut self, channel_id: &str) -> Result<(), String>;
+        fn assign_role(
+            &mut self,
+            guild_id: &str,
+            member_id: &str,
+            role_id: &str,
+        ) -> Result<(), String>;
+        fn remove_role(
+            &mut self,
+            guild_id: &str,
+            member_id: &str,
+            role_id: &str,
+        ) -> Result<(), String>;
+        fn publish_event(
+            &mut self,
+            guild_id: &str,
+            event_id: &str,
+            name: &str,
+        ) -> Result<(), String>;
     }
 
     #[derive(Debug, Default, Clone)]
@@ -138,6 +199,85 @@ pub mod adapter {
             });
             Ok(())
         }
+
+        fn create_channel(
+            &mut self,
+            guild_id: &str,
+            channel_id: &str,
+            name: &str,
+            kind: &str,
+        ) -> Result<(), String> {
+            self.check()?;
+            self.effects.push(Effect::CreateChannel {
+                guild_id: guild_id.into(),
+                channel_id: channel_id.into(),
+                name: name.into(),
+                kind: kind.into(),
+            });
+            Ok(())
+        }
+
+        fn edit_channel(&mut self, channel_id: &str, name: &str) -> Result<(), String> {
+            self.check()?;
+            self.effects.push(Effect::EditChannel {
+                channel_id: channel_id.into(),
+                name: name.into(),
+            });
+            Ok(())
+        }
+
+        fn delete_channel(&mut self, channel_id: &str) -> Result<(), String> {
+            self.check()?;
+            self.effects.push(Effect::DeleteChannel {
+                channel_id: channel_id.into(),
+            });
+            Ok(())
+        }
+
+        fn assign_role(
+            &mut self,
+            guild_id: &str,
+            member_id: &str,
+            role_id: &str,
+        ) -> Result<(), String> {
+            self.check()?;
+            self.effects.push(Effect::AssignRole {
+                guild_id: guild_id.into(),
+                member_id: member_id.into(),
+                role_id: role_id.into(),
+            });
+            Ok(())
+        }
+
+        fn remove_role(
+            &mut self,
+            guild_id: &str,
+            member_id: &str,
+            role_id: &str,
+        ) -> Result<(), String> {
+            self.check()?;
+            self.effects.push(Effect::RemoveRole {
+                guild_id: guild_id.into(),
+                member_id: member_id.into(),
+                role_id: role_id.into(),
+            });
+            Ok(())
+        }
+
+        fn publish_event(
+            &mut self,
+            guild_id: &str,
+            event_id: &str,
+            name: &str,
+        ) -> Result<(), String> {
+            self.check()?;
+            self.effects.push(Effect::PublishEvent {
+                guild_id: guild_id.into(),
+                event_id: event_id.into(),
+                name: name.into(),
+            });
+            Ok(())
+        }
     }
 }
 
@@ -158,7 +298,14 @@ struct Handler {
     rss: Option<RssClient>,
     twitch: Option<TwitchClient>,
     bluesky: Option<BlueskyClient>,
+    reddit: Option<RedditClient>,
+    x: Option<XClient>,
+    tiktok: Option<TikTokClient>,
+    instagram: Option<InstagramClient>,
+    kick: Option<KickClient>,
     coingecko: Option<CoinGeckoClient>,
+    gas: GasClient,
+    opensea: OpenSeaClient,
 }
 
 #[async_trait]
@@ -220,6 +367,11 @@ impl EventHandler for Handler {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             });
+            let nickname_store = self.store.clone();
+            let nickname_http = ctx.http.clone();
+            tokio::spawn(async move {
+                run_nickname_worker(nickname_http, nickname_store).await;
+            });
             if let Some(youtube) = self.youtube.clone() {
                 let store = self.store.clone();
                 let http = ctx.http.clone();
@@ -248,11 +400,69 @@ impl EventHandler for Handler {
                     run_bluesky_worker(http, store, bluesky).await;
                 });
             }
+            if let Some(reddit) = self.reddit.clone() {
+                let store = self.store.clone();
+                let http = ctx.http.clone();
+                tokio::spawn(async move {
+                    run_reddit_worker(http, store, reddit).await;
+                });
+            }
+            if let Some(x) = self.x.clone() {
+                let store = self.store.clone();
+                let http = ctx.http.clone();
+                tokio::spawn(async move {
+                    run_x_worker(http, store, x).await;
+                });
+            }
+            if let Some(tiktok) = self.tiktok.clone() {
+                let store = self.store.clone();
+                let http = ctx.http.clone();
+                tokio::spawn(async move {
+                    run_tiktok_worker(http, store, tiktok).await;
+                });
+            }
+            if let Some(instagram) = self.instagram.clone() {
+                let store = self.store.clone();
+                let http = ctx.http.clone();
+                tokio::spawn(async move {
+                    run_instagram_worker(http, store, instagram).await;
+                });
+            }
+            if let Some(kick) = self.kick.clone() {
+                let store = self.store.clone();
+                let http = ctx.http.clone();
+                tokio::spawn(async move {
+                    run_kick_worker(http, store, kick).await;
+                });
+            }
             if let Some(coingecko) = self.coingecko.clone() {
                 let store = self.store.clone();
                 let http = ctx.http.clone();
                 tokio::spawn(async move {
                     run_crypto_stats_worker(http, store, coingecko).await;
+                });
+            }
+            {
+                let store = self.store.clone();
+                let http = ctx.http.clone();
+                tokio::spawn(async move {
+                    run_stats_channel_worker(http, store).await;
+                });
+            }
+            {
+                let store = self.store.clone();
+                let http = ctx.http.clone();
+                let gas = self.gas.clone();
+                tokio::spawn(async move {
+                    run_gas_tracker_worker(http, store, gas).await;
+                });
+            }
+            {
+                let store = self.store.clone();
+                let http = ctx.http.clone();
+                let opensea = self.opensea.clone();
+                tokio::spawn(async move {
+                    run_opensea_worker(http, store, opensea).await;
                 });
             }
         }
@@ -671,6 +881,50 @@ impl EventHandler for Handler {
                     )
                     .required(false),
                 ),
+            CreateCommand::new("gas")
+                .description("Show a read-only gas price from an approved RPC")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "network",
+                        "ethereum, polygon, arbitrum or base",
+                    )
+                    .add_string_choice("Ethereum", "ethereum")
+                    .add_string_choice("Polygon", "polygon")
+                    .add_string_choice("Arbitrum", "arbitrum")
+                    .add_string_choice("Base", "base")
+                    .required(false),
+                ),
+            CreateCommand::new("nft-stats")
+                .description("Show read-only OpenSea collection statistics")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "collection",
+                        "OpenSea collection slug",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("nft-query")
+                .description("Query read-only information about an OpenSea collection")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "collection",
+                        "OpenSea collection slug",
+                    )
+                    .required(true),
+                ),
+            CreateCommand::new("nft-sales")
+                .description("Show recent read-only OpenSea sales")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "collection",
+                        "OpenSea collection slug",
+                    )
+                    .required(true),
+                ),
             CreateCommand::new("search")
                 .description("Search an approved knowledge provider")
                 .add_option(
@@ -696,6 +950,8 @@ impl EventHandler for Handler {
             CreateCommand::new("invites").description("Show current server invite usage"),
             CreateCommand::new("balance").description("Show your community balance"),
             CreateCommand::new("daily").description("Claim your daily community reward"),
+            CreateCommand::new("work").description("Claim a cooldown-based community work reward"),
+            CreateCommand::new("economy-top").description("Show the richest community members"),
             CreateCommand::new("temp-channel")
                 .description("Create a temporary voice channel for yourself"),
             CreateCommand::new("embed")
@@ -1427,6 +1683,44 @@ impl EventHandler for Handler {
         let guild_text = guild_id.to_string();
         let user_text = new.user_id.to_string();
 
+        if feature_enabled(&self.store, &guild_text, "management.audit", None) {
+            let detail = serde_json::json!({
+                "oldChannelId": old_channel_id.map(|channel| channel.to_string()),
+                "newChannelId": new_channel_id.map(|channel| channel.to_string()),
+                "contentAvailable": false,
+            })
+            .to_string();
+            let _ = self.store.record_activity(
+                &guild_text,
+                "voice_state",
+                &user_text,
+                None,
+                None,
+                &detail,
+            );
+            if let Some(raw_channel) =
+                setting_string(&self.store, &guild_text, "management.audit.log_channel")
+                    .filter(|value| !value.trim().is_empty())
+                && let Ok(log_channel) = raw_channel.parse::<u64>()
+            {
+                let from = old_channel_id
+                    .map(|channel| format!("<#{}>", channel))
+                    .unwrap_or_else(|| "not connected".into());
+                let to = new_channel_id
+                    .map(|channel| format!("<#{}>", channel))
+                    .unwrap_or_else(|| "not connected".into());
+                let _ = ChannelId::new(log_channel)
+                    .say(
+                        &ctx.http,
+                        format!(
+                            "Audit: <@{}> voice state changed from {from} to {to}.",
+                            user_text
+                        ),
+                    )
+                    .await;
+            }
+        }
+
         // Voice XP is session based: joins start a durable snapshot, moves
         // close the old snapshot before starting the new one, and leaves close
         // it without relying on a background timer. The store operation is
@@ -1441,6 +1735,25 @@ impl EventHandler for Handler {
             )
         {
             let now = Utc::now().timestamp();
+            let ignored_channels = setting_string(
+                &self.store,
+                &guild_text,
+                "community.levels.ignored_channels",
+            )
+            .unwrap_or_default();
+            let is_ignored = |channel_id: Option<serenity::all::ChannelId>| {
+                channel_id.is_some_and(|channel_id| {
+                    ignored_channels
+                        .split(',')
+                        .map(str::trim)
+                        .any(|ignored| ignored == channel_id.to_string())
+                })
+            };
+            let previous_session = self
+                .store
+                .active_voice_session(&guild_text, &user_text)
+                .ok()
+                .flatten();
             if old_channel_id.is_some()
                 && let Ok(Some(minutes)) =
                     self.store
@@ -1454,7 +1767,14 @@ impl EventHandler for Handler {
                 )
                 .clamp(0, 30);
                 let xp = minutes.min(24 * 60).saturating_mul(per_minute);
-                if xp > 0 {
+                if xp > 0
+                    && !previous_session.as_ref().is_some_and(|session| {
+                        ignored_channels
+                            .split(',')
+                            .map(str::trim)
+                            .any(|ignored| ignored == session.channel_id)
+                    })
+                {
                     let before = self.store.level_for(&guild_text, &user_text).unwrap_or(0);
                     if let Err(error) = self.store.add_xp(&guild_text, &user_text, xp) {
                         warn!(%guild_id, user = %new.user_id, %error, "failed to award voice XP");
@@ -1479,6 +1799,7 @@ impl EventHandler for Handler {
                 }
             }
             if let Some(channel_id) = new_channel_id
+                && !is_ignored(Some(channel_id))
                 && let Err(error) = self.store.start_voice_session(
                     &guild_text,
                     &user_text,
@@ -1498,10 +1819,16 @@ impl EventHandler for Handler {
             if let Ok(Some(record)) = self.store.temp_channel(&channel_id)
                 && user_text == record.owner_id
             {
-                if let Err(error) = old_channel_id.delete(&ctx.http).await {
-                    warn!(%guild_id, %old_channel_id, %error, "failed to remove ownerless temporary voice channel");
-                } else if let Err(error) = self.store.remove_temp_channel(&channel_id) {
-                    warn!(%guild_id, %old_channel_id, %error, "failed to remove temporary channel record");
+                // Moving the owner must not delete the room.  Without the
+                // optional Serenity cache we cannot prove that a moved room
+                // is empty, so only clean up after a full voice disconnect;
+                // the next disconnect event can retry an orphaned room.
+                if should_cleanup_temp_channel(new_channel_id) {
+                    if let Err(error) = old_channel_id.delete(&ctx.http).await {
+                        warn!(%guild_id, %old_channel_id, %error, "failed to remove ownerless temporary voice channel");
+                    } else if let Err(error) = self.store.remove_temp_channel(&channel_id) {
+                        warn!(%guild_id, %old_channel_id, %error, "failed to remove temporary channel record");
+                    }
                 }
             }
         }
@@ -1548,6 +1875,71 @@ impl EventHandler for Handler {
         let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let _ = self.store.record_join(&guild_id.to_string(), &day);
         let guild_text = guild_id.to_string();
+        if feature_enabled(&self.store, &guild_text, "management.audit", None) {
+            let detail = serde_json::json!({
+                "event": "member_join",
+                "contentAvailable": false,
+            })
+            .to_string();
+            let _ = self.store.record_activity(
+                &guild_text,
+                "member_join",
+                &new_member.user.id.to_string(),
+                Some(&new_member.user.name),
+                None,
+                &detail,
+            );
+        }
+        // Discord's member-add event does not carry an invite code. When the
+        // invite tracker is enabled, compare the current usage counters with
+        // the bounded snapshot from the previous observation and attribute a
+        // join only when exactly one invite advanced. A missing/ambiguous
+        // delta is deliberately left unattributed rather than guessed.
+        if feature_enabled(&self.store, &guild_text, "management.invite_tracker", None)
+            && let Ok(invites) = guild_id.invites(&ctx.http).await
+        {
+            let mut candidate: Option<(String, Option<String>, i64)> = None;
+            for invite in invites {
+                let inviter_id = invite.inviter.as_ref().map(|user| user.id.to_string());
+                let previous = self
+                    .store
+                    .observe_invite(
+                        &guild_text,
+                        &invite.code,
+                        invite.uses.min(9_999_999) as i64,
+                        inviter_id.as_deref(),
+                    )
+                    .ok()
+                    .flatten();
+                let Some(previous) = previous else {
+                    continue;
+                };
+                let delta = invite.uses as i64 - previous;
+                if delta > 0 {
+                    if candidate.is_some() {
+                        candidate = None;
+                        break;
+                    }
+                    candidate = Some((invite.code, inviter_id, delta));
+                }
+            }
+            if let Some((code, inviter_id, delta)) = candidate {
+                let _ = self.store.record_invite_attribution(
+                    &guild_text,
+                    &new_member.user.id.to_string(),
+                    &code,
+                    inviter_id.as_deref(),
+                );
+                let _ = self.store.record_activity(
+                    &guild_text,
+                    "invite_join",
+                    &new_member.user.id.to_string(),
+                    Some(&new_member.user.name),
+                    inviter_id.as_deref(),
+                    &serde_json::json!({"code": code, "delta": delta}).to_string(),
+                );
+            }
+        }
         // Anti-raid containment is temporary; an expiry prevents a restart
         // from leaving the join gate latched forever. Manual gates are not
         // touched because only an anti-raid latch sets this marker.
@@ -1586,12 +1978,12 @@ impl EventHandler for Handler {
                 "false",
             );
         }
-        let anti_raid_enabled = self
-            .store
-            .get_setting(&guild_text, "security.anti_raid.enabled")
-            .ok()
-            .flatten()
-            .is_some_and(|value| value == "true");
+        let anti_raid_enabled = feature_enabled(
+            &self.store,
+            &guild_text,
+            "protection.anti_raid",
+            Some("security.anti_raid.enabled"),
+        );
         if anti_raid_enabled {
             let threshold = self
                 .store
@@ -1609,9 +2001,9 @@ impl EventHandler for Handler {
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(10)
                 .clamp(3, 60);
-            let armed = {
+            let join_count = {
                 let mut joins = self.joins.lock().expect("join mutex poisoned");
-                join_burst_armed(
+                join_burst_count(
                     &mut joins,
                     &guild_text,
                     Instant::now(),
@@ -1619,6 +2011,30 @@ impl EventHandler for Handler {
                     threshold,
                 )
             };
+            let anti_raid_policy = AntiRaidPolicy {
+                join_threshold: threshold as u32,
+                window_seconds,
+                incident_minutes: setting_u64(
+                    &self.store,
+                    &guild_text,
+                    "security.anti_raid.incident_minutes",
+                    10,
+                )
+                .clamp(1, 120),
+                verification: self
+                    .store
+                    .get_setting(&guild_text, "security.anti_raid.verification")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "high".into()),
+                alert_only: setting_bool(
+                    &self.store,
+                    &guild_text,
+                    "security.anti_raid.alert_only",
+                    false,
+                ),
+            };
+            let armed = evaluate_anti_raid(&anti_raid_policy, join_count as u32, false).armed;
             if armed {
                 let shadow_mode = shadow_mode_enabled(
                     self.store
@@ -1632,6 +2048,9 @@ impl EventHandler for Handler {
                     "security.anti_raid.alert_only",
                     false,
                 );
+                let raid_decision =
+                    evaluate_anti_raid(&anti_raid_policy, join_count as u32, shadow_mode);
+                let shadow_mode = raid_decision.shadow_mode;
                 // Bounded response: latch the existing gate and alert moderators.
                 // Shadow mode records and alerts but deliberately does not contain.
                 if !shadow_mode {
@@ -1650,18 +2069,10 @@ impl EventHandler for Handler {
                     let _ =
                         self.store
                             .set_setting(&guild_text, "security.join_gate.enabled", "true");
-                    let incident_minutes = self
-                        .store
-                        .get_setting(&guild_text, "security.anti_raid.incident_minutes")
-                        .ok()
-                        .flatten()
-                        .and_then(|value| value.parse::<i64>().ok())
-                        .unwrap_or(10)
-                        .clamp(1, 120);
                     let _ = self.store.set_setting(
                         &guild_text,
                         "security.anti_raid.gate_until",
-                        &(now + incident_minutes * 60).to_string(),
+                        &(now + (raid_decision.incident_minutes as i64) * 60).to_string(),
                     );
                     let _ = self.store.set_setting(
                         &guild_text,
@@ -1670,11 +2081,11 @@ impl EventHandler for Handler {
                     );
                 }
                 let reason = format!(
-                    "Anti-raid: {threshold} joins dentro de {window_seconds}s; {}",
+                    "Anti-raid: {threshold} joins within {window_seconds}s; {}",
                     if shadow_mode {
-                        "shadow mode, sem contenção automática"
+                        "shadow mode, no automatic containment"
                     } else {
-                        "join gate ativado"
+                        "join gate enabled"
                     }
                 );
                 let _ = self.store.record_case(
@@ -1717,12 +2128,13 @@ impl EventHandler for Handler {
                 }
             }
         }
-        let gate_enabled = self
-            .store
-            .get_setting(&guild_text, "security.join_gate.enabled")
-            .ok()
-            .flatten()
-            .is_some_and(|value| value == "true");
+        let gate_enabled = raid_latched
+            || feature_enabled(
+                &self.store,
+                &guild_text,
+                "protection.join_gate",
+                Some("security.join_gate.enabled"),
+            );
         if gate_enabled {
             let minimum_age = self
                 .store
@@ -1774,26 +2186,28 @@ impl EventHandler for Handler {
                 .filter(|pattern| !pattern.is_empty())
                 .map(str::to_lowercase)
                 .collect::<Vec<_>>();
-            let mut gate_reasons = Vec::new();
-            if account_age_days < minimum_age {
-                gate_reasons.push(format!("account age {account_age_days}d < {minimum_age}d"));
-            }
-            if require_avatar && new_member.user.avatar.is_none() {
-                gate_reasons.push("profile avatar is required".to_string());
-            }
-            if let Some(pattern) = blocked_patterns
-                .iter()
-                .find(|pattern| display_name.contains(pattern.as_str()))
-            {
-                gate_reasons.push(format!("display name matches `{pattern}`"));
-            }
-            if !gate_reasons.is_empty() {
-                let action = self
-                    .store
-                    .get_setting(&guild_text, "security.join_gate.action")
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| "quarantine".to_string());
+            let action = self
+                .store
+                .get_setting(&guild_text, "security.join_gate.action")
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "quarantine".to_string());
+            let gate_decision = evaluate_join_gate(
+                &JoinGatePolicy {
+                    minimum_account_days: minimum_age,
+                    require_avatar,
+                    blocked_name_patterns: blocked_patterns,
+                    action,
+                },
+                &JoinGateObservation {
+                    account_age_days,
+                    has_avatar: new_member.user.avatar.is_some(),
+                    display_name,
+                },
+            );
+            if gate_decision.blocked {
+                let action = gate_decision.action;
+                let gate_reasons = gate_decision.reasons;
                 if action == "quarantine"
                     && let Some(role_id) =
                         setting_u64_optional(&self.store, &guild_text, "security.join_gate.role_id")
@@ -1850,9 +2264,27 @@ impl EventHandler for Handler {
                 let _ = new_member.add_role(&ctx.http, RoleId::new(role_id)).await;
             }
             let message = setting_string(&self.store, &guild_text, "support.welcome.message")
+                .map(|message| {
+                    template_message(
+                        &self.store,
+                        &guild_text,
+                        "support.welcome.template_id",
+                        "welcome",
+                        message,
+                    )
+                })
                 .unwrap_or_else(|| "👋 Welcome to the server, {member}!".to_string())
                 .replace("{member}", &member_mention)
                 .replace("{server}", "this server");
+            let message = template_message(
+                &self.store,
+                &guild_text,
+                "support.welcome.template_id",
+                "welcome",
+                message,
+            )
+            .replace("{member}", &member_mention)
+            .replace("{server}", "this server");
             let fallback_channel = guild_id
                 .to_partial_guild(&ctx.http)
                 .await
@@ -1867,9 +2299,27 @@ impl EventHandler for Handler {
             }
             if setting_bool(&self.store, &guild_text, "support.welcome.send_dm", false) {
                 let dm = setting_string(&self.store, &guild_text, "support.welcome.dm_message")
+                    .map(|message| {
+                        template_message(
+                            &self.store,
+                            &guild_text,
+                            "support.welcome.template_id",
+                            "dm",
+                            message,
+                        )
+                    })
                     .unwrap_or_else(|| "Hello {member}, welcome to the server!".to_string())
                     .replace("{member}", &member_mention)
                     .replace("{server}", "this server");
+                let dm = template_message(
+                    &self.store,
+                    &guild_text,
+                    "support.welcome.template_id",
+                    "dm",
+                    dm,
+                )
+                .replace("{member}", &member_mention)
+                .replace("{server}", "this server");
                 let _ = new_member
                     .user
                     .direct_message(&ctx.http, serenity::all::CreateMessage::new().content(dm))
@@ -1889,12 +2339,51 @@ impl EventHandler for Handler {
                 &guild_text,
                 "support.welcome_channel.message",
             )
+            .map(|message| template_message(&self.store, &guild_text, "support.welcome_channel.template_id", "welcomeChannel", message))
             .unwrap_or_else(|| {
                 "Welcome {member}! Start with the rules, introduce yourself and check the server channels.".to_string()
             })
             .replace("{member}", &member_mention)
             .replace("{server}", "this server");
-            let _ = ChannelId::new(channel_id).say(&ctx.http, guide).await;
+            let guide = template_message(
+                &self.store,
+                &guild_text,
+                "support.welcome_channel.template_id",
+                "welcomeChannel",
+                guide,
+            )
+            .replace("{member}", &member_mention)
+            .replace("{server}", "this server");
+            let configured_steps =
+                setting_string(&self.store, &guild_text, "support.welcome_channel.steps")
+                    .unwrap_or_else(|| "rules,introductions,channels".to_string());
+            let steps = configured_steps
+                .split(',')
+                .filter(|step| matches!(*step, "rules" | "introductions" | "channels" | "help"))
+                .take(4)
+                .collect::<Vec<_>>();
+            let buttons = steps
+                .iter()
+                .map(|step| {
+                    let label = match *step {
+                        "rules" => "Read the rules",
+                        "introductions" => "Introduce yourself",
+                        "channels" => "Explore channels",
+                        "help" => "Get help",
+                        _ => "Continue",
+                    };
+                    CreateButton::new(format!("welcome:step:{guild_text}:{step}"))
+                        .label(label)
+                        .style(ButtonStyle::Secondary)
+                })
+                .collect::<Vec<_>>();
+            let mut message = CreateMessage::new().content(guide);
+            if !buttons.is_empty() {
+                message = message.components(vec![CreateActionRow::Buttons(buttons)]);
+            }
+            let _ = ChannelId::new(channel_id)
+                .send_message(&ctx.http, message)
+                .await;
         }
     }
 
@@ -1908,12 +2397,45 @@ impl EventHandler for Handler {
         let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let guild_text = guild_id.to_string();
         let _ = self.store.record_leave(&guild_text, &day);
+        if feature_enabled(&self.store, &guild_text, "management.audit", None) {
+            let detail = serde_json::json!({
+                "event": "member_leave",
+                "contentAvailable": false,
+            })
+            .to_string();
+            let _ = self.store.record_activity(
+                &guild_text,
+                "member_leave",
+                &user.id.to_string(),
+                Some(&user.name),
+                None,
+                &detail,
+            );
+        }
         if feature_enabled(&self.store, &guild_text, "support.welcome", None) {
             let farewell =
                 setting_string(&self.store, &guild_text, "support.welcome.farewell_message")
+                    .map(|message| {
+                        template_message(
+                            &self.store,
+                            &guild_text,
+                            "support.welcome.template_id",
+                            "farewell",
+                            message,
+                        )
+                    })
                     .unwrap_or_else(|| "Goodbye {member}. We hope to see you again!".to_string())
                     .replace("{member}", &user.name)
                     .replace("{server}", "this server");
+            let farewell = template_message(
+                &self.store,
+                &guild_text,
+                "support.welcome.template_id",
+                "farewell",
+                farewell,
+            )
+            .replace("{member}", &user.name)
+            .replace("{server}", "this server");
             let channel = setting_u64_optional(
                 &self.store,
                 &guild_text,
@@ -2091,13 +2613,12 @@ impl EventHandler for Handler {
         let Some(guild_id) = reaction.guild_id else {
             return;
         };
-        if self
-            .store
-            .get_setting(&guild_id.to_string(), "feature.community.starboard")
-            .ok()
-            .flatten()
-            .is_some_and(|value| value != "true")
-        {
+        if !feature_enabled(
+            &self.store,
+            &guild_id.to_string(),
+            "community.starboard",
+            Some("feature.community.starboard"),
+        ) {
             return;
         }
         if reaction.user_id == ctx.http.get_current_user().await.ok().map(|user| user.id) {
@@ -2154,7 +2675,6 @@ impl EventHandler for Handler {
         else {
             return;
         };
-        let count = users.len() as i64;
         let original = match reaction
             .channel_id
             .message(&ctx.http, reaction.message_id)
@@ -2163,36 +2683,38 @@ impl EventHandler for Handler {
             Ok(message) => message,
             Err(_) => return,
         };
-        if !setting_bool(
-            &self.store,
-            &guild_id.to_string(),
-            "community.starboard.allow_self_star",
-            false,
-        ) && reaction.user_id == Some(original.author.id)
-        {
+        let guild_text = guild_id.to_string();
+        let policy = starboard_policy_for_store(&self.store, &guild_text);
+        let author_role_ids = guild_id
+            .member(&ctx.http, original.author.id)
+            .await
+            .map(|member| {
+                member
+                    .roles
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let decision = evaluate_starboard(
+            &policy,
+            &StarboardObservation {
+                source_channel_id: reaction.channel_id.to_string(),
+                author_id: original.author.id.to_string(),
+                reactor_ids: users.iter().map(|user| user.id.to_string()).collect(),
+                author_role_ids,
+                has_attachments: !original.attachments.is_empty(),
+            },
+        );
+        if decision.ignored {
             return;
         }
-        if !setting_bool(
-            &self.store,
-            &guild_id.to_string(),
-            "community.starboard.include_images",
-            true,
-        ) && !original.attachments.is_empty()
-        {
-            return;
-        }
+        let count = decision.count as i64;
         let link = format!(
             "https://discord.com/channels/{}/{}/{}",
             guild_id, reaction.channel_id, reaction.message_id
         );
-        let threshold = setting_i64(
-            &self.store,
-            &guild_id.to_string(),
-            "community.starboard.threshold",
-            3,
-        )
-        .clamp(1, 100);
-        if count < threshold {
+        if !decision.should_publish {
             if let Ok(Some(entry)) = self
                 .store
                 .star_entry(&guild_id.to_string(), &reaction.message_id.to_string())
@@ -2212,6 +2734,18 @@ impl EventHandler for Handler {
             "⭐ **{} estrelas** em <@{}>\n{}\n{}",
             count, original.author.id, original.content, link
         );
+        let attachment_links = original
+            .attachments
+            .iter()
+            .take(4)
+            .map(|attachment| attachment.url.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = if attachment_links.is_empty() {
+            content
+        } else {
+            format!("{content}\n{attachment_links}")
+        };
         if let Ok(Some(entry)) = self
             .store
             .star_entry(&guild_id.to_string(), &reaction.message_id.to_string())
@@ -2247,7 +2781,7 @@ impl EventHandler for Handler {
     async fn message_delete(
         &self,
         ctx: Context,
-        _channel_id: ChannelId,
+        channel_id: ChannelId,
         deleted_message_id: serenity::all::MessageId,
         guild_id: Option<serenity::all::GuildId>,
     ) {
@@ -2255,6 +2789,37 @@ impl EventHandler for Handler {
             return;
         };
         let guild_text = guild_id.to_string();
+        if feature_enabled(&self.store, &guild_text, "management.audit", None) {
+            let detail = serde_json::json!({
+                "messageId": deleted_message_id.to_string(),
+                "channelId": channel_id.to_string(),
+                "contentAvailable": false,
+            })
+            .to_string();
+            let _ = self.store.record_activity(
+                &guild_text,
+                "message_delete",
+                "unknown",
+                None,
+                Some("unknown"),
+                &detail,
+            );
+            if let Some(raw_channel) =
+                setting_string(&self.store, &guild_text, "management.audit.log_channel")
+                    .filter(|value| !value.trim().is_empty())
+                && let Ok(log_channel) = raw_channel.parse::<u64>()
+            {
+                let _ = ChannelId::new(log_channel)
+                    .say(
+                        &ctx.http,
+                        format!(
+                            "Audit: message {} deleted from <#{}>. Content was not available.",
+                            deleted_message_id, channel_id
+                        ),
+                    )
+                    .await;
+            }
+        }
         let Ok(Some(entry)) = self
             .store
             .star_entry(&guild_text, &deleted_message_id.to_string())
@@ -2281,7 +2846,7 @@ impl EventHandler for Handler {
     async fn message_delete_bulk(
         &self,
         ctx: Context,
-        _channel_id: ChannelId,
+        channel_id: ChannelId,
         deleted_message_ids: Vec<serenity::all::MessageId>,
         guild_id: Option<serenity::all::GuildId>,
     ) {
@@ -2289,6 +2854,38 @@ impl EventHandler for Handler {
             return;
         };
         let guild_text = guild_id.to_string();
+        if feature_enabled(&self.store, &guild_text, "management.audit", None) {
+            let detail = serde_json::json!({
+                "channelId": channel_id.to_string(),
+                "count": deleted_message_ids.len(),
+                "contentAvailable": false,
+            })
+            .to_string();
+            let _ = self.store.record_activity(
+                &guild_text,
+                "message_delete_bulk",
+                "unknown",
+                None,
+                Some("unknown"),
+                &detail,
+            );
+            if let Some(raw_channel) =
+                setting_string(&self.store, &guild_text, "management.audit.log_channel")
+                    .filter(|value| !value.trim().is_empty())
+                && let Ok(log_channel) = raw_channel.parse::<u64>()
+            {
+                let _ = ChannelId::new(log_channel)
+                    .say(
+                        &ctx.http,
+                        format!(
+                            "Audit: {} messages deleted in <#{}>. Content was not available.",
+                            deleted_message_ids.len(),
+                            channel_id
+                        ),
+                    )
+                    .await;
+            }
+        }
         let board_id = setting_string(&self.store, &guild_text, "community.starboard.channel_id")
             .and_then(|value| value.parse::<u64>().ok())
             .map(serenity::all::ChannelId::new);
@@ -2351,6 +2948,35 @@ impl EventHandler for Handler {
                 Some(&author_id),
                 &detail,
             );
+            if let Some(raw_channel) =
+                setting_string(&self.store, &guild_text, "management.audit.log_channel")
+                    .filter(|value| !value.trim().is_empty())
+                && let Ok(log_channel) = raw_channel.parse::<u64>()
+            {
+                let content = if setting_bool(
+                    &self.store,
+                    &guild_text,
+                    "management.audit.include_content",
+                    false,
+                ) {
+                    event
+                        .content
+                        .as_deref()
+                        .map(|value| format!(" Content: {}", truncate(value, 900)))
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let _ = ChannelId::new(log_channel)
+                    .say(
+                        &ctx.http,
+                        format!(
+                            "Audit: message {} edited in <#{}> by <@{}>.{}",
+                            event.id, event.channel_id, author_id, content
+                        ),
+                    )
+                    .await;
+            }
         }
 
         // Edited messages must pass the same scam evaluator as new messages.
@@ -2507,7 +3133,9 @@ impl EventHandler for Handler {
                 }
             }
         }
-        if let Ok(Some(afk)) = self.store.get_afk(&guild_text, &user_text) {
+        if feature_enabled(&self.store, &guild_text, "utility.reminders", None)
+            && let Ok(Some(afk)) = self.store.get_afk(&guild_text, &user_text)
+        {
             let _ = self.store.clear_afk(&guild_text, &user_text);
             let _ = message
                 .channel_id
@@ -2784,7 +3412,14 @@ pub async fn run(config: &Config) -> Result<()> {
             rss: Some(RssClient::new()),
             twitch: TwitchClient::from_env(),
             bluesky: Some(BlueskyClient::new()),
+            reddit: RedditClient::from_env(),
+            x: XClient::from_env(),
+            tiktok: TikTokClient::from_env(),
+            instagram: InstagramClient::from_env(),
+            kick: KickClient::from_env(),
             coingecko: Some(CoinGeckoClient::new()),
+            gas: GasClient::new(),
+            opensea: OpenSeaClient::new(),
         })
         .application_id(config.discord_application_id.into())
         .await?;
@@ -3077,6 +3712,340 @@ fn format_crypto_quotes(quotes: &[CoinGeckoQuote]) -> String {
     content.chars().take(2_000).collect()
 }
 
+fn format_gas_quote(quote: &GasQuote) -> String {
+    let block = quote
+        .block_number
+        .map(|value| format!("Block {value}."))
+        .unwrap_or_default();
+    format!(
+        "**{}** gas price: {:.3} Gwei. {block}\n\nSource: operator-approved RPC; read-only network data.",
+        quote.network, quote.gas_price_gwei,
+    )
+}
+
+fn format_nft_stats(stats: &OpenSeaCollectionStats) -> String {
+    let floor = stats
+        .floor_price
+        .map(|value| format!("{value:.4} ETH"))
+        .unwrap_or_else(|| "n/a".into());
+    let volume = stats
+        .volume
+        .map(|value| format!("{value:.4} ETH"))
+        .unwrap_or_else(|| "n/a".into());
+    let sales = stats
+        .sales
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "n/a".into());
+    format!(
+        "**OpenSea — {}**\nFloor: {floor}\nVolume: {volume}\nSales: {sales}\n\nRead-only collection data; not financial advice.",
+        stats.slug
+    )
+}
+
+fn format_nft_collection(info: &OpenSeaCollectionInfo) -> String {
+    let title = info.name.as_deref().unwrap_or(info.slug.as_str());
+    let description = info
+        .description
+        .as_deref()
+        .map(|value| truncate(value, 600))
+        .unwrap_or_else(|| "No public description was provided.".into());
+    let external = info
+        .external_url
+        .as_deref()
+        .map(|url| format!("\n{url}"))
+        .unwrap_or_default();
+    format!(
+        "**{title}** (`{}`)\n{}{}\n\nRead-only OpenSea collection data.",
+        info.slug, description, external
+    )
+    .chars()
+    .take(2_000)
+    .collect()
+}
+
+fn format_nft_sales(sales: &[OpenSeaSale]) -> String {
+    let rows = sales.iter().take(10).map(|sale| {
+        let item = sale.item.as_deref().unwrap_or("item");
+        let price = sale.price.as_deref().unwrap_or("price unavailable");
+        format!("• {item} — {price} (event {})", sale.event_id)
+    });
+    let mut content = format!(
+        "**Recent OpenSea sales — {}**\n{}",
+        sales
+            .first()
+            .map(|sale| sale.collection.as_str())
+            .unwrap_or("collection"),
+        rows.collect::<Vec<_>>().join("\n")
+    );
+    content.push_str("\n\nRead-only collection data; not financial advice.");
+    content.chars().take(2_000).collect()
+}
+
+async fn run_gas_tracker_worker(http: Arc<serenity::http::Http>, store: Store, gas: GasClient) {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        let rows = match store.enabled_feature_settings("web3.gas_tracker") {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::error!(%error, "gas tracker worker could not load settings");
+                continue;
+            }
+        };
+        let now = Utc::now().timestamp_millis();
+        for setting in rows {
+            if !feature_enabled(&store, &setting.guild_id, "web3.gas_tracker", None) {
+                continue;
+            }
+            let config =
+                serde_json::from_str::<serde_json::Value>(&setting.config_json).unwrap_or_default();
+            let Some(object) = config.as_object() else {
+                continue;
+            };
+            // Published projections are the live source; the JSON fallback
+            // keeps releases before the adapter registry readable.
+            let interval_seconds = setting_i64(
+                &store,
+                &setting.guild_id,
+                "web3.gas_tracker.interval_seconds",
+                object
+                    .get("intervalSeconds")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(900),
+            )
+            .clamp(300, 86_400);
+            let last_poll = setting_i64(
+                &store,
+                &setting.guild_id,
+                "web3_gas_tracker.last_poll_at",
+                0,
+            );
+            if last_poll > 0 && now.saturating_sub(last_poll) < interval_seconds * 1_000 {
+                continue;
+            }
+            let Some(channel_id) = setting_string(
+                &store,
+                &setting.guild_id,
+                "web3.gas_tracker.target_channel_id",
+            )
+            .or_else(|| {
+                object
+                    .get("targetChannelId")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .and_then(|value| value.parse::<u64>().ok()) else {
+                continue;
+            };
+            let network = setting_string(&store, &setting.guild_id, "web3.gas_tracker.network")
+                .or_else(|| {
+                    object
+                        .get("network")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .unwrap_or_else(|| "ethereum".into());
+            let quote = match gas.quote(&network).await {
+                Ok(quote) => quote,
+                Err(error) => {
+                    tracing::warn!(%error, guild_id = %setting.guild_id, network, "gas tracker provider request failed");
+                    continue;
+                }
+            };
+            let template = setting_string(
+                &store,
+                &setting.guild_id,
+                "web3.gas_tracker.message_template",
+            )
+            .or_else(|| {
+                object
+                    .get("messageTemplate")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or_else(|| "{network} gas: {gasPriceGwei} Gwei (block {blockNumber})".into());
+            let content = template
+                .replace("{network}", &quote.network)
+                .replace("{gasPriceGwei}", &format!("{:.3}", quote.gas_price_gwei))
+                .replace(
+                    "{blockNumber}",
+                    &quote
+                        .block_number
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "unknown".into()),
+                )
+                .chars()
+                .take(2_000)
+                .collect::<String>();
+            if ChannelId::new(channel_id)
+                .say(&http, content)
+                .await
+                .is_err()
+            {
+                tracing::warn!(guild_id = %setting.guild_id, "gas tracker Discord delivery failed");
+                continue;
+            }
+            let _ = store.set_setting(
+                &setting.guild_id,
+                "web3_gas_tracker.last_poll_at",
+                &now.to_string(),
+            );
+        }
+    }
+}
+
+async fn run_opensea_worker(http: Arc<serenity::http::Http>, store: Store, opensea: OpenSeaClient) {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        for key in ["web3.nft_stats", "web3.nft_sales"] {
+            let rows = match store.enabled_feature_settings(key) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    tracing::error!(%error, %key, "OpenSea worker could not load settings");
+                    continue;
+                }
+            };
+            let now = Utc::now().timestamp_millis();
+            for setting in rows {
+                if !feature_enabled(&store, &setting.guild_id, key, None) {
+                    continue;
+                }
+                let config = serde_json::from_str::<serde_json::Value>(&setting.config_json)
+                    .unwrap_or_default();
+                let Some(object) = config.as_object() else {
+                    continue;
+                };
+                let projection_prefix = key.replace('.', "_");
+                let interval_seconds = setting_i64(
+                    &store,
+                    &setting.guild_id,
+                    &format!("{projection_prefix}.interval_seconds"),
+                    object
+                        .get("intervalSeconds")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(900),
+                )
+                .clamp(300, 86_400);
+                let last_poll_key = if key == "web3.nft_stats" {
+                    "web3_nft_stats.last_poll_at"
+                } else {
+                    "web3_nft_sales.last_poll_at"
+                };
+                let last_poll = setting_i64(&store, &setting.guild_id, last_poll_key, 0);
+                if last_poll > 0 && now.saturating_sub(last_poll) < interval_seconds * 1_000 {
+                    continue;
+                }
+                let Some(channel_id) = setting_string(
+                    &store,
+                    &setting.guild_id,
+                    &format!("{projection_prefix}.target_channel_id"),
+                )
+                .or_else(|| {
+                    object
+                        .get("targetChannelId")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .and_then(|value| value.parse::<u64>().ok()) else {
+                    continue;
+                };
+                let Some(collection) = setting_string(
+                    &store,
+                    &setting.guild_id,
+                    &format!("{projection_prefix}.collection_slug"),
+                )
+                .or_else(|| {
+                    object
+                        .get("collectionSlug")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned)
+                }) else {
+                    continue;
+                };
+                let mut new_event_id = None;
+                let content = if key == "web3.nft_stats" {
+                    match opensea.collection_stats(&collection).await {
+                        Ok(stats) => {
+                            let template = setting_string(
+                                &store,
+                                &setting.guild_id,
+                                &format!("{projection_prefix}.message_template"),
+                            )
+                            .or_else(|| {
+                                object
+                                    .get("messageTemplate")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(ToOwned::to_owned)
+                            })
+                            .unwrap_or_else(|| "OpenSea update: {collection}".into());
+                            template
+                                .replace("{collection}", &stats.slug)
+                                .replace("{stats}", &format_nft_stats(&stats))
+                                .chars()
+                                .take(2_000)
+                                .collect::<String>()
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, guild_id = %setting.guild_id, "OpenSea stats delivery failed");
+                            continue;
+                        }
+                    }
+                } else {
+                    let max_results = setting_u64(
+                        &store,
+                        &setting.guild_id,
+                        &format!("{projection_prefix}.max_results"),
+                        object
+                            .get("maxResults")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(5),
+                    )
+                    .clamp(1, 10) as usize;
+                    let sales = match opensea.sales(&collection, max_results).await {
+                        Ok(sales) => sales,
+                        Err(error) => {
+                            tracing::warn!(%error, guild_id = %setting.guild_id, "OpenSea sales delivery failed");
+                            continue;
+                        }
+                    };
+                    let Some(latest) = sales.first() else {
+                        let _ =
+                            store.set_setting(&setting.guild_id, last_poll_key, &now.to_string());
+                        continue;
+                    };
+                    let event_key = "web3_nft_sales.last_event_id";
+                    if setting_string(&store, &setting.guild_id, event_key).as_deref()
+                        == Some(latest.event_id.as_str())
+                    {
+                        let _ =
+                            store.set_setting(&setting.guild_id, last_poll_key, &now.to_string());
+                        continue;
+                    }
+                    new_event_id = Some(latest.event_id.clone());
+                    format_nft_sales(&sales)
+                };
+                if ChannelId::new(channel_id)
+                    .say(&http, content)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(guild_id = %setting.guild_id, %key, "OpenSea Discord delivery failed");
+                    continue;
+                }
+                if let Some(event_id) = new_event_id {
+                    let _ = store.set_setting(
+                        &setting.guild_id,
+                        "web3_nft_sales.last_event_id",
+                        &event_id,
+                    );
+                }
+                let _ = store.set_setting(&setting.guild_id, last_poll_key, &now.to_string());
+            }
+        }
+    }
+}
+
 async fn run_crypto_stats_worker(
     http: Arc<serenity::http::Http>,
     store: Store,
@@ -3102,11 +4071,16 @@ async fn run_crypto_stats_worker(
             let Some(object) = config.as_object() else {
                 continue;
             };
-            let interval_seconds = object
-                .get("intervalSeconds")
-                .and_then(serde_json::Value::as_i64)
-                .unwrap_or(900)
-                .clamp(300, 86_400);
+            let interval_seconds = setting_i64(
+                &store,
+                &setting.guild_id,
+                "web3_crypto_stats.interval_seconds",
+                object
+                    .get("intervalSeconds")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(900),
+            )
+            .clamp(300, 86_400);
             let last_poll = setting_i64(
                 &store,
                 &setting.guild_id,
@@ -3116,28 +4090,43 @@ async fn run_crypto_stats_worker(
             if last_poll > 0 && now.saturating_sub(last_poll) < interval_seconds * 1_000 {
                 continue;
             }
-            let ids = object
-                .get("coinIds")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("bitcoin")
+            let ids = setting_string(&store, &setting.guild_id, "web3_crypto_stats.coin_ids")
+                .or_else(|| {
+                    object
+                        .get("coinIds")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .unwrap_or_else(|| "bitcoin".into())
                 .split(',')
                 .map(str::trim)
                 .filter(|id| !id.is_empty())
                 .take(20)
                 .map(ToOwned::to_owned)
                 .collect::<Vec<_>>();
-            let currency = object
-                .get("currency")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("usd");
-            let Some(channel_id) = object
-                .get("targetChannelId")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|value| value.parse::<u64>().ok())
-            else {
+            let currency = setting_string(&store, &setting.guild_id, "web3_crypto_stats.currency")
+                .or_else(|| {
+                    object
+                        .get("currency")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .unwrap_or_else(|| "usd".into());
+            let Some(channel_id) = setting_string(
+                &store,
+                &setting.guild_id,
+                "web3_crypto_stats.target_channel_id",
+            )
+            .or_else(|| {
+                object
+                    .get("targetChannelId")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .and_then(|value| value.parse::<u64>().ok()) else {
                 continue;
             };
-            let quotes = match coingecko.quotes(&ids, currency).await {
+            let quotes = match coingecko.quotes(&ids, &currency).await {
                 Ok(quotes) => quotes,
                 Err(error) => {
                     tracing::warn!(%error, guild_id = %setting.guild_id, "crypto stats provider request failed");
@@ -3152,10 +4141,18 @@ async fn run_crypto_stats_worker(
                 );
                 continue;
             }
-            let template = object
-                .get("messageTemplate")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Crypto update: {coins}");
+            let template = setting_string(
+                &store,
+                &setting.guild_id,
+                "web3_crypto_stats.message_template",
+            )
+            .or_else(|| {
+                object
+                    .get("messageTemplate")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or_else(|| "Crypto update: {coins}".into());
             let content = template
                 .replace("{coins}", &format_crypto_quotes(&quotes))
                 .replace("{currency}", &currency.to_ascii_uppercase())
@@ -3196,6 +4193,185 @@ async fn run_crypto_stats_worker(
             let _ = store.set_setting(
                 &setting.guild_id,
                 "web3_crypto_stats.last_poll_at",
+                &now.to_string(),
+            );
+        }
+    }
+}
+
+/// Keep the optional statistics channel in sync with the same daily snapshots
+/// used by `/serverstats`.  The dashboard only stores a channel ID and bounded
+/// refresh interval; this worker owns the Discord mutation so a saved setting
+/// cannot be mistaken for a live feature.
+async fn run_nickname_worker(http: Arc<serenity::http::Http>, store: Store) {
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        interval.tick().await;
+        let user = match http.get_current_user().await {
+            Ok(user) => user,
+            Err(error) => {
+                tracing::warn!(%error, "nickname worker could not resolve the Helper user");
+                continue;
+            }
+        };
+        let rows = match store.feature_settings("management.nickname") {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "nickname worker could not load settings");
+                continue;
+            }
+        };
+        for setting in rows {
+            let Ok(config) = serde_json::from_str::<serde_json::Value>(&setting.config_json) else {
+                continue;
+            };
+            // A disabled setting is still loaded so the worker can remove a
+            // nickname that was applied by an earlier revision.  This makes
+            // the panel's off switch a real, reversible Discord operation.
+            let nickname = if setting.enabled {
+                config
+                    .get("nickname")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+            } else {
+                ""
+            };
+            if nickname.chars().count() > 32 {
+                continue;
+            }
+            let Ok(guild_id) = setting.guild_id.parse::<u64>() else {
+                continue;
+            };
+            let guild_id = serenity::all::GuildId::new(guild_id);
+            let Ok(member) = guild_id.member(&http, user.id).await else {
+                continue;
+            };
+            if member.nick.as_deref().unwrap_or_default() == nickname {
+                continue;
+            }
+            if let Err(error) = guild_id
+                .edit_member(
+                    &http,
+                    user.id,
+                    serenity::all::EditMember::new().nickname(nickname.to_owned()),
+                )
+                .await
+            {
+                tracing::warn!(guild_id = %guild_id, %error, "failed to apply configured Helper nickname");
+            }
+        }
+    }
+}
+
+async fn run_stats_channel_worker(http: Arc<serenity::http::Http>, store: Store) {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        let rows = match store.enabled_feature_settings("insights.stats") {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::error!(%error, "stats worker could not load settings");
+                continue;
+            }
+        };
+        let now = Utc::now().timestamp_millis();
+        for setting in rows {
+            if !feature_enabled(&store, &setting.guild_id, "insights.stats", None) {
+                continue;
+            }
+            let config =
+                serde_json::from_str::<serde_json::Value>(&setting.config_json).unwrap_or_default();
+            let Some(object) = config.as_object() else {
+                continue;
+            };
+            // Prefer the atomically published projection. The JSON fallback
+            // keeps older revisions readable during the migration window, but
+            // never lets a stale config blob override a newer projection.
+            let channel_id = setting_string(&store, &setting.guild_id, "insights.stats.channel_id")
+                .or_else(|| {
+                    object
+                        .get("channelId")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .filter(|value| !value.trim().is_empty())
+                .and_then(|value| value.parse::<u64>().ok());
+            let Some(channel_id) = channel_id else {
+                continue;
+            };
+            let refresh_minutes = setting_i64(
+                &store,
+                &setting.guild_id,
+                "insights.stats.interval_minutes",
+                object
+                    .get("intervalMinutes")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(15),
+            )
+            .clamp(5, 1_440);
+            let last_refresh = setting_i64(
+                &store,
+                &setting.guild_id,
+                "insights.stats.last_channel_refresh_at",
+                0,
+            );
+            if last_refresh > 0
+                && now.saturating_sub(last_refresh) < refresh_minutes.saturating_mul(60_000)
+            {
+                continue;
+            }
+            let window_days = setting_i64(
+                &store,
+                &setting.guild_id,
+                "insights.stats.window_days",
+                object
+                    .get("windowDays")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(7),
+            )
+            .clamp(1, 30) as u32;
+            let stats = match store.stats_for(&setting.guild_id, window_days) {
+                Ok(stats) => stats,
+                Err(error) => {
+                    tracing::warn!(%error, guild_id = %setting.guild_id, "stats snapshot query failed");
+                    continue;
+                }
+            };
+            let messages: i64 = stats.iter().map(|(_, messages, _, _)| messages).sum();
+            let joins: i64 = stats.iter().map(|(_, _, joins, _)| joins).sum();
+            let leaves: i64 = stats.iter().map(|(_, _, _, leaves)| leaves).sum();
+            let template =
+                setting_string(&store, &setting.guild_id, "insights.stats.name_template")
+                    .or_else(|| {
+                        object
+                            .get("nameTemplate")
+                            .and_then(serde_json::Value::as_str)
+                            .map(ToOwned::to_owned)
+                    })
+                    .unwrap_or_else(|| "messages-{messages}".to_owned());
+            let name = template
+                .replace("{messages}", &messages.to_string())
+                .replace("{joins}", &joins.to_string())
+                .replace("{leaves}", &leaves.to_string())
+                .replace("{days}", &window_days.to_string())
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(100)
+                .collect::<String>();
+            if name.trim().is_empty() {
+                continue;
+            }
+            if let Err(error) = serenity::all::ChannelId::new(channel_id)
+                .edit(&http, serenity::all::EditChannel::new().name(name))
+                .await
+            {
+                tracing::warn!(%error, guild_id = %setting.guild_id, channel_id, "stats channel update failed");
+                continue;
+            }
+            let _ = store.set_setting(
+                &setting.guild_id,
+                "insights.stats.last_channel_refresh_at",
                 &now.to_string(),
             );
         }
@@ -3270,6 +4446,553 @@ fn format_bluesky_message(template: &str, mention: &str, post: &BlueskyPost) -> 
         format!("{mention} {rendered}")
     };
     rendered.chars().take(2_000).collect()
+}
+
+async fn run_reddit_worker(http: Arc<serenity::http::Http>, store: Store, reddit: RedditClient) {
+    let mut interval = tokio::time::interval(Duration::from_secs(15));
+    loop {
+        interval.tick().await;
+        if !std::env::var("REDDIT_COMMERCIAL_APPROVED")
+            .ok()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+        {
+            continue;
+        }
+        let due = match store.due_reddit_subscriptions(Utc::now().timestamp_millis(), 25) {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::error!(%error, "reddit worker could not load subscriptions");
+                continue;
+            }
+        };
+        for subscription in due {
+            if !feature_enabled(&store, &subscription.guild_id, "social.reddit", None) {
+                let next = Utc::now().timestamp_millis() + subscription.interval_seconds * 1_000;
+                let _ = store.update_reddit_poll(
+                    subscription.id,
+                    subscription.last_post_id.as_deref(),
+                    next,
+                    subscription.failure_count,
+                    Some("feature_disabled"),
+                );
+                continue;
+            }
+            if let Err(error) =
+                process_reddit_subscription(&http, &store, &reddit, &subscription).await
+            {
+                tracing::warn!(%error, subscription_id = subscription.id, "reddit notification failed");
+            }
+        }
+    }
+}
+
+async fn process_reddit_subscription(
+    http: &serenity::http::Http,
+    store: &Store,
+    reddit: &RedditClient,
+    subscription: &RedditSubscriptionRecord,
+) -> Result<()> {
+    let now = Utc::now().timestamp_millis();
+    let interval_ms = subscription.interval_seconds.clamp(300, 86_400) * 1_000;
+    let next = || now + interval_ms;
+    let latest = match reddit.latest_post(&subscription.source_subreddit).await {
+        Ok(post) => post,
+        Err(error) => {
+            let failures = subscription.failure_count.saturating_add(1).min(8);
+            let backoff = (subscription.interval_seconds * (1_i64 << failures.min(4))).min(3_600);
+            store.update_reddit_poll(
+                subscription.id,
+                subscription.last_post_id.as_deref(),
+                now + backoff * 1_000,
+                failures,
+                Some("reddit_provider_failed"),
+            )?;
+            return Err(error);
+        }
+    };
+    let Some(post) = latest else {
+        store.update_reddit_poll(
+            subscription.id,
+            subscription.last_post_id.as_deref(),
+            next(),
+            0,
+            None,
+        )?;
+        return Ok(());
+    };
+    if subscription.last_post_id.is_none() {
+        store.update_reddit_poll(subscription.id, Some(&post.id), next(), 0, None)?;
+        return Ok(());
+    }
+    if subscription.last_post_id.as_deref() == Some(post.id.as_str()) {
+        store.update_reddit_poll(subscription.id, Some(&post.id), next(), 0, None)?;
+        return Ok(());
+    }
+    let content =
+        format_reddit_message(&subscription.message_template, &subscription.mention, &post);
+    let channel_id = subscription
+        .target_channel_id
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("invalid_discord_channel_id"))?;
+    ChannelId::new(channel_id).say(http, content).await?;
+    store.update_reddit_poll(subscription.id, Some(&post.id), next(), 0, None)?;
+    Ok(())
+}
+
+fn format_reddit_message(template: &str, mention: &str, post: &RedditPost) -> String {
+    let rendered = template
+        .replace("{subreddit}", &post.subreddit)
+        .replace("{title}", &post.title)
+        .replace("{text}", &post.text)
+        .replace("{url}", &post.url)
+        .replace("{permalink}", &post.permalink)
+        .replace("{created_at}", &post.created_at);
+    let rendered = if mention.is_empty() {
+        rendered
+    } else {
+        format!("{mention} {rendered}")
+    };
+    rendered.chars().take(2_000).collect()
+}
+
+async fn run_x_worker(http: Arc<serenity::http::Http>, store: Store, x: XClient) {
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        interval.tick().await;
+        if !std::env::var("X_API_APPROVED")
+            .ok()
+            .or_else(|| std::env::var("X_COMMERCIAL_APPROVED").ok())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+        {
+            continue;
+        }
+        let due = match store.due_x_subscriptions(Utc::now().timestamp_millis(), 25) {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::error!(%error, "x worker could not load subscriptions");
+                continue;
+            }
+        };
+        for subscription in due {
+            if !feature_enabled(&store, &subscription.guild_id, "social.x", None) {
+                let next = Utc::now().timestamp_millis() + subscription.interval_seconds * 1_000;
+                let _ = store.update_x_poll(
+                    subscription.id,
+                    subscription.last_post_id.as_deref(),
+                    next,
+                    subscription.failure_count,
+                    Some("feature_disabled"),
+                );
+                continue;
+            }
+            if let Err(error) = process_x_subscription(&http, &store, &x, &subscription).await {
+                tracing::warn!(%error, subscription_id = subscription.id, "x notification failed");
+            }
+        }
+    }
+}
+
+async fn process_x_subscription(
+    http: &serenity::http::Http,
+    store: &Store,
+    x: &XClient,
+    subscription: &XSubscriptionRecord,
+) -> Result<()> {
+    let now = Utc::now().timestamp_millis();
+    let interval_ms = subscription.interval_seconds.clamp(900, 86_400) * 1_000;
+    let next = || now + interval_ms;
+    let latest = match x.latest_post(&subscription.source_handle).await {
+        Ok(post) => post,
+        Err(error) => {
+            let failures = subscription.failure_count.saturating_add(1).min(8);
+            let backoff = (subscription.interval_seconds * (1_i64 << failures.min(4))).min(3_600);
+            store.update_x_poll(
+                subscription.id,
+                subscription.last_post_id.as_deref(),
+                now + backoff * 1_000,
+                failures,
+                Some("x_provider_failed"),
+            )?;
+            return Err(error);
+        }
+    };
+    let Some(post) = latest else {
+        store.update_x_poll(
+            subscription.id,
+            subscription.last_post_id.as_deref(),
+            next(),
+            0,
+            None,
+        )?;
+        return Ok(());
+    };
+    if subscription.last_post_id.is_none()
+        || subscription.last_post_id.as_deref() == Some(post.id.as_str())
+    {
+        store.update_x_poll(subscription.id, Some(&post.id), next(), 0, None)?;
+        return Ok(());
+    }
+    let content = format_x_message(&subscription.message_template, &subscription.mention, &post);
+    let channel_id = subscription
+        .target_channel_id
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("invalid_discord_channel_id"))?;
+    ChannelId::new(channel_id).say(http, content).await?;
+    store.update_x_poll(subscription.id, Some(&post.id), next(), 0, None)?;
+    Ok(())
+}
+
+fn format_x_message(template: &str, mention: &str, post: &XPost) -> String {
+    let rendered = template
+        .replace("{handle}", &post.handle)
+        .replace("{text}", &post.text)
+        .replace("{url}", &post.url)
+        .replace("{created_at}", &post.created_at)
+        .replace("{id}", &post.id);
+    let rendered = if mention.is_empty() {
+        rendered
+    } else {
+        format!("{mention} {rendered}")
+    };
+    rendered.chars().take(2_000).collect()
+}
+
+async fn run_tiktok_worker(http: Arc<serenity::http::Http>, store: Store, tiktok: TikTokClient) {
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        interval.tick().await;
+        if !std::env::var("TIKTOK_APP_APPROVED")
+            .ok()
+            .or_else(|| std::env::var("TIKTOK_DISPLAY_API_APPROVED").ok())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+        {
+            continue;
+        }
+        let due = match store.due_tiktok_subscriptions(Utc::now().timestamp_millis(), 25) {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::error!(%error, "tiktok worker could not load subscriptions");
+                continue;
+            }
+        };
+        for subscription in due {
+            if !feature_enabled(&store, &subscription.guild_id, "social.tiktok", None) {
+                let next = Utc::now().timestamp_millis() + subscription.interval_seconds * 1_000;
+                let _ = store.update_tiktok_poll(
+                    subscription.id,
+                    subscription.last_video_id.as_deref(),
+                    next,
+                    subscription.failure_count,
+                    Some("feature_disabled"),
+                );
+                continue;
+            }
+            if let Err(error) =
+                process_tiktok_subscription(&http, &store, &tiktok, &subscription).await
+            {
+                tracing::warn!(%error, subscription_id = subscription.id, "tiktok notification failed");
+            }
+        }
+    }
+}
+
+async fn process_tiktok_subscription(
+    http: &serenity::http::Http,
+    store: &Store,
+    tiktok: &TikTokClient,
+    subscription: &TikTokSubscriptionRecord,
+) -> Result<()> {
+    let now = Utc::now().timestamp_millis();
+    let interval_ms = subscription.interval_seconds.clamp(900, 86_400) * 1_000;
+    let next = || now + interval_ms;
+    let videos = match tiktok.latest_videos().await {
+        Ok(videos) => videos,
+        Err(error) => {
+            let failures = subscription.failure_count.saturating_add(1).min(8);
+            let backoff = (subscription.interval_seconds * (1_i64 << failures.min(4))).min(3_600);
+            store.update_tiktok_poll(
+                subscription.id,
+                subscription.last_video_id.as_deref(),
+                now + backoff * 1_000,
+                failures,
+                Some("tiktok_provider_failed"),
+            )?;
+            return Err(error);
+        }
+    };
+    let Some(video) = videos.into_iter().next() else {
+        store.update_tiktok_poll(
+            subscription.id,
+            subscription.last_video_id.as_deref(),
+            next(),
+            0,
+            None,
+        )?;
+        return Ok(());
+    };
+    if subscription.last_video_id.is_none()
+        || subscription.last_video_id.as_deref() == Some(video.id.as_str())
+    {
+        store.update_tiktok_poll(subscription.id, Some(&video.id), next(), 0, None)?;
+        return Ok(());
+    }
+    let content = format_tiktok_message(
+        &subscription.message_template,
+        &subscription.mention,
+        &subscription.source_label,
+        &video,
+    );
+    let channel_id = subscription
+        .target_channel_id
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("invalid_discord_channel_id"))?;
+    ChannelId::new(channel_id).say(http, content).await?;
+    store.update_tiktok_poll(subscription.id, Some(&video.id), next(), 0, None)?;
+    Ok(())
+}
+
+fn format_tiktok_message(
+    template: &str,
+    mention: &str,
+    label: &str,
+    video: &TikTokVideo,
+) -> String {
+    let rendered = template
+        .replace("{label}", label)
+        .replace("{title}", &video.title)
+        .replace("{description}", &video.description)
+        .replace("{url}", &video.url)
+        .replace("{created_at}", &video.created_at)
+        .replace("{id}", &video.id);
+    let rendered = if mention.is_empty() {
+        rendered
+    } else {
+        format!("{mention} {rendered}")
+    };
+    rendered.chars().take(2_000).collect()
+}
+
+async fn run_instagram_worker(
+    http: Arc<serenity::http::Http>,
+    store: Store,
+    instagram: InstagramClient,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        interval.tick().await;
+        if !std::env::var("META_APP_APPROVED")
+            .ok()
+            .or_else(|| std::env::var("META_INSTAGRAM_APP_APPROVED").ok())
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
+        {
+            continue;
+        }
+        let due = match store.due_instagram_subscriptions(Utc::now().timestamp_millis(), 25) {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::error!(%error,"instagram worker could not load subscriptions");
+                continue;
+            }
+        };
+        for subscription in due {
+            if !feature_enabled(&store, &subscription.guild_id, "social.instagram", None) {
+                let next = Utc::now().timestamp_millis() + subscription.interval_seconds * 1000;
+                let _ = store.update_instagram_poll(
+                    subscription.id,
+                    subscription.last_media_id.as_deref(),
+                    next,
+                    subscription.failure_count,
+                    Some("feature_disabled"),
+                );
+                continue;
+            }
+            if let Err(error) =
+                process_instagram_subscription(&http, &store, &instagram, &subscription).await
+            {
+                tracing::warn!(%error,subscription_id=subscription.id,"instagram notification failed");
+            }
+        }
+    }
+}
+
+async fn process_instagram_subscription(
+    http: &serenity::http::Http,
+    store: &Store,
+    instagram: &InstagramClient,
+    subscription: &InstagramSubscriptionRecord,
+) -> Result<()> {
+    let now = Utc::now().timestamp_millis();
+    let interval_ms = subscription.interval_seconds.clamp(900, 86400) * 1000;
+    let next = || now + interval_ms;
+    let media = match instagram.latest_media().await {
+        Ok(media) => media,
+        Err(error) => {
+            let failures = subscription.failure_count.saturating_add(1).min(8);
+            let backoff = (subscription.interval_seconds * (1_i64 << failures.min(4))).min(3600);
+            store.update_instagram_poll(
+                subscription.id,
+                subscription.last_media_id.as_deref(),
+                now + backoff * 1000,
+                failures,
+                Some("instagram_provider_failed"),
+            )?;
+            return Err(error);
+        }
+    };
+    let Some(item) = media.into_iter().next() else {
+        store.update_instagram_poll(
+            subscription.id,
+            subscription.last_media_id.as_deref(),
+            next(),
+            0,
+            None,
+        )?;
+        return Ok(());
+    };
+    if subscription.last_media_id.is_none()
+        || subscription.last_media_id.as_deref() == Some(item.id.as_str())
+    {
+        store.update_instagram_poll(subscription.id, Some(&item.id), next(), 0, None)?;
+        return Ok(());
+    }
+    let content = format_instagram_message(
+        &subscription.message_template,
+        &subscription.mention,
+        &subscription.source_label,
+        &item,
+    );
+    let channel_id = subscription
+        .target_channel_id
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("invalid_discord_channel_id"))?;
+    ChannelId::new(channel_id).say(http, content).await?;
+    store.update_instagram_poll(subscription.id, Some(&item.id), next(), 0, None)?;
+    Ok(())
+}
+
+fn format_instagram_message(
+    template: &str,
+    mention: &str,
+    username: &str,
+    media: &InstagramMedia,
+) -> String {
+    let rendered = template
+        .replace("{username}", username)
+        .replace("{label}", username)
+        .replace("{caption}", &media.caption)
+        .replace("{media_type}", &media.media_type)
+        .replace("{url}", &media.permalink)
+        .replace("{timestamp}", &media.timestamp)
+        .replace("{id}", &media.id);
+    let rendered = if mention.is_empty() {
+        rendered
+    } else {
+        format!("{mention} {rendered}")
+    };
+    rendered.chars().take(2000).collect()
+}
+
+async fn run_kick_worker(http: Arc<serenity::http::Http>, store: Store, kick: KickClient) {
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        interval.tick().await;
+        if !std::env::var("KICK_APP_APPROVED")
+            .ok()
+            .or_else(|| std::env::var("KICK_API_APPROVED").ok())
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
+        {
+            continue;
+        }
+        let due = match store.due_kick_subscriptions(Utc::now().timestamp_millis(), 25) {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::error!(%error,"kick worker could not load subscriptions");
+                continue;
+            }
+        };
+        for subscription in due {
+            if !feature_enabled(&store, &subscription.guild_id, "social.kick", None) {
+                let next = Utc::now().timestamp_millis() + subscription.interval_seconds * 1000;
+                let _ = store.update_kick_poll(
+                    subscription.id,
+                    subscription.last_stream_id.as_deref(),
+                    next,
+                    subscription.failure_count,
+                    Some("feature_disabled"),
+                );
+                continue;
+            }
+            if let Err(error) = process_kick_subscription(&http, &store, &kick, &subscription).await
+            {
+                tracing::warn!(%error,subscription_id=subscription.id,"kick notification failed");
+            }
+        }
+    }
+}
+
+async fn process_kick_subscription(
+    http: &serenity::http::Http,
+    store: &Store,
+    kick: &KickClient,
+    subscription: &KickSubscriptionRecord,
+) -> Result<()> {
+    let now = Utc::now().timestamp_millis();
+    let interval_ms = subscription.interval_seconds.clamp(300, 86400) * 1000;
+    let next = || now + interval_ms;
+    let stream = match kick.latest_stream(&subscription.source_handle).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            let failures = subscription.failure_count.saturating_add(1).min(8);
+            let backoff = (subscription.interval_seconds * (1_i64 << failures.min(4))).min(3600);
+            store.update_kick_poll(
+                subscription.id,
+                subscription.last_stream_id.as_deref(),
+                now + backoff * 1000,
+                failures,
+                Some("kick_provider_failed"),
+            )?;
+            return Err(error);
+        }
+    };
+    let Some(stream) = stream else {
+        store.update_kick_poll(subscription.id, None, next(), 0, None)?;
+        return Ok(());
+    };
+    if subscription.last_stream_id.is_none()
+        || subscription.last_stream_id.as_deref() == Some(stream.id.as_str())
+    {
+        store.update_kick_poll(subscription.id, Some(&stream.id), next(), 0, None)?;
+        return Ok(());
+    }
+    let content = format_kick_message(
+        &subscription.message_template,
+        &subscription.mention,
+        &subscription.source_handle,
+        &stream,
+    );
+    let channel_id = subscription
+        .target_channel_id
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("invalid_discord_channel_id"))?;
+    ChannelId::new(channel_id).say(http, content).await?;
+    store.update_kick_poll(subscription.id, Some(&stream.id), next(), 0, None)?;
+    Ok(())
+}
+
+fn format_kick_message(template: &str, mention: &str, handle: &str, stream: &KickStream) -> String {
+    let rendered = template
+        .replace("{handle}", handle)
+        .replace("{title}", &stream.title)
+        .replace("{category}", &stream.category)
+        .replace("{url}", &stream.url)
+        .replace("{started_at}", &stream.started_at)
+        .replace("{id}", &stream.id);
+    let rendered = if mention.is_empty() {
+        rendered
+    } else {
+        format!("{mention} {rendered}")
+    };
+    rendered.chars().take(2000).collect()
 }
 
 async fn run_twitch_worker(http: Arc<serenity::http::Http>, store: Store) {
@@ -3525,6 +5248,16 @@ impl Handler {
             }
         }
         if let Some(guild_id) = command.guild_id
+            && let Some(feature_key) = command_feature_key(command.data.name.as_str())
+            && !feature_enabled(&self.store, &guild_id.to_string(), feature_key, None)
+        {
+            let message = format!(
+                "This command is disabled because **{}** is disabled in this server. Enable it in the dashboard first.",
+                feature_title(feature_key)
+            );
+            return respond(ctx, command, &message).await;
+        }
+        if let Some(guild_id) = command.guild_id
             && is_moderation_command(command.data.name.as_str())
             && feature_explicitly_disabled(
                 &self.store,
@@ -3593,6 +5326,11 @@ impl Handler {
             "ping" => "Pong — Vozen Helper está online.".to_string(),
             "help" => {
                 let guild_text = command.guild_id.map(|guild_id| guild_id.to_string());
+                if let Some(guild_id) = guild_text.as_deref()
+                    && !feature_enabled(&self.store, guild_id, "utility.help", None)
+                {
+                    return respond(ctx, command, "Help is disabled in this server.").await;
+                }
                 let show_modules = guild_text.as_deref().is_none_or(|guild_id| {
                     setting_bool(&self.store, guild_id, "utility.help.show_modules", true)
                 });
@@ -3694,6 +5432,9 @@ impl Handler {
                     return respond(ctx, command, "Este comando sÃ³ pode ser usado num servidor.").await;
                 };
                 let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "management.privacy", None) {
+                    return respond(ctx, command, "Privacy tools are disabled in this server.").await;
+                }
                 let allow_export = setting_bool(
                     &self.store,
                     &guild_text,
@@ -4356,26 +6097,161 @@ impl Handler {
                 if !feature_enabled(&self.store, &guild_text, "web3.crypto_queries", None) {
                     return respond(ctx, command, "Crypto queries are disabled in this server. Enable them in the dashboard.").await;
                 }
-                let coins = option_string(command, "coins").unwrap_or_default();
+                let configured_coins = setting_string(
+                    &self.store,
+                    &guild_text,
+                    "web3_crypto_queries.coin_ids",
+                );
+                let coins = option_string(command, "coins")
+                    .map(ToOwned::to_owned)
+                    .or(configured_coins)
+                    .unwrap_or_default();
                 let ids = coins
                     .split(',')
                     .map(str::trim)
                     .filter(|id| !id.is_empty())
                     .map(ToOwned::to_owned)
                     .collect::<Vec<_>>();
-                if ids.is_empty() || ids.len() > 10 {
+                let max_results = setting_u64(
+                    &self.store,
+                    &guild_text,
+                    "web3_crypto_queries.max_results",
+                    10,
+                )
+                .clamp(1, 10) as usize;
+                if ids.is_empty() || ids.len() > max_results {
                     return respond(ctx, command, "Choose between 1 and 10 CoinGecko coin IDs, separated by commas.").await;
                 }
-                let currency = option_string(command, "currency").unwrap_or("usd");
+                let configured_currency = setting_string(
+                    &self.store,
+                    &guild_text,
+                    "web3_crypto_queries.currency",
+                );
+                let currency = option_string(command, "currency")
+                    .map(ToOwned::to_owned)
+                    .or(configured_currency)
+                    .unwrap_or_else(|| "usd".into());
                 let Some(client) = self.coingecko.as_ref() else {
                     return respond(ctx, command, "The CoinGecko provider is not available right now.").await;
                 };
-                match client.quotes(&ids, currency).await {
+                match client.quotes(&ids, &currency).await {
                     Ok(quotes) if quotes.is_empty() => "No price data was found for those CoinGecko IDs.".to_string(),
                     Ok(quotes) => format_crypto_quotes(&quotes),
                     Err(error) => {
                         warn!(%error, guild_id = %guild_text, "CoinGecko query failed");
                         "CoinGecko is temporarily unavailable. Please try again later.".to_string()
+                    }
+                }
+            }
+            "gas" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "web3.gas_tracker", None) {
+                    return respond(ctx, command, "Gas tracking is disabled in this server. Enable it in the dashboard.").await;
+                }
+                let configured_network = setting_string(
+                    &self.store,
+                    &guild_text,
+                    "web3.gas_tracker.network",
+                );
+                let network = option_string(command, "network")
+                    .or(configured_network.as_deref())
+                    .unwrap_or("ethereum");
+                match self.gas.quote(network).await {
+                    Ok(quote) => format_gas_quote(&quote),
+                    Err(error) => {
+                        warn!(%error, guild_id = %guild_text, network, "gas provider request failed");
+                        "The configured gas provider is unavailable right now.".to_string()
+                    }
+                }
+            }
+            "nft-stats" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "web3.nft_stats", None) {
+                    return respond(ctx, command, "NFT statistics are disabled in this server. Enable them in the dashboard.").await;
+                }
+                let configured_collection = setting_string(
+                    &self.store,
+                    &guild_text,
+                    "web3_nft_stats.collection_slug",
+                );
+                let collection = option_string(command, "collection")
+                    .map(ToOwned::to_owned)
+                    .or(configured_collection)
+                    .unwrap_or_default();
+                match self.opensea.collection_stats(&collection).await {
+                    Ok(stats) => format_nft_stats(&stats),
+                    Err(error) => {
+                        warn!(%error, guild_id = %guild_text, "OpenSea stats request failed");
+                        "OpenSea is unavailable or not configured. Please try again later.".to_string()
+                    }
+                }
+            }
+            "nft-query" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "web3.nft_queries", None) {
+                    return respond(
+                        ctx,
+                        command,
+                        "NFT collection queries are disabled in this server. Enable them in the dashboard.",
+                    )
+                    .await;
+                }
+                let configured_collection = setting_string(
+                    &self.store,
+                    &guild_text,
+                    "web3_nft_queries.collection_slug",
+                );
+                let collection = option_string(command, "collection")
+                    .map(ToOwned::to_owned)
+                    .or(configured_collection)
+                    .unwrap_or_default();
+                match self.opensea.collection_info(&collection).await {
+                    Ok(info) => format_nft_collection(&info),
+                    Err(error) => {
+                        warn!(%error, guild_id = %guild_text, "OpenSea collection query failed");
+                        "OpenSea is unavailable or not configured. Please try again later.".to_string()
+                    }
+                }
+            }
+            "nft-sales" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "web3.nft_sales", None) {
+                    return respond(ctx, command, "NFT sales alerts are disabled in this server. Enable them in the dashboard.").await;
+                }
+                let configured_collection = setting_string(
+                    &self.store,
+                    &guild_text,
+                    "web3_nft_sales.collection_slug",
+                );
+                let collection = option_string(command, "collection")
+                    .map(ToOwned::to_owned)
+                    .or(configured_collection)
+                    .unwrap_or_default();
+                let max_results = setting_u64(
+                    &self.store,
+                    &guild_text,
+                    "web3_nft_sales.max_results",
+                    5,
+                )
+                .clamp(1, 10) as usize;
+                match self.opensea.sales(&collection, max_results).await {
+                    Ok(sales) if sales.is_empty() => "No recent OpenSea sales were found.".to_string(),
+                    Ok(sales) => format_nft_sales(&sales),
+                    Err(error) => {
+                        warn!(%error, guild_id = %guild_text, "OpenSea sales request failed");
+                        "OpenSea is unavailable or not configured. Please try again later.".to_string()
                     }
                 }
             }
@@ -4407,7 +6283,7 @@ impl Handler {
                 let include_inviter = setting_bool(&self.store, &guild_text, "management.invite_tracker.include_inviter", true);
                 let mut invites = guild_id.invites(&ctx.http).await?;
                 invites.sort_by_key(|invite| std::cmp::Reverse(invite.uses));
-                if invites.is_empty() { "No active invites were found. The bot needs Manage Server to read them.".to_string() } else {
+                let invite_text = if invites.is_empty() { "No active invites were found. The bot needs Manage Server to read them.".to_string() } else {
                     invites
                         .into_iter()
                         .take(max_entries)
@@ -4417,6 +6293,17 @@ impl Handler {
                         })
                         .collect::<Vec<_>>()
                         .join("\n")
+                };
+                let tracked = self.store.invite_attribution_summary(&guild_text, max_entries as u32)?;
+                if tracked.is_empty() {
+                    invite_text
+                } else {
+                    let tracked_text = tracked
+                        .into_iter()
+                        .map(|(code, joins)| format!("`{code}` — {joins} attributed join(s)"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    format!("{invite_text}\n\nTracked joins:\n{tracked_text}")
                 }
             }
             "balance" => {
@@ -4428,7 +6315,9 @@ impl Handler {
                     return respond(ctx, command, "Economy is disabled in this server. Enable it in the dashboard.").await;
                 }
                 let account = self.store.economy_account(&guild_text, &command.user.id.to_string())?;
-                format!("Your balance is **{}** credits.", account.balance)
+                let currency = setting_string(&self.store, &guild_text, "community.economy.currency_name")
+                    .unwrap_or_else(|| "credits".to_string());
+                format!("Your balance is **{}** {currency}.", account.balance)
             }
             "daily" => {
                 let Some(guild_id) = command.guild_id else {
@@ -4439,9 +6328,52 @@ impl Handler {
                     return respond(ctx, command, "Economy is disabled in this server. Enable it in the dashboard.").await;
                 }
                 let reward = setting_u64(&self.store, &guild_text, "community.economy.daily_reward", 100).clamp(1, 10_000) as i64;
+                let currency = setting_string(&self.store, &guild_text, "community.economy.currency_name")
+                    .unwrap_or_else(|| "credits".to_string());
                 match self.store.claim_daily(&guild_text, &command.user.id.to_string(), reward)? {
-                    Some(account) => format!("Daily reward claimed: **{}** credits. Your balance is **{}**.", reward, account.balance),
+                    Some(account) => format!("Daily reward claimed: **{}** {currency}. Your balance is **{}**.", reward, account.balance),
                     None => "You already claimed your daily reward. Try again after the 24-hour cooldown.".to_string(),
+                }
+            }
+            "work" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "community.economy", None) {
+                    return respond(ctx, command, "Economy is disabled in this server. Enable it in the dashboard.").await;
+                }
+                let reward = setting_u64(&self.store, &guild_text, "community.economy.work_reward", 50).clamp(1, 10_000) as i64;
+                let cooldown = setting_u64(&self.store, &guild_text, "community.economy.work_cooldown_ms", 3_600_000).clamp(5 * 60_000, 7 * 86_400_000);
+                let currency = setting_string(&self.store, &guild_text, "community.economy.currency_name")
+                    .unwrap_or_else(|| "credits".to_string());
+                match self.store.claim_economy_reward(&guild_text, &command.user.id.to_string(), "work", reward, cooldown as i64)? {
+                    Some(account) => format!("Work reward claimed: **{}** {currency}. Your balance is **{}**.", reward, account.balance),
+                    None => format!("You are on cooldown. Try work again in about {}.", format_duration(cooldown as i64)),
+                }
+            }
+            "economy-top" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "community.economy", None) {
+                    return respond(ctx, command, "Economy is disabled in this server. Enable it in the dashboard.").await;
+                }
+                let currency = setting_string(&self.store, &guild_text, "community.economy.currency_name")
+                    .unwrap_or_else(|| "credits".to_string());
+                let rows = self.store.economy_top(&guild_text, 10)?;
+                if rows.is_empty() {
+                    "No community balances have been earned yet.".to_string()
+                } else {
+                    /*
+                    rows.into_iter().enumerate().map(|(index, (user_id, balance))| {
+                        format!("**{}\.** <@{}> — **{}** {}", index + 1, user_id, balance, currency)
+                    }).collect::<Vec<_>>().join("\n")
+                    */
+                    rows.into_iter().enumerate().map(|(index, (user_id, balance))| {
+                        format!("**{}.** <@{}> - **{}** {}", index + 1, user_id, balance, currency)
+                    }).collect::<Vec<_>>().join("\n")
                 }
             }
             "temp-channel" => {
@@ -4519,8 +6451,10 @@ impl Handler {
                 }) else {
                     return respond(ctx, command, "Indica um canal válido.").await;
                 };
-                self.store.set_setting(&guild_id.to_string(), "community.starboard.channel_id", &channel_id.to_string())?;
-                format!("Starboard configurado no canal <#{}>. Requer 3 ⭐ para publicar.", channel_id)
+                let guild_text = guild_id.to_string();
+                self.store.set_setting(&guild_text, "community.starboard.channel_id", &channel_id.to_string())?;
+                let threshold = setting_i64(&self.store, &guild_text, "community.starboard.threshold", 3).clamp(1, 100);
+                format!("Starboard configured in <#{}>. It requires {} stars to publish.", channel_id, threshold)
             }
             "suggest" => {
                 let Some(guild_id) = command.guild_id else {
@@ -5774,6 +7708,19 @@ impl Handler {
             .await;
         }
         if let Some(raw_role_id) = component.data.custom_id.strip_prefix("role:toggle:") {
+            if !feature_enabled(
+                &self.store,
+                &guild_id.to_string(),
+                "community.role_panels",
+                None,
+            ) {
+                return respond_component(
+                    ctx,
+                    component,
+                    "Role panels are disabled in this server.",
+                )
+                .await;
+            }
             let role_id = raw_role_id
                 .parse::<u64>()
                 .ok()
@@ -5847,6 +7794,19 @@ impl Handler {
             return respond_component(ctx, component, "Cargo atribuído.").await;
         }
         if let Some(raw) = component.data.custom_id.strip_prefix("verify:") {
+            if !feature_enabled(
+                &self.store,
+                &guild_id.to_string(),
+                "protection.join_gate",
+                Some("security.join_gate.enabled"),
+            ) {
+                return respond_component(
+                    ctx,
+                    component,
+                    "The join gate is disabled in this server.",
+                )
+                .await;
+            }
             let mut parts = raw.split(':');
             let expected_guild = parts.next().unwrap_or_default();
             let role_id = parts.next().and_then(|value| value.parse::<u64>().ok());
@@ -5867,13 +7827,59 @@ impl Handler {
             return respond_component(ctx, component, "Verificacao concluida; cargo atribuido.")
                 .await;
         }
+        if let Some(raw) = component.data.custom_id.strip_prefix("welcome:step:") {
+            let mut parts = raw.splitn(2, ':');
+            let expected_guild = parts.next().unwrap_or_default();
+            let step = parts.next().unwrap_or_default();
+            if expected_guild != guild_id.to_string()
+                || !matches!(step, "rules" | "introductions" | "channels" | "help")
+            {
+                return respond_component(ctx, component, "This welcome guide is no longer valid.")
+                    .await;
+            }
+            if !feature_enabled(
+                &self.store,
+                &guild_id.to_string(),
+                "support.welcome_channel",
+                None,
+            ) {
+                return respond_component(
+                    ctx,
+                    component,
+                    "The guided welcome channel is disabled.",
+                )
+                .await;
+            }
+            let setting = match step {
+                "rules" => "support.welcome_channel.rules_channel",
+                "introductions" => "support.welcome_channel.introductions_channel",
+                "channels" => "support.welcome_channel.channels_channel",
+                "help" => "",
+                _ => unreachable!(),
+            };
+            let destination = (!setting.is_empty())
+                .then(|| setting_string(&self.store, &guild_id.to_string(), setting))
+                .flatten()
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|id| format!(" <#{}>", id))
+                .unwrap_or_default();
+            let response = match step {
+                "rules" => format!("Please read the server rules{}.", destination),
+                "introductions" => format!("Introduce yourself to the community{}.", destination),
+                "channels" => format!("Explore the channels and pick the ones you need{}.", destination),
+                "help" => "Use /help to see the Helper commands, or open a ticket if you need staff support.".to_string(),
+                _ => "Welcome to the server.".to_string(),
+            };
+            return respond_component(ctx, component, &response).await;
+        }
         match component.data.custom_id.as_str() {
             "ticket:open" => {
-                if self
-                    .store
-                    .get_setting(&guild_id.to_string(), "feature.support.tickets")?
-                    .is_some_and(|value| value != "true")
-                {
+                if !feature_enabled(
+                    &self.store,
+                    &guild_id.to_string(),
+                    "support.tickets",
+                    Some("feature.support.tickets"),
+                ) {
                     return respond_component(
                         ctx,
                         component,
@@ -5977,6 +7983,35 @@ impl Handler {
                 .await
             }
             "ticket:claim" => {
+                let is_staff = if let Ok(Some(raw_role)) = self
+                    .store
+                    .get_setting(&guild_id.to_string(), "support.ticket.staff_role_id")
+                {
+                    raw_role.parse::<u64>().ok().is_some_and(|role_id| {
+                        component.member.as_ref().is_some_and(|member| {
+                            member.roles.iter().any(|role| role.get() == role_id)
+                                || member.permissions.is_some_and(|permissions| {
+                                    permissions.contains(Permissions::MANAGE_CHANNELS)
+                                        || permissions.contains(Permissions::ADMINISTRATOR)
+                                })
+                        })
+                    })
+                } else {
+                    component.member.as_ref().is_some_and(|member| {
+                        member.permissions.is_some_and(|permissions| {
+                            permissions.contains(Permissions::MANAGE_CHANNELS)
+                                || permissions.contains(Permissions::ADMINISTRATOR)
+                        })
+                    })
+                };
+                if !is_staff {
+                    return respond_component(
+                        ctx,
+                        component,
+                        "Only the support team can claim tickets. Ask an administrator to configure the staff role.",
+                    )
+                    .await;
+                }
                 if self.store.claim_ticket(
                     &component.channel_id.to_string(),
                     &component.user.id.to_string(),
@@ -6190,6 +8225,126 @@ async fn respond_component(
 /// settings compatible while ensuring command/component feedback is English.
 fn english_bot_text(input: &str) -> String {
     const REPLACEMENTS: &[(&str, &str)] = &[
+        // Current Rust literals are UTF-8, while older releases persisted a
+        // few mojibake variants. Keep both forms so Helper-owned responses
+        // remain English after an upgrade; user content is not translated.
+        ("Ol\u{00e1} ", "Hello "),
+        (
+            "Este comando s\u{00f3} pode ser usado num servidor.",
+            "This command can only be used in a server.",
+        ),
+        (
+            "O XP card est\u{00e1} desativado neste servidor. Ativa-o no painel primeiro.",
+            "The XP card is disabled in this server. Enable it in the dashboard first.",
+        ),
+        (
+            "N\u{00e3}o tens a permiss\u{00e3}o necess\u{00e1}ria para este comando.",
+            "You do not have the required permission for this command.",
+        ),
+        (
+            "N\u{00e3}o foi poss\u{00ed}vel consultar o plano agora; o Helper mant\u{00e9}m o \u{00fa}ltimo snapshot seguro.",
+            "Unable to check the plan right now; Helper is keeping the last safe snapshot.",
+        ),
+        (
+            "Enviei os teus dados por mensagem privada.",
+            "I sent your data by direct message.",
+        ),
+        (
+            "N\u{00e3}o consegui enviar mensagem privada. Ativa as DMs e tenta novamente.",
+            "I could not send a direct message. Enable DMs and try again.",
+        ),
+        (
+            "Ainda n\u{00e3}o existem casos neste servidor.",
+            "There are no cases in this server yet.",
+        ),
+        ("Indica um membro.", "Specify a member."),
+        (
+            "O conte\u{00fa}do n\u{00e3}o pode exceder 500 caracteres.",
+            "Content cannot exceed 500 characters.",
+        ),
+        (
+            "N\u{00e3}o foi poss\u{00ed}vel remover o timeout; confirma as permiss\u{00f5}es.",
+            "Unable to remove the timeout; check permissions.",
+        ),
+        (
+            "N\u{00e3}o foi poss\u{00ed}vel remover o ban.",
+            "Unable to remove the ban.",
+        ),
+        (
+            "N\u{00e3}o encontrei mensagens para apagar.",
+            "No messages found to delete.",
+        ),
+        (
+            "N\u{00e3}o foi poss\u{00ed}vel executar a a\u{00e7}\u{00e3}o; confirma as permiss\u{00f5}es e a hierarquia de cargos.",
+            "Unable to perform the action; check permissions and role hierarchy.",
+        ),
+        (
+            "N\u{00e3}o tinhas AFK definido.",
+            "You did not have an AFK status set.",
+        ),
+        ("Tag n\u{00e3}o encontrada.", "Tag not found."),
+        ("Ainda n\u{00e3}o existem tags.", "There are no tags yet."),
+        (
+            "Ainda n\u{00e3}o existem dados de XP.",
+            "There is no XP data yet.",
+        ),
+        (
+            "As sugest\u{00f5}es est\u{00e3}o desativadas neste servidor. Ativa-as no painel.",
+            "Suggestions are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "Os giveaways est\u{00e3}o desativados neste servidor. Ativa-os no painel.",
+            "Giveaways are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "As enquetes est\u{00e3}o desativadas neste servidor. Ativa-as no painel.",
+            "Polls are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "Os eventos est\u{00e3}o desativados neste servidor. Ativa-os no painel.",
+            "Events are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "Workflow n\u{00e3}o encontrado neste servidor.",
+            "Workflow not found in this server.",
+        ),
+        (
+            "Giveaway n\u{00e3}o encontrado ou j\u{00e1} terminado.",
+            "Giveaway not found or already ended.",
+        ),
+        (
+            "N\u{00e3}o existem giveaways ativos.",
+            "There are no active giveaways.",
+        ),
+        (
+            "N\u{00e3}o encontrei esse evento neste servidor.",
+            "That event was not found in this server.",
+        ),
+        (
+            "N\u{00e3}o tens uma inscri\u{00e7}\u{00e3}o neste evento.",
+            "You are not registered for this event.",
+        ),
+        (
+            "N\u{00e3}o foi poss\u{00ed}vel registar o check-in.",
+            "Unable to record the check-in.",
+        ),
+        (
+            "N\u{00e3}o foi poss\u{00ed}vel guardar a avalia\u{00e7}\u{00e3}o.",
+            "Unable to save the rating.",
+        ),
+        (
+            "Os pain\u{00e9}is de cargos est\u{00e3}o desativados neste servidor. Ativa-os no painel.",
+            "Role panels are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "Os tickets est\u{00e3}o desativados neste servidor.",
+            "Tickets are disabled in this server.",
+        ),
+        (
+            "Este canal n\u{00e3}o \u{00e9} um ticket do Helper.",
+            "This channel is not a Helper ticket.",
+        ),
+        ("Bot\u{00e3}o desconhecido.", "Unknown button."),
         ("Olá ", "Hello "),
         ("Explica aqui o que precisas.", "Tell us what you need."),
         (
@@ -6841,6 +8996,19 @@ fn join_burst_armed(
     window: Duration,
     threshold: usize,
 ) -> bool {
+    join_burst_count(joins, guild_id, now, window, threshold) >= threshold.max(2)
+}
+
+/// Record one join and return the bounded burst size used by the pure
+/// anti-raid evaluator.  Reaching the threshold consumes the current burst so
+/// a single incident cannot trigger repeatedly for every following member.
+fn join_burst_count(
+    joins: &mut HashMap<String, VecDeque<Instant>>,
+    guild_id: &str,
+    now: Instant,
+    window: Duration,
+    threshold: usize,
+) -> usize {
     let window = window.max(Duration::from_secs(1));
     let threshold = threshold.max(2);
     let entries = joins.entry(guild_id.to_owned()).or_default();
@@ -6851,11 +9019,11 @@ fn join_burst_armed(
         entries.pop_front();
     }
     entries.push_back(now);
-    if entries.len() < threshold {
-        return false;
+    let count = entries.len();
+    if count >= threshold {
+        entries.clear();
     }
-    entries.clear();
-    true
+    count
 }
 
 async fn finish_giveaway(http: &serenity::http::Http, store: &Store, id: i64) -> Result<bool> {
@@ -7111,6 +9279,18 @@ fn shadow_mode_enabled(raw: Option<&str>) -> bool {
 }
 
 fn feature_enabled(store: &Store, guild_id: &str, key: &str, legacy_key: Option<&str>) -> bool {
+    // A legacy or manually inserted setting must not bypass the canonical
+    // lifecycle.  In particular, provider features marked blocked stay off
+    // until their official credentials/approvals are available.
+    if !feature_maturity_allows_runtime(key) {
+        return false;
+    }
+    // `feature_settings` is the revisioned source of truth.  Compatibility
+    // projections in `settings` can be stale during a rolling deploy and must
+    // never re-enable a feature that the owner explicitly disabled.
+    if let Ok(Some(record)) = store.get_feature_setting(guild_id, key) {
+        return record.enabled;
+    }
     store
         .get_setting(guild_id, &format!("feature.{key}"))
         .ok()
@@ -7126,6 +9306,90 @@ fn feature_enabled(store: &Store, guild_id: &str, key: &str, legacy_key: Option<
             })
         })
         .unwrap_or(false)
+}
+
+fn feature_maturity_allows_runtime(key: &str) -> bool {
+    let configured = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    let any_configured = |names: &[&str]| names.iter().any(|name| configured(name));
+    let approved = |names: &[&str]| {
+        names.iter().any(|name| {
+            std::env::var(name)
+                .ok()
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+        })
+    };
+    // `feature_is_configurable` answers whether the panel can show a setup
+    // page. It must not override a globally blocked provider: a stale or
+    // hand-written setting is never permission to run without the official
+    // credential/approval gate.
+    match (feature_maturity(key), key) {
+        // Beta integrations are still real runtime adapters, but they must
+        // not be activated from a stale/manual guild setting while the
+        // process lacks the same credentials/endpoints used by their
+        // workers.  The API performs the equivalent client health check;
+        // keeping this guard in the gateway prevents a rolling deploy from
+        // briefly reporting a non-functional feature as enabled.
+        (helper_contracts::FeatureMaturity::Beta, "social.youtube") => {
+            configured("YOUTUBE_API_KEY")
+        }
+        (helper_contracts::FeatureMaturity::Beta, "social.twitch") => {
+            configured("TWITCH_CLIENT_ID")
+                && configured("TWITCH_CLIENT_SECRET")
+                && configured("TWITCH_EVENTSUB_SECRET")
+                && configured("TWITCH_EVENTSUB_CALLBACK_URL")
+        }
+        (helper_contracts::FeatureMaturity::Beta, "web3.gas_tracker") => any_configured(&[
+            "ETHEREUM_RPC_URL",
+            "POLYGON_RPC_URL",
+            "ARBITRUM_RPC_URL",
+            "BASE_RPC_URL",
+        ]),
+        (helper_contracts::FeatureMaturity::Beta, "web3.nft_stats")
+        | (helper_contracts::FeatureMaturity::Beta, "web3.nft_queries")
+        | (helper_contracts::FeatureMaturity::Beta, "web3.nft_sales") => {
+            configured("OPENSEA_API_KEY")
+        }
+        // RSS and podcasts use public HTTP feeds and the worker's SSRF
+        // checks; there is no provider secret to require here.
+        (helper_contracts::FeatureMaturity::Beta, "social.rss") => true,
+        (helper_contracts::FeatureMaturity::Blocked, "social.reddit") => {
+            approved(&["REDDIT_COMMERCIAL_APPROVED"])
+                && configured("REDDIT_CLIENT_ID")
+                && configured("REDDIT_CLIENT_SECRET")
+        }
+        (helper_contracts::FeatureMaturity::Blocked, "social.x") => {
+            approved(&["X_API_APPROVED", "X_COMMERCIAL_APPROVED"]) && configured("X_BEARER_TOKEN")
+        }
+        (helper_contracts::FeatureMaturity::Blocked, "social.tiktok") => {
+            approved(&["TIKTOK_APP_APPROVED", "TIKTOK_DISPLAY_API_APPROVED"])
+                && configured("TIKTOK_ACCESS_TOKEN")
+        }
+        (helper_contracts::FeatureMaturity::Blocked, "social.instagram") => {
+            approved(&["META_APP_APPROVED", "META_INSTAGRAM_APP_APPROVED"])
+                && configured("META_INSTAGRAM_ACCESS_TOKEN")
+                && configured("META_INSTAGRAM_USER_ID")
+        }
+        (helper_contracts::FeatureMaturity::Blocked, "social.kick") => {
+            approved(&["KICK_APP_APPROVED", "KICK_API_APPROVED"]) && configured("KICK_ACCESS_TOKEN")
+        }
+        (helper_contracts::FeatureMaturity::Blocked, "growth.monetization") => {
+            approved(&["STRIPE_CONNECT_APPROVED"])
+                && configured("STRIPE_SECRET_KEY")
+                && configured("STRIPE_WEBHOOK_SECRET")
+        }
+        (helper_contracts::FeatureMaturity::Blocked, "web3.gating") => {
+            configured("SIWE_DOMAIN")
+                && configured("SIWE_URI")
+                && configured("SIWE_SESSION_SECRET")
+                && configured("SIWE_ALLOWED_CONTRACTS")
+        }
+        (helper_contracts::FeatureMaturity::Blocked, _) => false,
+        _ => feature_is_configurable(key),
+    }
 }
 
 fn feature_explicitly_disabled(store: &Store, guild_id: &str, key: &str) -> bool {
@@ -7162,11 +9426,181 @@ fn is_moderation_command(name: &str) -> bool {
             | "quarantine"
             | "unquarantine"
             | "slowmode"
+            | "lockdown"
+            | "unlock"
     )
+}
+
+/// Keep command availability tied to the same revisioned feature switch that
+/// drives gateway handlers and provider workers.  Previously only a handful
+/// of commands checked their toggle, which meant a dashboard owner could
+/// disable a module while its slash commands continued to mutate state.
+fn command_feature_key(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "privacy" => "management.privacy",
+        "join-gate" => "protection.join_gate",
+        "anti-raid" => "protection.anti_raid",
+        "anti-nuke" | "security-mode" => "management.audit",
+        "modlogs" | "warn" | "violation" | "note" | "reason" | "kick" | "ban" | "timeout"
+        | "tempban" | "softban" | "untimeout" | "unban" | "purge" | "quarantine"
+        | "unquarantine" | "slowmode" | "lockdown" | "unlock" => "management.moderation",
+        "afk" | "remind" => "utility.reminders",
+        "tag" | "tags" | "tag-set" | "tag-delete" => "management.custom_commands",
+        "rank" => "studio.rank_card",
+        "leaderboard" => "community.leaderboard",
+        "achievements" => "community.achievements",
+        "serverstats" => "insights.stats",
+        "crypto" => "web3.crypto_queries",
+        "gas" => "web3.gas_tracker",
+        "nft-stats" => "web3.nft_stats",
+        "nft-query" => "web3.nft_queries",
+        "nft-sales" => "web3.nft_sales",
+        "search" => "utility.search",
+        "emojis" => "utility.emojis",
+        "invites" => "management.invite_tracker",
+        "balance" | "daily" | "work" | "economy-top" => "community.economy",
+        "temp-channel" => "utility.temp_channels",
+        "embed" => "utility.embeds",
+        "starboard-set" => "community.starboard",
+        "suggest" | "suggestion" => "community.suggestions",
+        "giveaway-start" | "giveaway-end" | "giveaway-list" | "gstart" | "gend" | "glist"
+        | "greroll" => "community.giveaways",
+        "poll" => "management.polls",
+        "workflow-create" | "workflow-list" | "workflow-dry-run" | "workflow-toggle"
+        | "workflow-delete" => "management.workflows",
+        "event-create" | "event-edit" | "event-cancel" | "event-list" | "event-register"
+        | "event-unregister" | "event-attendees" | "event-checkin" => "community.events",
+        "birthday-set" | "birthday-remove" => "community.birthdays",
+        "rolepanel" => "community.role_panels",
+        "verify-panel" => "protection.join_gate",
+        "ticket-panel" | "ticket-config" | "ticket-rate" | "ticket-update" => "support.tickets",
+        "help" => "utility.help",
+        _ => return None,
+    })
+}
+
+fn feature_title(key: &str) -> &'static str {
+    match key {
+        "protection.join_gate" => "Join gate",
+        "protection.anti_raid" => "Anti-raid",
+        "management.audit" => "Audit and permissions",
+        "management.privacy" => "Privacy",
+        "management.moderation" => "Moderation",
+        "utility.reminders" => "Reminders",
+        "management.custom_commands" => "Custom commands",
+        "studio.rank_card" => "XP card",
+        "community.leaderboard" => "Leaderboard",
+        "community.achievements" => "Achievements",
+        "insights.stats" => "Server statistics",
+        "web3.crypto_queries" => "Crypto queries",
+        "web3.gas_tracker" => "Gas tracker",
+        "web3.nft_stats" => "NFT statistics",
+        "web3.nft_queries" => "NFT queries",
+        "web3.nft_sales" => "NFT sales",
+        "utility.search" => "Search",
+        "utility.emojis" => "Emojis",
+        "management.invite_tracker" => "Invite tracker",
+        "community.economy" => "Economy",
+        "utility.temp_channels" => "Temporary channels",
+        "utility.embeds" => "Embeds",
+        "community.starboard" => "Starboard",
+        "community.suggestions" => "Suggestions",
+        "community.giveaways" => "Giveaways",
+        "management.polls" => "Polls",
+        "management.workflows" => "Workflows",
+        "community.events" => "Events",
+        "community.birthdays" => "Birthdays",
+        "community.role_panels" => "Role panels",
+        "support.tickets" => "Tickets",
+        "utility.help" => "Help",
+        _ => "this feature",
+    }
+}
+
+fn scheduled_action_feature(action_type: &str) -> Option<&'static str> {
+    match action_type {
+        "unban" => Some("management.moderation"),
+        "giveaway_end" => Some("community.giveaways"),
+        "poll_end" => Some("management.polls"),
+        "ticket_sla" => Some("support.tickets"),
+        _ => None,
+    }
+}
+
+fn should_cleanup_temp_channel(new_channel_id: Option<serenity::all::ChannelId>) -> bool {
+    // A move is not an abandonment. Without the optional Serenity cache we
+    // cannot safely inspect the remaining occupants, so defer cleanup until
+    // the owner fully disconnects from voice.
+    new_channel_id.is_none()
 }
 
 fn setting_string(store: &Store, guild_id: &str, key: &str) -> Option<String> {
     store.get_setting(guild_id, key).ok().flatten()
+}
+
+/// Resolve a reusable Studio template without allowing arbitrary JSON to leak
+/// into Discord. Templates are opt-in through the templates feature and only
+/// bounded string fields are accepted. Missing or malformed templates fall
+/// back to the feature's own configured message.
+fn template_message(
+    store: &Store,
+    guild_id: &str,
+    template_setting_key: &str,
+    slot: &str,
+    fallback: String,
+) -> String {
+    // A template reference is only active when the Templates feature is
+    // enabled for this guild.  Without this guard, disabling the feature in
+    // the panel would leave previously selected templates affecting welcome
+    // and provider messages, which makes the toggle misleading.
+    // The revisioned feature toggle is the primary source of truth.  The
+    // projection is checked as a compatibility guard as well, so a stale or
+    // manually edited projection can never leave an old template active after
+    // the owner disables the feature in the panel.
+    if !feature_enabled(store, guild_id, "management.templates", None)
+        || !setting_bool(store, guild_id, "management.templates.enabled", true)
+    {
+        return fallback;
+    }
+    let Some(template_id) = setting_string(store, guild_id, template_setting_key)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return fallback;
+    };
+    let raw = setting_string(store, guild_id, &format!("studio.template.{template_id}"));
+    let Some(raw) = raw else { return fallback };
+    let Ok(template) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return fallback;
+    };
+    let config = template
+        .get("config")
+        .and_then(serde_json::Value::as_object);
+    let candidate = config.and_then(|object| {
+        object
+            .get(slot)
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                object
+                    .get(&format!("{slot}Message"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .or_else(|| object.get("content").and_then(serde_json::Value::as_str))
+            .or_else(|| object.get("message").and_then(serde_json::Value::as_str))
+    });
+    let Some(message) = candidate else {
+        return fallback;
+    };
+    if message.trim().is_empty()
+        || message.chars().count() > 2_000
+        || message.chars().any(char::is_control)
+    {
+        return fallback;
+    }
+    // Prevent a reusable template from pinging an entire server. Member
+    // mentions remain available through the explicit {member} placeholder.
+    message
+        .replace("@everyone", "@\u{200b}everyone")
+        .replace("@here", "@\u{200b}here")
 }
 
 fn setting_u64(store: &Store, guild_id: &str, key: &str, default: u64) -> u64 {
@@ -7234,6 +9668,25 @@ fn scam_policy_for_store(store: &Store, guild_id: &str) -> helper_core::ScamPoli
     }))
 }
 
+fn starboard_policy_for_store(store: &Store, guild_id: &str) -> helper_core::StarboardPolicy {
+    let csv = |key: &str| {
+        setting_string(store, guild_id, key)
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    starboard_policy_from_json(&serde_json::json!({
+        "threshold": setting_i64(store, guild_id, "community.starboard.threshold", 3),
+        "allowSelfStar": setting_bool(store, guild_id, "community.starboard.allow_self_star", false),
+        "includeImages": setting_bool(store, guild_id, "community.starboard.include_images", true),
+        "ignoredChannels": csv("community.starboard.ignored_channels"),
+        "ignoredRoles": csv("community.starboard.ignored_roles"),
+    }))
+}
+
 fn permission_passport_message() -> String {
     "**Permission Passport**\nBase: `View Channels`, `Send Messages`, `Embed Links`, `Read Message History`, `Use Application Commands`.\nSecurity opcional: `Manage Messages`, `Moderate Members`, `Kick Members`, `Ban Members`, `Manage Roles`.\nSupport/Events opcionais: `Manage Channels`, `Manage Threads`, `Create Private Threads`.\nGateway: `MESSAGE_CONTENT` e `GUILD_MEMBERS` só suportam módulos que precisam deles.\nCada permissão extra tem um módulo e uma consequência explícita; usa o painel para comparar o concedido com o necessário.".to_string()
 }
@@ -7298,6 +9751,14 @@ async fn deliver_scheduled_action(
     payload: &str,
 ) -> Result<()> {
     let value: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+    // Scheduled work can outlive the revision that created it.  Consume jobs
+    // for a feature that was disabled instead of allowing stale actions to
+    // mutate the server after the owner turned that module off.
+    let gated_feature = scheduled_action_feature(action_type);
+    if gated_feature.is_some_and(|key| !feature_enabled(store, guild_id, key, None)) {
+        store.delete_scheduled_action(id)?;
+        return Ok(());
+    }
     if action_type == "reminder" && !feature_enabled(store, guild_id, "utility.reminders", None) {
         // A scheduled reminder may outlive a feature disable. Consume it without
         // delivering anything so a later re-enable cannot replay stale notices.
@@ -7347,6 +9808,162 @@ async fn deliver_scheduled_action(
         store.delete_scheduled_action(id)?;
         return Ok(());
     }
+    if action_type == "monetization_entitlement" {
+        if !feature_enabled(store, guild_id, "growth.monetization", None) {
+            store.delete_scheduled_action(id)?;
+            return Ok(());
+        }
+        let member_id = value
+            .get("member_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .map(serenity::all::UserId::new)
+            .ok_or_else(|| anyhow::anyhow!("invalid monetization member"))?;
+        let role_id = value
+            .get("role_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .map(RoleId::new)
+            .ok_or_else(|| anyhow::anyhow!("invalid monetization role"))?;
+        let guild = guild_id
+            .parse::<u64>()
+            .map(serenity::all::GuildId::new)
+            .map_err(|_| anyhow::anyhow!("invalid monetization guild"))?;
+        let roles = guild.roles(http).await?;
+        let Some(role) = roles.get(&role_id) else {
+            store.delete_scheduled_action(id)?;
+            return Ok(());
+        };
+        if role.managed {
+            store.delete_scheduled_action(id)?;
+            return Ok(());
+        }
+        let bot_user = http.get_current_user().await?;
+        let bot_member = guild.member(http, bot_user.id).await?;
+        let bot_top = bot_member
+            .roles
+            .iter()
+            .filter_map(|rid| roles.get(rid).map(|r| r.position))
+            .max()
+            .unwrap_or(0);
+        if role.position >= bot_top {
+            store.delete_scheduled_action(id)?;
+            return Ok(());
+        }
+        guild
+            .member(http, member_id)
+            .await?
+            .add_role(http, role_id)
+            .await?;
+        store.delete_scheduled_action(id)?;
+        return Ok(());
+    }
+    if action_type == "web3_wallet_role_sync" {
+        if !feature_enabled(store, guild_id, "web3.gating", None) {
+            store.delete_scheduled_action(id)?;
+            return Ok(());
+        }
+        let member_id = value
+            .get("member_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .map(serenity::all::UserId::new)
+            .ok_or_else(|| anyhow::anyhow!("invalid wallet member"))?;
+        let role_id = value
+            .get("role_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .map(RoleId::new)
+            .ok_or_else(|| anyhow::anyhow!("invalid wallet role"))?;
+        let chain = value
+            .get("chain")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("wallet chain missing"))?;
+        let contract = value
+            .get("contract_address")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("wallet contract missing"))?;
+        if !approved_wallet_contract(contract) {
+            store.delete_scheduled_action(id)?;
+            return Ok(());
+        }
+        let address = value
+            .get("address")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("wallet address missing"))?;
+        let asset_type = value
+            .get("asset_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("erc721");
+        let token_id = value.get("token_id").and_then(serde_json::Value::as_str);
+        let minimum = value
+            .get("minimum_balance")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("wallet minimum balance missing"))?
+            .parse::<u128>()
+            .map_err(|_| anyhow::anyhow!("wallet minimum balance invalid"))?;
+        let interval_seconds = value
+            .get("interval_seconds")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(3600)
+            .clamp(900, 86_400);
+        let rpc = EthereumRpcClient::from_env(chain)
+            .ok_or_else(|| anyhow::anyhow!("wallet rpc not configured"))?;
+        let balance = rpc
+            .token_balance(contract, address, asset_type, token_id)
+            .await?;
+        let guild = guild_id
+            .parse::<u64>()
+            .map(serenity::all::GuildId::new)
+            .map_err(|_| anyhow::anyhow!("invalid wallet guild"))?;
+        let roles = guild.roles(http).await?;
+        let Some(role) = roles.get(&role_id) else {
+            store.delete_scheduled_action(id)?;
+            return Ok(());
+        };
+        if role.managed {
+            store.delete_scheduled_action(id)?;
+            return Ok(());
+        }
+        let bot_user = http.get_current_user().await?;
+        let bot_member = guild.member(http, bot_user.id).await?;
+        let bot_top = bot_member
+            .roles
+            .iter()
+            .filter_map(|rid| roles.get(rid).map(|item| item.position))
+            .max()
+            .unwrap_or(0);
+        if role.position >= bot_top {
+            store.delete_scheduled_action(id)?;
+            return Ok(());
+        }
+        let member = guild.member(http, member_id).await?;
+        if balance >= minimum {
+            member.add_role(http, role_id).await?;
+        } else {
+            member.remove_role(http, role_id).await?;
+        }
+        let next_payload = serde_json::json!({
+            "address": address,
+            "member_id": member_id.get().to_string(),
+            "role_id": role_id.get().to_string(),
+            "chain": chain,
+            "contract_address": contract,
+            "asset_type": asset_type,
+            "token_id": token_id,
+            "minimum_balance": minimum.to_string(),
+            "interval_seconds": interval_seconds,
+        });
+        let _ = store.schedule_typed(
+            guild_id,
+            "web3_wallet_role_sync",
+            &member_id.get().to_string(),
+            Utc::now().timestamp_millis() + interval_seconds * 1_000,
+            &next_payload.to_string(),
+        );
+        store.delete_scheduled_action(id)?;
+        return Ok(());
+    }
     let channel_id = value
         .get("channel_id")
         .and_then(serde_json::Value::as_str)
@@ -7371,14 +9988,30 @@ async fn deliver_scheduled_action(
     Ok(())
 }
 
+fn approved_wallet_contract(value: &str) -> bool {
+    let body = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"));
+    body.is_some_and(|text| text.len() == 40 && text.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        && std::env::var("SIWE_ALLOWED_CONTRACTS")
+            .ok()
+            .is_some_and(|list| {
+                list.split(',')
+                    .any(|item| item.trim().eq_ignore_ascii_case(value))
+            })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        account_age_days,
+        OpenSeaCollectionInfo, account_age_days,
         adapter::{DiscordAdapter, Effect, FakeDiscordAdapter},
-        english_bot_text, is_destructive_audit_action, join_burst_armed, parse_duration,
-        parse_scheduled_event_window, shadow_mode_enabled,
+        command_feature_key, english_bot_text, feature_enabled, feature_title,
+        format_nft_collection, is_destructive_audit_action, join_burst_armed, parse_duration,
+        parse_scheduled_event_window, scheduled_action_feature, shadow_mode_enabled,
+        should_cleanup_temp_channel, template_message,
     };
+    use helper_store::Store;
     use std::{
         collections::{HashMap, VecDeque},
         time::{Duration, Instant},
@@ -7386,6 +10019,16 @@ mod tests {
 
     #[test]
     fn translates_legacy_user_facing_messages_to_english() {
+        assert_eq!(
+            english_bot_text("Ol\u{00e1} <@1>. Explica aqui o que precisas."),
+            "Hello <@1>. Tell us what you need."
+        );
+        assert_eq!(
+            english_bot_text(
+                "N\u{00e3}o foi poss\u{00ed}vel executar a a\u{00e7}\u{00e3}o; confirma as permiss\u{00f5}es e a hierarquia de cargos."
+            ),
+            "Unable to perform the action; check permissions and role hierarchy."
+        );
         assert_eq!(
             english_bot_text("Olá <@1>. Explica aqui o que precisas."),
             "Hello <@1>. Tell us what you need."
@@ -7401,6 +10044,121 @@ mod tests {
     }
 
     #[test]
+    fn every_catalogue_key_has_a_gateway_reference() {
+        let source = include_str!("lib.rs");
+        for key in helper_core::FEATURE_KEYS {
+            assert!(
+                source.contains(&format!("\"{key}\"")),
+                "catalogue feature {key} has no Discord runtime reference"
+            );
+        }
+    }
+
+    #[test]
+    fn every_published_projection_has_a_discord_runtime_consumer() {
+        // Adapters are allowed to publish several bounded settings, but a
+        // setting exposed by the panel must be read by this Discord runtime
+        // (handler, command or provider worker). This is intentionally a
+        // source-level guard: it catches a new field being persisted without
+        // silently becoming a no-op in production.
+        let source = include_str!("lib.rs");
+        let api_source = include_str!("../../helper-api/src/lib.rs");
+        let store_source = include_str!("../../helper-store/src/lib.rs");
+        for key in helper_core::FEATURE_KEYS {
+            let adapter = helper_core::feature_adapter(key).expect("catalogue adapter");
+            // Provider subscriptions are deliberately projected twice: the
+            // API transaction stores a durable provider record and the
+            // Discord worker consumes that record. Their source-specific
+            // projection names are not generic `set_setting` keys, so guard
+            // the complete provider path instead of demanding a dead string
+            // lookup in the gateway crate.
+            let dedicated_provider_consumer = match *key {
+                "social.youtube" => {
+                    api_source.contains("publish_youtube_feature_setting")
+                        && store_source.contains("due_youtube_subscriptions")
+                        && source.contains("process_youtube_subscription")
+                }
+                "social.rss" | "social.podcasts" => {
+                    api_source.contains("publish_rss_feature_setting")
+                        && store_source.contains("due_rss_subscriptions")
+                        && source.contains("process_rss_subscription")
+                }
+                "social.twitch" => {
+                    api_source.contains("publish_twitch_feature_setting")
+                        && store_source.contains("due_twitch_subscriptions")
+                        && source.contains("process_twitch_subscription")
+                }
+                "social.reddit" => {
+                    api_source.contains("publish_reddit_feature_setting")
+                        && store_source.contains("due_reddit_subscriptions")
+                        && source.contains("process_reddit_subscription")
+                }
+                "social.x" => {
+                    api_source.contains("publish_x_feature_setting")
+                        && store_source.contains("due_x_subscriptions")
+                        && source.contains("process_x_subscription")
+                }
+                "social.tiktok" => {
+                    api_source.contains("publish_tiktok_feature_setting")
+                        && store_source.contains("due_tiktok_subscriptions")
+                        && source.contains("process_tiktok_subscription")
+                }
+                "social.instagram" => {
+                    api_source.contains("publish_instagram_feature_setting")
+                        && store_source.contains("due_instagram_subscriptions")
+                        && source.contains("process_instagram_subscription")
+                }
+                "social.kick" => {
+                    api_source.contains("publish_kick_feature_setting")
+                        && store_source.contains("due_kick_subscriptions")
+                        && source.contains("process_kick_subscription")
+                }
+                "social.bluesky" => {
+                    api_source.contains("publish_bluesky_feature_setting")
+                        && store_source.contains("due_bluesky_subscriptions")
+                        && source.contains("process_bluesky_subscription")
+                }
+                // Monetization is consumed by the signed Stripe webhook in
+                // the API and by the idempotent entitlement job in this
+                // gateway, rather than by a polling worker.
+                "growth.monetization" => {
+                    api_source.contains("stripe_webhook")
+                        && source.contains("monetization_entitlement")
+                }
+                // Wallet gating is a signed API flow that schedules this
+                // gateway's idempotent role reconciliation job.
+                "web3.gating" => {
+                    api_source.contains("web3_gating_verify")
+                        && source.contains("web3_wallet_role_sync")
+                }
+                // These read-only providers are scheduled workers. Their
+                // projection namespace is built from the feature key so the
+                // runtime can share one worker across collection/network
+                // variants; the worker itself is the consumer contract.
+                "web3.gas_tracker" => {
+                    source.contains("run_gas_tracker_worker")
+                        && source.contains("web3.gas_tracker.interval_seconds")
+                }
+                "web3.nft_stats" | "web3.nft_sales" => {
+                    source.contains("run_opensea_worker")
+                        && source.contains("enabled_feature_settings(key)")
+                }
+                "web3.crypto_stats" => {
+                    source.contains("run_crypto_stats_worker")
+                        && source.contains("enabled_feature_settings(\"web3.crypto_stats\")")
+                }
+                _ => false,
+            };
+            for (setting, _) in adapter.runtime_projection(&adapter.descriptor().defaults) {
+                assert!(
+                    dedicated_provider_consumer || source.contains(&setting),
+                    "{key} publishes {setting}, but helper-discord has no runtime consumer"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn duration_parser_is_bounded_and_explicit() {
         assert_eq!(parse_duration("10m"), Some(600_000));
         assert_eq!(parse_duration("2h"), Some(7_200_000));
@@ -7408,6 +10166,20 @@ mod tests {
         assert_eq!(parse_duration("10weeks"), None);
         assert_eq!(account_age_days(172800, 86400), 1);
         assert_eq!(account_age_days(86400, 172800), 0);
+    }
+
+    #[test]
+    fn nft_query_preview_is_bounded_and_read_only() {
+        let message = format_nft_collection(&OpenSeaCollectionInfo {
+            slug: "vozen-collectibles".into(),
+            name: Some("Vozen Collectibles".into()),
+            description: Some("A public collection description.".into()),
+            image_url: None,
+            external_url: Some("https://example.com/collection".into()),
+        });
+        assert!(message.contains("Vozen Collectibles"));
+        assert!(message.contains("Read-only OpenSea collection data."));
+        assert!(message.len() <= 2_000);
     }
 
     #[test]
@@ -7534,7 +10306,19 @@ mod tests {
             .log("log-channel", "Anti-spam: matched:flood (action)")
             .unwrap();
         discord.reply("general", "Please slow down.").unwrap();
-        assert_eq!(discord.effects().len(), 3);
+        discord
+            .create_channel("guild", "ticket", "ticket-123", "text")
+            .unwrap();
+        discord.assign_role("guild", "member", "verified").unwrap();
+        discord
+            .publish_event("guild", "event", "Community meetup")
+            .unwrap();
+        discord
+            .edit_channel("ticket", "ticket-123-claimed")
+            .unwrap();
+        discord.remove_role("guild", "member", "verified").unwrap();
+        discord.delete_channel("ticket").unwrap();
+        assert_eq!(discord.effects().len(), 9);
         assert!(matches!(
             discord.effects()[0],
             Effect::Timeout { seconds: 60, .. }
@@ -7543,6 +10327,214 @@ mod tests {
         discord.fail_next();
         let error = discord.log("log-channel", "permission check").unwrap_err();
         assert_eq!(error, "discord_permission_denied");
-        assert_eq!(discord.effects().len(), 3);
+        assert_eq!(discord.effects().len(), 9);
+    }
+
+    #[test]
+    fn canonical_feature_switches_control_help_privacy_and_tickets() {
+        let store = Store::open(":memory:").expect("open test store");
+        assert!(!feature_enabled(&store, "guild", "utility.help", None));
+        store
+            .set_setting("guild", "feature.utility.help", "true")
+            .unwrap();
+        assert!(feature_enabled(&store, "guild", "utility.help", None));
+
+        store
+            .publish_feature_setting(
+                "guild",
+                "utility.help",
+                false,
+                "{}",
+                None,
+                "owner",
+                &[("feature.utility.help".into(), "true".into())],
+            )
+            .unwrap();
+        assert!(!feature_enabled(&store, "guild", "utility.help", None));
+
+        store
+            .set_setting("guild", "feature.management.privacy", "true")
+            .unwrap();
+        assert!(feature_enabled(&store, "guild", "management.privacy", None));
+        store
+            .set_setting("guild", "feature.management.privacy", "false")
+            .unwrap();
+        assert!(!feature_enabled(
+            &store,
+            "guild",
+            "management.privacy",
+            None
+        ));
+
+        // A provider setup page is intentionally configurable in the panel,
+        // but a stale/manual flag must not bypass its credential and approval
+        // gate in the Discord runtime.
+        store
+            .set_setting("guild", "feature.social.instagram", "true")
+            .unwrap();
+        assert!(!feature_enabled(&store, "guild", "social.instagram", None));
+
+        // Ticket components accept the legacy key while all new writes use
+        // the canonical key; both paths must have the same runtime meaning.
+        store
+            .set_setting("guild", "feature.support.tickets", "true")
+            .unwrap();
+        assert!(feature_enabled(
+            &store,
+            "guild",
+            "support.tickets",
+            Some("feature.support.tickets")
+        ));
+        store
+            .set_setting("guild", "feature.support.tickets", "false")
+            .unwrap();
+        assert!(!feature_enabled(
+            &store,
+            "guild",
+            "support.tickets",
+            Some("feature.support.tickets")
+        ));
+    }
+
+    #[test]
+    fn command_feature_map_covers_mutating_and_provider_commands() {
+        let expected = [
+            ("join-gate", "protection.join_gate"),
+            ("anti-raid", "protection.anti_raid"),
+            ("anti-nuke", "management.audit"),
+            ("lockdown", "management.moderation"),
+            ("unlock", "management.moderation"),
+            ("tag-set", "management.custom_commands"),
+            ("rank", "studio.rank_card"),
+            ("leaderboard", "community.leaderboard"),
+            ("crypto", "web3.crypto_queries"),
+            ("nft-sales", "web3.nft_sales"),
+            ("giveaway-start", "community.giveaways"),
+            ("poll", "management.polls"),
+            ("workflow-create", "management.workflows"),
+            ("event-create", "community.events"),
+            ("birthday-set", "community.birthdays"),
+            ("rolepanel", "community.role_panels"),
+            ("ticket-panel", "support.tickets"),
+            ("remind", "utility.reminders"),
+            ("search", "utility.search"),
+            ("embed", "utility.embeds"),
+        ];
+        for (command, feature) in expected {
+            assert_eq!(command_feature_key(command), Some(feature), "{command}");
+            assert_ne!(feature_title(feature), "this feature");
+        }
+        assert_eq!(command_feature_key("ping"), None);
+        assert_eq!(command_feature_key("dashboard"), None);
+    }
+
+    #[test]
+    fn scheduled_actions_are_consumed_when_their_feature_is_disabled() {
+        assert_eq!(
+            scheduled_action_feature("giveaway_end"),
+            Some("community.giveaways")
+        );
+        assert_eq!(
+            scheduled_action_feature("poll_end"),
+            Some("management.polls")
+        );
+        assert_eq!(
+            scheduled_action_feature("ticket_sla"),
+            Some("support.tickets")
+        );
+        assert_eq!(
+            scheduled_action_feature("unban"),
+            Some("management.moderation")
+        );
+        assert_eq!(scheduled_action_feature("reminder"), None);
+    }
+
+    #[test]
+    fn temporary_channel_cleanup_waits_for_a_full_disconnect() {
+        assert!(should_cleanup_temp_channel(None));
+        assert!(!should_cleanup_temp_channel(Some(
+            serenity::all::ChannelId::new(42)
+        )));
+    }
+
+    #[test]
+    fn studio_templates_render_only_bounded_message_content() {
+        let path = std::env::temp_dir().join(format!(
+            "vozen-helper-template-test-{}.sqlite",
+            std::process::id()
+        ));
+        let store = Store::open(&path).expect("open test store");
+        store
+            .set_setting("guild", "feature.management.templates", "true")
+            .unwrap();
+        store
+            .set_setting("guild", "support.welcome.template_id", "welcome-1")
+            .unwrap();
+        store
+            .set_setting(
+                "guild",
+                "studio.template.welcome-1",
+                &serde_json::json!({"config":{"content":"Hello {member}, @everyone"}}).to_string(),
+            )
+            .unwrap();
+        assert_eq!(
+            template_message(
+                &store,
+                "guild",
+                "support.welcome.template_id",
+                "welcome",
+                "fallback".into()
+            ),
+            "Hello {member}, @\u{200b}everyone"
+        );
+        // A stale projection must not keep the template active after the
+        // feature publisher explicitly disables the module.
+        store
+            .set_setting("guild", "management.templates.enabled", "false")
+            .unwrap();
+        assert_eq!(
+            template_message(
+                &store,
+                "guild",
+                "support.welcome.template_id",
+                "welcome",
+                "fallback".into()
+            ),
+            "fallback"
+        );
+        store
+            .set_setting("guild", "management.templates.enabled", "true")
+            .unwrap();
+        store
+            .set_setting(
+                "guild",
+                "studio.template.welcome-1",
+                &serde_json::json!({"config":{"content":"\u{0000}"}}).to_string(),
+            )
+            .unwrap();
+        assert_eq!(
+            template_message(
+                &store,
+                "guild",
+                "support.welcome.template_id",
+                "welcome",
+                "fallback".into()
+            ),
+            "fallback"
+        );
+        store
+            .set_setting("guild", "feature.management.templates", "false")
+            .unwrap();
+        assert_eq!(
+            template_message(
+                &store,
+                "guild",
+                "support.welcome.template_id",
+                "welcome",
+                "fallback".into()
+            ),
+            "fallback"
+        );
+        let _ = std::fs::remove_file(path);
     }
 }

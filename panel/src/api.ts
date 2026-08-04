@@ -25,6 +25,7 @@ export type Feature = {
   configurable?: boolean;
   config_schema_version?: number;
   configSchemaVersion?: number;
+  issues?: Array<{ path: string; code: string; message: string; severity: string }>;
   health?: {
     status?: 'ready' | 'degraded' | 'misconfigured' | 'dependency_down' | 'disabled';
     operational: boolean;
@@ -84,6 +85,26 @@ export type TwitchSubscription = {
   failureCount: number;
   lastError?: string | null;
 };
+export type ExternalSubscription = {
+  id: number;
+  sourceSubreddit?: string;
+  sourceHandle?: string;
+  sourceLabel?: string;
+  username?: string;
+  targetChannelId: string;
+  messageTemplate: string;
+  mention: string;
+  enabled: boolean;
+  intervalSeconds: number;
+  lastPostId?: string | null;
+  lastVideoId?: string | null;
+  lastMediaId?: string | null;
+  lastStreamId?: string | null;
+  nextPollAt: number;
+  failureCount: number;
+  lastError?: string | null;
+};
+export type ExternalProvider = 'reddit' | 'x' | 'tiktok' | 'instagram' | 'kick' | 'bluesky';
 export type FeatureSchema = {
   version: number;
   source: string;
@@ -95,7 +116,7 @@ export type FeatureSchema = {
       label: string;
       kind: string;
       help?: string;
-      options?: [string, string][];
+      options?: Array<[string, string] | string>;
       min?: number;
       max?: number;
       maxLength?: number;
@@ -211,7 +232,9 @@ export type ActivityRecord = {
   created_at: number;
 };
 
-const base = (import.meta.env.VITE_HELPER_API_BASE as string | undefined)?.replace(/\/$/, '') ?? '';
+const base =
+  (import.meta.env.VITE_HELPER_API_BASE as string | undefined)?.replace(/\/$/, '') ||
+  'https://api.vozen.org/rust';
 let sessionBearer: string | null = null;
 
 function persistSessionBearer(token: string | null): void {
@@ -333,6 +356,14 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled, config, expected_revision: expectedRevision }),
     }),
+  repairFeature: (key: string) =>
+    request<FeatureDetail & { repaired?: boolean }>(
+      `/api/config/features/${encodeURIComponent(key)}/repair`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      },
+    ),
   testFeature: (key: string, config: FeatureConfig) =>
     request<{
       ok: boolean;
@@ -519,6 +550,53 @@ export const api = {
     }),
   deleteTwitchSubscription: (id: number) =>
     request<{ deleted: boolean; id: number }>(`/api/config/twitch/${id}`, { method: 'DELETE' }),
+  externalSubscriptions: (provider: ExternalProvider) =>
+    request<{ guildId: string; subscriptions: ExternalSubscription[] }>(
+      `/api/config/${provider}`,
+    ),
+  createExternalSubscription: (
+    provider: ExternalProvider,
+    payload: {
+      sourceSubreddit?: string;
+      sourceHandle?: string;
+      sourceLabel?: string;
+      username?: string;
+      targetChannelId: string;
+      messageTemplate: string;
+      mention: string;
+      intervalSeconds: number;
+      enabled: boolean;
+    },
+  ) =>
+    request<ExternalSubscription>(`/api/config/${provider}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  updateExternalSubscription: (
+    provider: ExternalProvider,
+    id: number,
+    payload: {
+      sourceSubreddit?: string;
+      sourceHandle?: string;
+      sourceLabel?: string;
+      username?: string;
+      targetChannelId: string;
+      messageTemplate: string;
+      mention: string;
+      intervalSeconds: number;
+      enabled: boolean;
+    },
+  ) =>
+    request<ExternalSubscription>(`/api/config/${provider}/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  deleteExternalSubscription: (provider: ExternalProvider, id: number) =>
+    request<{ deleted: boolean; id: number }>(`/api/config/${provider}/${id}`, {
+      method: 'DELETE',
+    }),
   rankCard: () => request<{ guildId: string; config: RankCardConfig }>('/api/studio/rank-card'),
   saveRankCard: (config: RankCardConfig) =>
     request<{ guildId: string; config: RankCardConfig }>('/api/studio/rank-card', {

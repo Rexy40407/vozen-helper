@@ -17,17 +17,23 @@ use helper_contracts::{
     RankCardConfig, SessionClaims, SimulationResult, ValidationIssue,
 };
 use helper_core::{
-    Capability, FEATURE_SCHEMA_VERSION, anti_spam_policy_from_json, evaluate_anti_spam,
-    evaluate_scam, feature_adapter, feature_is_configurable, feature_maturity, is_known_feature,
-    quota_limit, scam_policy_from_json,
+    Capability, FEATURE_SCHEMA_VERSION, JoinGateObservation, JoinGatePolicy, StarboardObservation,
+    anti_raid_policy_from_json, anti_spam_policy_from_json, evaluate_anti_raid, evaluate_anti_spam,
+    evaluate_join_gate, evaluate_scam, evaluate_starboard, feature_adapter, feature_maturity,
+    is_known_feature, quota_limit, scam_policy_from_json, starboard_policy_from_json,
 };
 use helper_modules::{
-    BlueskyClient, CoinGeckoClient, EntitlementClient, RssClient, TwitchClient, YouTubeClient,
+    BlueskyClient, CoinGeckoClient, EntitlementClient, EthereumRpcClient, GasClient,
+    InstagramClient, KickClient, OpenSeaClient, RedditClient, RssClient, SiweVerifier,
+    StripeConnectClient, TikTokClient, TwitchClient, XClient, YouTubeClient,
 };
 use helper_store::{
-    BlueskySubscriptionRecord, BlueskySubscriptionWrite, RssSubscriptionRecord,
-    RssSubscriptionWrite, Store, TwitchSubscriptionRecord, TwitchSubscriptionWrite,
-    YouTubeSubscriptionRecord, YouTubeSubscriptionWrite,
+    BlueskySubscriptionRecord, BlueskySubscriptionWrite, InstagramSubscriptionRecord,
+    InstagramSubscriptionWrite, KickSubscriptionRecord, KickSubscriptionWrite,
+    RedditSubscriptionRecord, RedditSubscriptionWrite, RssSubscriptionRecord, RssSubscriptionWrite,
+    Store, TikTokSubscriptionRecord, TikTokSubscriptionWrite, TwitchSubscriptionRecord,
+    TwitchSubscriptionWrite, XSubscriptionRecord, XSubscriptionWrite, YouTubeSubscriptionRecord,
+    YouTubeSubscriptionWrite,
 };
 use hmac::{Hmac, Mac};
 use reqwest::Client;
@@ -60,7 +66,16 @@ pub struct ApiState {
     pub rss: Option<RssClient>,
     pub twitch: Option<TwitchClient>,
     pub bluesky: Option<BlueskyClient>,
+    pub reddit: Option<RedditClient>,
+    pub x: Option<XClient>,
+    pub tiktok: Option<TikTokClient>,
+    pub instagram: Option<InstagramClient>,
+    pub kick: Option<KickClient>,
+    pub stripe: Option<StripeConnectClient>,
+    pub siwe: Option<SiweVerifier>,
     pub coingecko: Option<CoinGeckoClient>,
+    pub gas: GasClient,
+    pub opensea: OpenSeaClient,
 }
 
 #[derive(Debug, Serialize)]
@@ -110,7 +125,67 @@ pub fn router(state: ApiState) -> Router {
             "/api/config/bluesky/{id}",
             put(update_bluesky_subscription).delete(delete_bluesky_subscription),
         )
+        .route(
+            "/api/config/reddit",
+            get(reddit_subscriptions).post(create_reddit_subscription),
+        )
+        .route(
+            "/api/config/reddit/{id}",
+            put(update_reddit_subscription).delete(delete_reddit_subscription),
+        )
+        .route("/api/providers/reddit/health", get(reddit_health))
+        .route("/api/providers/x/health", get(x_health))
+        .route(
+            "/api/config/x",
+            get(x_subscriptions).post(create_x_subscription),
+        )
+        .route(
+            "/api/config/x/{id}",
+            put(update_x_subscription).delete(delete_x_subscription),
+        )
+        .route("/api/providers/tiktok/health", get(tiktok_health))
+        .route(
+            "/api/config/tiktok",
+            get(tiktok_subscriptions).post(create_tiktok_subscription),
+        )
+        .route(
+            "/api/config/tiktok/{id}",
+            put(update_tiktok_subscription).delete(delete_tiktok_subscription),
+        )
+        .route("/api/providers/instagram/health", get(instagram_health))
+        .route(
+            "/api/config/instagram",
+            get(instagram_subscriptions).post(create_instagram_subscription),
+        )
+        .route(
+            "/api/config/instagram/{id}",
+            put(update_instagram_subscription).delete(delete_instagram_subscription),
+        )
+        .route("/api/providers/kick/health", get(kick_health))
+        .route(
+            "/api/config/kick",
+            get(kick_subscriptions).post(create_kick_subscription),
+        )
+        .route(
+            "/api/config/kick/{id}",
+            put(update_kick_subscription).delete(delete_kick_subscription),
+        )
+        .route("/api/providers/stripe/health", get(stripe_health))
+        .route("/api/providers/stripe/webhook", post(stripe_webhook))
         .route("/api/providers/coingecko/health", get(coingecko_health))
+        .route("/api/providers/gas/health", get(gas_health))
+        .route("/api/providers/gas/quote", get(gas_quote))
+        .route("/api/providers/opensea/health", get(opensea_health))
+        .route("/api/web3/gating/nonce", post(web3_gating_nonce))
+        .route("/api/web3/gating/verify", post(web3_gating_verify))
+        .route(
+            "/api/providers/opensea/collections/{slug}/stats",
+            get(opensea_collection_stats),
+        )
+        .route(
+            "/api/providers/opensea/collections/{slug}/sales",
+            get(opensea_sales),
+        )
         .route("/api/providers/twitch/health", get(twitch_health))
         .route(
             "/api/providers/twitch/channels/{login}",
@@ -164,6 +239,7 @@ pub fn router(state: ApiState) -> Router {
             "/api/config/features/{key}/rollback",
             post(feature_rollback),
         )
+        .route("/api/config/features/{key}/repair", post(feature_repair))
         .route(
             "/api/studio/brand",
             get(studio_brand).put(update_studio_brand),
@@ -474,6 +550,334 @@ async fn coingecko_health(
         "mode": if client.has_api_key() { "api_key" } else { "public_keyless" },
         "status": "ready",
         "message": "Read-only CoinGecko prices are available; never treat them as financial advice."
+    })))
+}
+
+async fn gas_health(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let networks = state.gas.configured_networks();
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "provider": "gas_rpc",
+        "feature": "web3.gas_tracker",
+        "configured": !networks.is_empty(),
+        "status": if networks.is_empty() { "missing_provider" } else { "ready" },
+        "networks": networks,
+        "message": "Gas data is read-only and comes only from operator-approved HTTPS RPC endpoints."
+    })))
+}
+
+async fn opensea_health(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let configured = state.opensea.has_api_key();
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "provider": "opensea",
+        "feature": "web3.nft_stats",
+        "configured": configured,
+        "status": if configured { "ready" } else { "missing_credentials" },
+        "message": "OpenSea features are read-only and require OPENSEA_API_KEY in the server environment."
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct SiweVerifyRequest {
+    message: String,
+    signature: String,
+    nonce: String,
+}
+
+async fn web3_gating_nonce(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let Some(verifier) = state.siwe.as_ref() else {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "siwe_not_configured",
+        ));
+    };
+    let nonce = verifier.issue_nonce();
+    let expires_at = Utc::now() + Duration::minutes(10);
+    state
+        .store
+        .issue_siwe_nonce(
+            &claims.guild_id,
+            &claims.user_id,
+            &nonce,
+            expires_at.timestamp(),
+        )
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "domain": verifier.expected_domain(),
+        "uri": verifier.expected_uri(),
+        "nonce": nonce,
+        "expiresAt": expires_at,
+        "message": "Sign the exact SIWE message shown by the wallet; Vozen never requests a seed phrase or private key."
+    })))
+}
+
+async fn web3_gating_verify(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(request): Json<SiweVerifyRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let Some(verifier) = state.siwe.as_ref() else {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "siwe_not_configured",
+        ));
+    };
+    if request.message.len() > 8_192 || request.signature.len() > 256 {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "siwe_payload_too_large",
+        ));
+    }
+    let stored = state
+        .store
+        .get_feature_setting(&claims.guild_id, "web3.gating")
+        .ok()
+        .flatten()
+        .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "wallet_gating_not_configured"))?;
+    if !stored.enabled {
+        return Err(client_error(StatusCode::CONFLICT, "wallet_gating_disabled"));
+    }
+    let config: serde_json::Value = serde_json::from_str(&stored.config_json)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid_saved_config"))?;
+    let issues = validate_feature_config("web3.gating", &config);
+    if issues.iter().any(|issue| issue.severity == "error") {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "wallet_gating_invalid_config",
+        ));
+    }
+    let verified = verifier
+        .verify(
+            &request.message,
+            &request.signature,
+            &request.nonce,
+            Utc::now(),
+        )
+        .map_err(|error| {
+            tracing::debug!(%error, guild_id = %claims.guild_id, "SIWE verification rejected");
+            client_error(StatusCode::UNAUTHORIZED, "siwe_verification_failed")
+        })?;
+    if !state
+        .store
+        .consume_siwe_nonce(
+            &claims.guild_id,
+            &claims.user_id,
+            &request.nonce,
+            Utc::now().timestamp(),
+        )
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+    {
+        return Err(client_error(
+            StatusCode::UNAUTHORIZED,
+            "siwe_nonce_replayed_or_expired",
+        ));
+    }
+    let target_role_id = config
+        .get("targetRoleId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| value.parse::<u64>().is_ok())
+        .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "wallet_role_missing"))?;
+    let chain = config
+        .get("chain")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("ethereum");
+    let contract_address = config
+        .get("contractAddress")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if !approved_wallet_contract(contract_address) {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "wallet_contract_not_approved",
+        ));
+    }
+    let asset_type = config
+        .get("assetType")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("erc721");
+    let minimum_balance = config
+        .get("minimumBalance")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("1");
+    let Some(_rpc) = EthereumRpcClient::from_env(chain) else {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "wallet_rpc_not_configured",
+        ));
+    };
+    let expected_chain_id = match chain {
+        "ethereum" => 1,
+        "polygon" => 137,
+        "arbitrum" => 42161,
+        "base" => 8453,
+        _ => {
+            return Err(client_error(
+                StatusCode::BAD_REQUEST,
+                "wallet_chain_invalid",
+            ));
+        }
+    };
+    if verified.chain_id != expected_chain_id {
+        return Err(client_error(
+            StatusCode::UNAUTHORIZED,
+            "siwe_chain_mismatch",
+        ));
+    }
+    let payload = serde_json::json!({
+        "address": verified.address,
+        "member_id": claims.user_id,
+        "role_id": target_role_id,
+        "chain": chain,
+        "contract_address": contract_address,
+        "asset_type": asset_type,
+        "token_id": config.get("tokenId").and_then(serde_json::Value::as_str),
+        "minimum_balance": minimum_balance,
+        "interval_seconds": config
+            .get("intervalSeconds")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(3600),
+    });
+    let job = state
+        .store
+        .schedule_typed(
+            &claims.guild_id,
+            "web3_wallet_role_sync",
+            &claims.user_id,
+            Utc::now().timestamp_millis(),
+            &payload.to_string(),
+        )
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let _ = state.store.record_activity(
+        &claims.guild_id,
+        "wallet_verified",
+        &claims.user_id,
+        None,
+        Some(&claims.user_id),
+        &serde_json::json!({"jobId": job, "chain": chain}).to_string(),
+    );
+    Ok(Json(serde_json::json!({
+        "accepted": true,
+        "jobId": job,
+        "address": verified.address,
+        "chainId": verified.chain_id,
+        "message": "Signature verified. The Helper will check the approved contract and update the role asynchronously."
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct GasQuoteQuery {
+    network: String,
+}
+
+async fn gas_quote(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Query(query): Query<GasQuoteQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let quote = state.gas.quote(&query.network).await.map_err(|error| {
+        let code = error.to_string();
+        let status = if code == "unsupported_rpc_network" {
+            StatusCode::BAD_REQUEST
+        } else if code == "rpc_network_not_configured" {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::BAD_GATEWAY
+        };
+        tracing::warn!(%error, guild_id = %claims.guild_id, "gas quote failed");
+        client_error(status, &code)
+    })?;
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "provider": "gas_rpc",
+        "quote": quote
+    })))
+}
+
+async fn opensea_collection_stats(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let stats = state
+        .opensea
+        .collection_stats(&slug)
+        .await
+        .map_err(|error| {
+            let code = error.to_string();
+            let status = if code == "invalid_opensea_slug" {
+                StatusCode::BAD_REQUEST
+            } else if code == "opensea_api_key_missing" {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            tracing::warn!(%error, guild_id = %claims.guild_id, "OpenSea collection stats failed");
+            client_error(status, &code)
+        })?;
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "provider": "opensea",
+        "stats": stats
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenSeaSalesQuery {
+    #[serde(default = "default_opensea_limit")]
+    limit: usize,
+}
+
+fn default_opensea_limit() -> usize {
+    5
+}
+
+async fn opensea_sales(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Query(query): Query<OpenSeaSalesQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    if !(1..=10).contains(&query.limit) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid_limit"));
+    }
+    let sales = state
+        .opensea
+        .sales(&slug, query.limit)
+        .await
+        .map_err(|error| {
+            let code = error.to_string();
+            let status = if code == "invalid_opensea_slug" {
+                StatusCode::BAD_REQUEST
+            } else if code == "opensea_api_key_missing" {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            tracing::warn!(%error, guild_id = %claims.guild_id, "OpenSea sales failed");
+            client_error(status, &code)
+        })?;
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "provider": "opensea",
+        "sales": sales
     })))
 }
 
@@ -1016,6 +1420,349 @@ async fn prepare_bluesky_feature(
     }))
 }
 
+async fn prepare_reddit_feature(
+    state: &ApiState,
+    claims: &SessionClaims,
+    config: &serde_json::Value,
+    enabled: bool,
+) -> Result<Option<RedditSubscriptionWrite>, (StatusCode, Json<ApiError>)> {
+    let existing = state
+        .store
+        .reddit_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .next();
+    if !enabled {
+        return Ok(existing.map(|subscription| RedditSubscriptionWrite {
+            source_subreddit: subscription.source_subreddit,
+            target_channel_id: subscription.target_channel_id,
+            message_template: subscription.message_template,
+            mention: subscription.mention,
+            enabled: false,
+            interval_seconds: subscription.interval_seconds,
+            created_by: subscription.created_by,
+        }));
+    }
+    let input = RedditSubscriptionInput {
+        source_subreddit: config
+            .get("sourceSubreddit")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        target_channel_id: config
+            .get("targetChannelId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        message_template: config
+            .get("messageTemplate")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+        mention: config
+            .get("mention")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+        interval_seconds: config
+            .get("intervalSeconds")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(300),
+        enabled: true,
+    };
+    let (source, target, template, mention, _, interval) = validate_reddit_subscription(input)
+        .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let client = require_reddit_provider(state)?;
+    if client
+        .latest_post(&source)
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "reddit_provider_unavailable"))?
+        .is_none()
+    {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "reddit_subreddit_not_found",
+        ));
+    }
+    Ok(Some(RedditSubscriptionWrite {
+        source_subreddit: source,
+        target_channel_id: target,
+        message_template: template,
+        mention,
+        enabled: true,
+        interval_seconds: interval,
+        created_by: claims.user_id.clone(),
+    }))
+}
+
+async fn prepare_x_feature(
+    state: &ApiState,
+    claims: &SessionClaims,
+    config: &serde_json::Value,
+    enabled: bool,
+) -> Result<Option<XSubscriptionWrite>, (StatusCode, Json<ApiError>)> {
+    let existing = state
+        .store
+        .x_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .next();
+    if !enabled {
+        return Ok(existing.map(|subscription| XSubscriptionWrite {
+            source_handle: subscription.source_handle,
+            target_channel_id: subscription.target_channel_id,
+            message_template: subscription.message_template,
+            mention: subscription.mention,
+            enabled: false,
+            interval_seconds: subscription.interval_seconds,
+            created_by: subscription.created_by,
+        }));
+    }
+    let input = XSubscriptionInput {
+        source_handle: config
+            .get("sourceHandle")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        target_channel_id: config
+            .get("targetChannelId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        message_template: config
+            .get("messageTemplate")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        mention: config
+            .get("mention")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        interval_seconds: config
+            .get("intervalSeconds")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(900),
+        enabled: true,
+    };
+    let (source_handle, target, template, mention, _, interval) = validate_x_subscription(input)
+        .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let client = require_x_provider(state)?;
+    if client
+        .latest_post(&source_handle)
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "x_provider_unavailable"))?
+        .is_none()
+    {
+        return Err(client_error(StatusCode::NOT_FOUND, "x_handle_not_found"));
+    }
+    Ok(Some(XSubscriptionWrite {
+        source_handle,
+        target_channel_id: target,
+        message_template: template,
+        mention,
+        enabled: true,
+        interval_seconds: interval,
+        created_by: claims.user_id.clone(),
+    }))
+}
+
+async fn prepare_tiktok_feature(
+    state: &ApiState,
+    claims: &SessionClaims,
+    config: &serde_json::Value,
+    enabled: bool,
+) -> Result<Option<TikTokSubscriptionWrite>, (StatusCode, Json<ApiError>)> {
+    let existing = state
+        .store
+        .tiktok_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .next();
+    if !enabled {
+        return Ok(existing.map(|subscription| TikTokSubscriptionWrite {
+            source_label: subscription.source_label,
+            target_channel_id: subscription.target_channel_id,
+            message_template: subscription.message_template,
+            mention: subscription.mention,
+            enabled: false,
+            interval_seconds: subscription.interval_seconds,
+            created_by: subscription.created_by,
+        }));
+    }
+    let input = TikTokSubscriptionInput {
+        username: config
+            .get("username")
+            .or_else(|| config.get("sourceLabel"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        target_channel_id: config
+            .get("targetChannelId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        message_template: config
+            .get("messageTemplate")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        mention: config
+            .get("mention")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        interval_seconds: config
+            .get("intervalSeconds")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(900),
+        enabled: true,
+    };
+    let (source_label, target_channel_id, message_template, mention, _, interval_seconds) =
+        validate_tiktok_subscription(input)
+            .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let client = require_tiktok_provider(state)?;
+    client
+        .latest_videos()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "tiktok_provider_unavailable"))?;
+    Ok(Some(TikTokSubscriptionWrite {
+        source_label,
+        target_channel_id,
+        message_template,
+        mention,
+        enabled: true,
+        interval_seconds,
+        created_by: claims.user_id.clone(),
+    }))
+}
+
+async fn prepare_instagram_feature(
+    state: &ApiState,
+    claims: &SessionClaims,
+    config: &serde_json::Value,
+    enabled: bool,
+) -> Result<Option<InstagramSubscriptionWrite>, (StatusCode, Json<ApiError>)> {
+    let existing = state
+        .store
+        .instagram_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .next();
+    if !enabled {
+        return Ok(existing.map(|subscription| InstagramSubscriptionWrite {
+            source_label: subscription.source_label,
+            target_channel_id: subscription.target_channel_id,
+            message_template: subscription.message_template,
+            mention: subscription.mention,
+            enabled: false,
+            interval_seconds: subscription.interval_seconds,
+            created_by: subscription.created_by,
+        }));
+    }
+    let input = InstagramSubscriptionInput {
+        username: config
+            .get("username")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        target_channel_id: config
+            .get("targetChannelId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        message_template: config
+            .get("messageTemplate")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+        mention: config
+            .get("mention")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+        interval_seconds: config
+            .get("intervalSeconds")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(900),
+        enabled: true,
+    };
+    let (username, target, template, mention, _, interval) = validate_instagram_subscription(input)
+        .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let client = require_instagram_provider(state)?;
+    client
+        .latest_media()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "instagram_provider_unavailable"))?;
+    Ok(Some(InstagramSubscriptionWrite {
+        source_label: username,
+        target_channel_id: target,
+        message_template: template,
+        mention,
+        enabled: true,
+        interval_seconds: interval,
+        created_by: claims.user_id.clone(),
+    }))
+}
+
+async fn prepare_kick_feature(
+    state: &ApiState,
+    claims: &SessionClaims,
+    config: &serde_json::Value,
+    enabled: bool,
+) -> Result<Option<KickSubscriptionWrite>, (StatusCode, Json<ApiError>)> {
+    let existing = state
+        .store
+        .kick_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .next();
+    if !enabled {
+        return Ok(existing.map(|subscription| KickSubscriptionWrite {
+            source_handle: subscription.source_handle,
+            target_channel_id: subscription.target_channel_id,
+            message_template: subscription.message_template,
+            mention: subscription.mention,
+            enabled: false,
+            interval_seconds: subscription.interval_seconds,
+            created_by: subscription.created_by,
+        }));
+    }
+    let input = KickSubscriptionInput {
+        source_handle: config
+            .get("sourceHandle")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        target_channel_id: config
+            .get("targetChannelId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        message_template: config
+            .get("messageTemplate")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+        mention: config
+            .get("mention")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+        interval_seconds: config
+            .get("intervalSeconds")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(300),
+        enabled: true,
+    };
+    let (source, target, template, mention, _, interval) = validate_kick_subscription(input)
+        .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let client = require_kick_provider(state)?;
+    client
+        .latest_stream(&source)
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "kick_provider_unavailable"))?;
+    Ok(Some(KickSubscriptionWrite {
+        source_handle: source,
+        target_channel_id: target,
+        message_template: template,
+        mention,
+        enabled: true,
+        interval_seconds: interval,
+        created_by: claims.user_id.clone(),
+    }))
+}
+
 async fn prepare_rss_feature(
     state: &ApiState,
     claims: &SessionClaims,
@@ -1449,6 +2196,1135 @@ async fn delete_bluesky_subscription(
 }
 
 #[derive(Debug, Deserialize)]
+struct RedditSubscriptionInput {
+    #[serde(rename = "sourceSubreddit")]
+    source_subreddit: String,
+    #[serde(rename = "targetChannelId")]
+    target_channel_id: String,
+    #[serde(default, rename = "messageTemplate")]
+    message_template: Option<String>,
+    #[serde(default)]
+    mention: Option<String>,
+    #[serde(default = "default_reddit_interval")]
+    interval_seconds: i64,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn default_reddit_interval() -> i64 {
+    300
+}
+
+fn validate_reddit_subscription(
+    input: RedditSubscriptionInput,
+) -> Result<(String, String, String, String, bool, i64), &'static str> {
+    let source = helper_modules::normalize_reddit_subreddit(&input.source_subreddit)
+        .map_err(|_| "invalid_reddit_subreddit")?;
+    let target = input.target_channel_id.trim().to_string();
+    if target.len() < 15 || target.len() > 22 || !target.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("invalid_discord_channel_id");
+    }
+    let template = input
+        .message_template
+        .unwrap_or_else(|| "New post in r/{subreddit}: **{title}**\n{permalink}".into());
+    if template.trim().is_empty() || template.chars().count() > 1_800 {
+        return Err("invalid_reddit_template");
+    }
+    let mention = input.mention.unwrap_or_default().trim().to_string();
+    if mention.chars().count() > 100
+        || (!mention.is_empty()
+            && mention != "@everyone"
+            && mention != "@here"
+            && !(mention.starts_with("<@&")
+                && mention.ends_with('>')
+                && mention[3..mention.len() - 1]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit())))
+    {
+        return Err("invalid_reddit_mention");
+    }
+    if !(300..=86_400).contains(&input.interval_seconds) {
+        return Err("invalid_reddit_interval");
+    }
+    Ok((
+        source,
+        target,
+        template,
+        mention,
+        input.enabled,
+        input.interval_seconds,
+    ))
+}
+
+fn reddit_record_json(record: RedditSubscriptionRecord) -> serde_json::Value {
+    serde_json::json!({
+        "id": record.id,
+        "guildId": record.guild_id,
+        "sourceSubreddit": record.source_subreddit,
+        "targetChannelId": record.target_channel_id,
+        "messageTemplate": record.message_template,
+        "mention": record.mention,
+        "enabled": record.enabled,
+        "intervalSeconds": record.interval_seconds,
+        "lastPostId": record.last_post_id,
+        "nextPollAt": record.next_poll_at,
+        "failureCount": record.failure_count,
+        "lastError": record.last_error,
+        "createdBy": record.created_by,
+        "createdAt": record.created_at,
+        "updatedAt": record.updated_at,
+    })
+}
+
+fn reddit_approved() -> bool {
+    std::env::var("REDDIT_COMMERCIAL_APPROVED")
+        .ok()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+}
+
+async fn reddit_health(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let _claims = require_auth(&state, &headers)?;
+    let configured = state.reddit.is_some();
+    let approved = reddit_approved();
+    Ok(Json(serde_json::json!({
+        "provider": "reddit",
+        "configured": configured,
+        "commercialApproval": approved,
+        "status": if !approved { "blocked_commercial_approval" } else if !configured { "dependency_down" } else { "ready" },
+        "readOnly": true,
+    })))
+}
+
+fn require_reddit_provider(
+    state: &ApiState,
+) -> Result<&RedditClient, (StatusCode, Json<ApiError>)> {
+    if !reddit_approved() {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            "reddit_commercial_approval_required",
+        ));
+    }
+    state.reddit.as_ref().ok_or_else(|| {
+        client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "reddit_provider_not_configured",
+        )
+    })
+}
+
+async fn reddit_subscriptions(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let subscriptions = state
+        .store
+        .reddit_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .map(reddit_record_json)
+        .collect::<Vec<_>>();
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "subscriptions": subscriptions,
+        "provider": "reddit",
+        "readOnly": true,
+    })))
+}
+
+async fn create_reddit_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(input): Json<RedditSubscriptionInput>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let (source, target, template, mention, enabled, interval) =
+        validate_reddit_subscription(input)
+            .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let client = require_reddit_provider(&state)?;
+    if client
+        .latest_post(&source)
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "reddit_provider_unavailable"))?
+        .is_none()
+    {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "reddit_subreddit_not_found",
+        ));
+    }
+    let record = state
+        .store
+        .create_reddit_subscription(
+            &claims.guild_id,
+            &source,
+            &target,
+            &template,
+            &mention,
+            enabled,
+            interval,
+            &claims.user_id,
+        )
+        .map_err(|error| {
+            if error.to_string() == "reddit_subscription_exists" {
+                client_error(StatusCode::CONFLICT, "reddit_subscription_exists")
+            } else {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
+            }
+        })?;
+    Ok((StatusCode::CREATED, Json(reddit_record_json(record))))
+}
+
+async fn update_reddit_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(input): Json<RedditSubscriptionInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let (source, target, template, mention, enabled, interval) =
+        validate_reddit_subscription(input)
+            .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let client = require_reddit_provider(&state)?;
+    client
+        .latest_post(&source)
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "reddit_provider_unavailable"))?;
+    let record = state
+        .store
+        .update_reddit_subscription(
+            &claims.guild_id,
+            id,
+            &source,
+            &target,
+            &template,
+            &mention,
+            enabled,
+            interval,
+        )
+        .map_err(|error| {
+            if error.to_string().contains("UNIQUE") {
+                client_error(StatusCode::CONFLICT, "reddit_subscription_exists")
+            } else {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
+            }
+        })?;
+    let Some(record) = record else {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "reddit_subscription_not_found",
+        ));
+    };
+    Ok(Json(reddit_record_json(record)))
+}
+
+async fn delete_reddit_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let deleted = state
+        .store
+        .delete_reddit_subscription(&claims.guild_id, id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    if !deleted {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "reddit_subscription_not_found",
+        ));
+    }
+    Ok(Json(serde_json::json!({"deleted": true, "id": id})))
+}
+
+#[derive(Debug, Deserialize)]
+struct XSubscriptionInput {
+    #[serde(rename = "sourceHandle")]
+    source_handle: String,
+    #[serde(rename = "targetChannelId")]
+    target_channel_id: String,
+    #[serde(default, rename = "messageTemplate")]
+    message_template: Option<String>,
+    #[serde(default)]
+    mention: Option<String>,
+    #[serde(default = "default_x_interval")]
+    interval_seconds: i64,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn default_x_interval() -> i64 {
+    900
+}
+
+fn validate_x_subscription(
+    input: XSubscriptionInput,
+) -> Result<(String, String, String, String, bool, i64), &'static str> {
+    let source =
+        helper_modules::normalize_x_handle(&input.source_handle).map_err(|_| "invalid_x_handle")?;
+    let target = input.target_channel_id.trim().to_string();
+    if target.len() < 15 || target.len() > 22 || !target.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("invalid_discord_channel_id");
+    }
+    let template = input
+        .message_template
+        .unwrap_or_else(|| "New post from @{handle}: **{text}**\\n{url}".into());
+    if template.trim().is_empty() || template.chars().count() > 1_800 {
+        return Err("invalid_x_template");
+    }
+    let mention = input.mention.unwrap_or_default().trim().to_string();
+    if mention.chars().count() > 100
+        || (!mention.is_empty()
+            && mention != "@everyone"
+            && mention != "@here"
+            && !(mention.starts_with("<@&")
+                && mention.ends_with('>')
+                && mention[3..mention.len() - 1]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit())))
+    {
+        return Err("invalid_x_mention");
+    }
+    if !(900..=86_400).contains(&input.interval_seconds) {
+        return Err("invalid_x_interval");
+    }
+    Ok((
+        source,
+        target,
+        template,
+        mention,
+        input.enabled,
+        input.interval_seconds,
+    ))
+}
+
+fn x_record_json(record: XSubscriptionRecord) -> serde_json::Value {
+    serde_json::json!({
+        "id": record.id,
+        "guildId": record.guild_id,
+        "sourceHandle": record.source_handle,
+        "targetChannelId": record.target_channel_id,
+        "messageTemplate": record.message_template,
+        "mention": record.mention,
+        "enabled": record.enabled,
+        "intervalSeconds": record.interval_seconds,
+        "lastPostId": record.last_post_id,
+        "nextPollAt": record.next_poll_at,
+        "failureCount": record.failure_count,
+        "lastError": record.last_error,
+        "createdBy": record.created_by,
+        "createdAt": record.created_at,
+        "updatedAt": record.updated_at,
+    })
+}
+
+fn x_approved() -> bool {
+    std::env::var("X_API_APPROVED")
+        .ok()
+        .or_else(|| std::env::var("X_COMMERCIAL_APPROVED").ok())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+}
+
+async fn x_health(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let _claims = require_auth(&state, &headers)?;
+    let configured = state.x.is_some();
+    let approved = x_approved();
+    Ok(Json(serde_json::json!({
+        "provider": "x",
+        "configured": configured,
+        "apiApproval": approved,
+        "status": if !approved { "blocked_api_approval" } else if !configured { "dependency_down" } else { "ready" },
+        "readOnly": true,
+    })))
+}
+
+fn require_x_provider(state: &ApiState) -> Result<&XClient, (StatusCode, Json<ApiError>)> {
+    if !x_approved() {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            "x_api_approval_required",
+        ));
+    }
+    state
+        .x
+        .as_ref()
+        .ok_or_else(|| client_error(StatusCode::SERVICE_UNAVAILABLE, "x_provider_not_configured"))
+}
+
+async fn x_subscriptions(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let subscriptions = state
+        .store
+        .x_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .map(x_record_json)
+        .collect::<Vec<_>>();
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "subscriptions": subscriptions,
+        "provider": "x",
+        "readOnly": true,
+    })))
+}
+
+async fn create_x_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(input): Json<XSubscriptionInput>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let (source, target, template, mention, enabled, interval) = validate_x_subscription(input)
+        .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let client = require_x_provider(&state)?;
+    if client
+        .latest_post(&source)
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "x_provider_unavailable"))?
+        .is_none()
+    {
+        return Err(client_error(StatusCode::NOT_FOUND, "x_handle_not_found"));
+    }
+    let record = state
+        .store
+        .create_x_subscription(
+            &claims.guild_id,
+            &source,
+            &target,
+            &template,
+            &mention,
+            enabled,
+            interval,
+            &claims.user_id,
+        )
+        .map_err(|error| {
+            if error.to_string() == "x_subscription_exists" {
+                client_error(StatusCode::CONFLICT, "x_subscription_exists")
+            } else {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
+            }
+        })?;
+    Ok((StatusCode::CREATED, Json(x_record_json(record))))
+}
+
+async fn update_x_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(input): Json<XSubscriptionInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let (source, target, template, mention, enabled, interval) = validate_x_subscription(input)
+        .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let client = require_x_provider(&state)?;
+    client
+        .latest_post(&source)
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "x_provider_unavailable"))?;
+    let record = state
+        .store
+        .update_x_subscription(
+            &claims.guild_id,
+            id,
+            &source,
+            &target,
+            &template,
+            &mention,
+            enabled,
+            interval,
+        )
+        .map_err(|error| {
+            if error.to_string().contains("UNIQUE") {
+                client_error(StatusCode::CONFLICT, "x_subscription_exists")
+            } else {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
+            }
+        })?;
+    let Some(record) = record else {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "x_subscription_not_found",
+        ));
+    };
+    Ok(Json(x_record_json(record)))
+}
+
+async fn delete_x_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let deleted = state
+        .store
+        .delete_x_subscription(&claims.guild_id, id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    if !deleted {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "x_subscription_not_found",
+        ));
+    }
+    Ok(Json(serde_json::json!({"deleted": true, "id": id})))
+}
+
+#[derive(Debug, Deserialize)]
+struct TikTokSubscriptionInput {
+    // Keep accepting the legacy sourceLabel spelling while the adapter's
+    // canonical field remains username.
+    #[serde(rename = "username", alias = "sourceLabel")]
+    username: String,
+    #[serde(rename = "targetChannelId")]
+    target_channel_id: String,
+    #[serde(default, rename = "messageTemplate")]
+    message_template: Option<String>,
+    #[serde(default)]
+    mention: Option<String>,
+    #[serde(default = "default_tiktok_interval")]
+    interval_seconds: i64,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn default_tiktok_interval() -> i64 {
+    900
+}
+
+fn validate_tiktok_subscription(
+    input: TikTokSubscriptionInput,
+) -> Result<(String, String, String, String, bool, i64), &'static str> {
+    let source = input.username.trim().to_owned();
+    if !(2..=80).contains(&source.chars().count()) || source.contains(['\n', '\r']) {
+        return Err("invalid_tiktok_source_label");
+    }
+    let target = input.target_channel_id.trim().to_string();
+    if target.len() < 15 || target.len() > 22 || !target.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("invalid_discord_channel_id");
+    }
+    let template = input
+        .message_template
+        .unwrap_or_else(|| "New TikTok video from {label}: **{title}**\\n{url}".into());
+    if template.trim().is_empty() || template.chars().count() > 1_800 {
+        return Err("invalid_tiktok_template");
+    }
+    let mention = input.mention.unwrap_or_default().trim().to_string();
+    if mention.chars().count() > 100
+        || (!mention.is_empty()
+            && mention != "@everyone"
+            && mention != "@here"
+            && !(mention.starts_with("<@&")
+                && mention.ends_with('>')
+                && mention[3..mention.len() - 1]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit())))
+    {
+        return Err("invalid_tiktok_mention");
+    }
+    if !(900..=86_400).contains(&input.interval_seconds) {
+        return Err("invalid_tiktok_interval");
+    }
+    Ok((
+        source,
+        target,
+        template,
+        mention,
+        input.enabled,
+        input.interval_seconds,
+    ))
+}
+
+fn tiktok_record_json(record: TikTokSubscriptionRecord) -> serde_json::Value {
+    serde_json::json!({
+        "id": record.id,
+        "guildId": record.guild_id,
+        "username": record.source_label,
+        "sourceLabel": record.source_label,
+        "targetChannelId": record.target_channel_id,
+        "messageTemplate": record.message_template,
+        "mention": record.mention,
+        "enabled": record.enabled,
+        "intervalSeconds": record.interval_seconds,
+        "lastVideoId": record.last_video_id,
+        "nextPollAt": record.next_poll_at,
+        "failureCount": record.failure_count,
+        "lastError": record.last_error,
+        "createdBy": record.created_by,
+        "createdAt": record.created_at,
+        "updatedAt": record.updated_at,
+    })
+}
+
+fn tiktok_approved() -> bool {
+    std::env::var("TIKTOK_APP_APPROVED")
+        .ok()
+        .or_else(|| std::env::var("TIKTOK_DISPLAY_API_APPROVED").ok())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+}
+
+async fn tiktok_health(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let _claims = require_auth(&state, &headers)?;
+    let configured = state.tiktok.is_some();
+    let approved = tiktok_approved();
+    Ok(Json(serde_json::json!({
+        "provider": "tiktok",
+        "configured": configured,
+        "apiApproval": approved,
+        "status": if !approved { "blocked_app_approval" } else if !configured { "dependency_down" } else { "ready" },
+        "readOnly": true,
+        "scopes": ["user.info.basic", "video.list"],
+    })))
+}
+
+fn require_tiktok_provider(
+    state: &ApiState,
+) -> Result<&TikTokClient, (StatusCode, Json<ApiError>)> {
+    if !tiktok_approved() {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            "tiktok_display_api_approval_required",
+        ));
+    }
+    state.tiktok.as_ref().ok_or_else(|| {
+        client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "tiktok_provider_not_configured",
+        )
+    })
+}
+
+async fn tiktok_subscriptions(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let subscriptions = state
+        .store
+        .tiktok_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .map(tiktok_record_json)
+        .collect::<Vec<_>>();
+    Ok(Json(
+        serde_json::json!({"guildId": claims.guild_id, "subscriptions": subscriptions, "provider": "tiktok", "readOnly": true}),
+    ))
+}
+
+async fn create_tiktok_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(input): Json<TikTokSubscriptionInput>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let (source, target, template, mention, enabled, interval) =
+        validate_tiktok_subscription(input)
+            .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let client = require_tiktok_provider(&state)?;
+    if enabled {
+        client
+            .latest_videos()
+            .await
+            .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "tiktok_provider_unavailable"))?;
+    }
+    let record = state
+        .store
+        .create_tiktok_subscription(
+            &claims.guild_id,
+            &source,
+            &target,
+            &template,
+            &mention,
+            enabled,
+            interval,
+            &claims.user_id,
+        )
+        .map_err(|error| {
+            if error.to_string() == "tiktok_subscription_exists" {
+                client_error(StatusCode::CONFLICT, "tiktok_subscription_exists")
+            } else {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
+            }
+        })?;
+    Ok((StatusCode::CREATED, Json(tiktok_record_json(record))))
+}
+
+async fn update_tiktok_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(input): Json<TikTokSubscriptionInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let (source, target, template, mention, enabled, interval) =
+        validate_tiktok_subscription(input)
+            .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let _client = require_tiktok_provider(&state)?;
+    let record = state
+        .store
+        .update_tiktok_subscription(
+            &claims.guild_id,
+            id,
+            &source,
+            &target,
+            &template,
+            &mention,
+            enabled,
+            interval,
+        )
+        .map_err(|error| {
+            if error.to_string().contains("UNIQUE") {
+                client_error(StatusCode::CONFLICT, "tiktok_subscription_exists")
+            } else {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
+            }
+        })?;
+    let Some(record) = record else {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "tiktok_subscription_not_found",
+        ));
+    };
+    Ok(Json(tiktok_record_json(record)))
+}
+
+async fn delete_tiktok_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let deleted = state
+        .store
+        .delete_tiktok_subscription(&claims.guild_id, id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    if !deleted {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "tiktok_subscription_not_found",
+        ));
+    }
+    Ok(Json(serde_json::json!({"deleted": true, "id": id})))
+}
+
+#[derive(Debug, Deserialize)]
+struct InstagramSubscriptionInput {
+    #[serde(rename = "username")]
+    username: String,
+    #[serde(rename = "targetChannelId")]
+    target_channel_id: String,
+    #[serde(default, rename = "messageTemplate")]
+    message_template: Option<String>,
+    #[serde(default)]
+    mention: Option<String>,
+    #[serde(default = "default_instagram_interval")]
+    interval_seconds: i64,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn default_instagram_interval() -> i64 {
+    900
+}
+fn valid_mention(mention: &str) -> bool {
+    mention.chars().count() <= 100
+        && (mention.is_empty()
+            || mention == "@everyone"
+            || mention == "@here"
+            || (mention.starts_with("<@&")
+                && mention.ends_with('>')
+                && mention[3..mention.len() - 1]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit())))
+}
+
+fn validate_instagram_subscription(
+    input: InstagramSubscriptionInput,
+) -> Result<(String, String, String, String, bool, i64), &'static str> {
+    let username = input.username.trim().trim_start_matches('@').to_owned();
+    if !(2..=80).contains(&username.chars().count())
+        || username.contains(['/', ':', '\\', '\n', '\r', ' '])
+    {
+        return Err("invalid_instagram_username");
+    }
+    let target = input.target_channel_id.trim().to_owned();
+    if target.len() < 15 || target.len() > 22 || !target.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("invalid_discord_channel_id");
+    }
+    let template = input
+        .message_template
+        .unwrap_or_else(|| "New Instagram post from @{username}: **{caption}**\\n{url}".into());
+    if template.trim().is_empty() || template.chars().count() > 1800 {
+        return Err("invalid_instagram_template");
+    }
+    let mention = input.mention.unwrap_or_default().trim().to_owned();
+    if !valid_mention(&mention) {
+        return Err("invalid_instagram_mention");
+    }
+    if !(900..=86400).contains(&input.interval_seconds) {
+        return Err("invalid_instagram_interval");
+    }
+    Ok((
+        username,
+        target,
+        template,
+        mention,
+        input.enabled,
+        input.interval_seconds,
+    ))
+}
+
+fn instagram_record_json(record: InstagramSubscriptionRecord) -> serde_json::Value {
+    serde_json::json!({"id":record.id,"guildId":record.guild_id,"username":record.source_label,"targetChannelId":record.target_channel_id,"messageTemplate":record.message_template,"mention":record.mention,"enabled":record.enabled,"intervalSeconds":record.interval_seconds,"lastMediaId":record.last_media_id,"nextPollAt":record.next_poll_at,"failureCount":record.failure_count,"lastError":record.last_error,"createdBy":record.created_by,"createdAt":record.created_at,"updatedAt":record.updated_at})
+}
+
+fn instagram_approved() -> bool {
+    std::env::var("META_APP_APPROVED")
+        .ok()
+        .or_else(|| std::env::var("META_INSTAGRAM_APP_APPROVED").ok())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
+}
+async fn instagram_health(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let _ = require_auth(&state, &headers)?;
+    let configured = state.instagram.is_some();
+    let approved = instagram_approved();
+    Ok(Json(
+        serde_json::json!({"provider":"instagram","configured":configured,"apiApproval":approved,"status":if !approved{"blocked_app_approval"}else if !configured{"missing_credentials"}else{"ready"},"scopes":["instagram_basic","instagram_manage_insights"]}),
+    ))
+}
+fn require_instagram_provider(
+    state: &ApiState,
+) -> Result<&InstagramClient, (StatusCode, Json<ApiError>)> {
+    if !instagram_approved() {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            "instagram_app_approval_required",
+        ));
+    }
+    state.instagram.as_ref().ok_or_else(|| {
+        client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "instagram_provider_not_configured",
+        )
+    })
+}
+async fn instagram_subscriptions(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let subscriptions = state
+        .store
+        .instagram_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .map(instagram_record_json)
+        .collect::<Vec<_>>();
+    Ok(Json(
+        serde_json::json!({"guildId":claims.guild_id,"subscriptions":subscriptions,"provider":"instagram"}),
+    ))
+}
+async fn create_instagram_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(input): Json<InstagramSubscriptionInput>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let (username, target, template, mention, enabled, interval) =
+        validate_instagram_subscription(input)
+            .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let client = require_instagram_provider(&state)?;
+    if enabled {
+        client
+            .latest_media()
+            .await
+            .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "instagram_provider_unavailable"))?;
+    }
+    let record = state
+        .store
+        .create_instagram_subscription(
+            &claims.guild_id,
+            &username,
+            &target,
+            &template,
+            &mention,
+            enabled,
+            interval,
+            &claims.user_id,
+        )
+        .map_err(|error| {
+            if error.to_string() == "instagram_subscription_exists" {
+                client_error(StatusCode::CONFLICT, "instagram_subscription_exists")
+            } else {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
+            }
+        })?;
+    Ok((StatusCode::CREATED, Json(instagram_record_json(record))))
+}
+async fn update_instagram_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(input): Json<InstagramSubscriptionInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let (username, target, template, mention, enabled, interval) =
+        validate_instagram_subscription(input)
+            .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let _ = require_instagram_provider(&state)?;
+    let record = state
+        .store
+        .update_instagram_subscription(
+            &claims.guild_id,
+            id,
+            &username,
+            &target,
+            &template,
+            &mention,
+            enabled,
+            interval,
+        )
+        .map_err(|error| {
+            if error.to_string().contains("UNIQUE") {
+                client_error(StatusCode::CONFLICT, "instagram_subscription_exists")
+            } else {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
+            }
+        })?;
+    record
+        .map(instagram_record_json)
+        .map(Json)
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "instagram_subscription_not_found"))
+}
+async fn delete_instagram_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let deleted = state
+        .store
+        .delete_instagram_subscription(&claims.guild_id, id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    if !deleted {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "instagram_subscription_not_found",
+        ));
+    }
+    Ok(Json(serde_json::json!({"deleted":true,"id":id})))
+}
+
+#[derive(Debug, Deserialize)]
+struct KickSubscriptionInput {
+    #[serde(rename = "sourceHandle")]
+    source_handle: String,
+    #[serde(rename = "targetChannelId")]
+    target_channel_id: String,
+    #[serde(default, rename = "messageTemplate")]
+    message_template: Option<String>,
+    #[serde(default)]
+    mention: Option<String>,
+    #[serde(default = "default_kick_interval")]
+    interval_seconds: i64,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+fn default_kick_interval() -> i64 {
+    300
+}
+fn validate_kick_subscription(
+    input: KickSubscriptionInput,
+) -> Result<(String, String, String, String, bool, i64), &'static str> {
+    let source = input
+        .source_handle
+        .trim()
+        .trim_start_matches('@')
+        .to_lowercase();
+    if !(2..=80).contains(&source.chars().count())
+        || source.contains(['/', ':', '\\', '\n', '\r', ' '])
+    {
+        return Err("invalid_kick_source_handle");
+    }
+    let target = input.target_channel_id.trim().to_owned();
+    if target.len() < 15 || target.len() > 22 || !target.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("invalid_discord_channel_id");
+    }
+    let template = input
+        .message_template
+        .unwrap_or_else(|| "{handle} is live!\\n{url}".into());
+    if template.trim().is_empty() || template.chars().count() > 1800 {
+        return Err("invalid_kick_template");
+    }
+    let mention = input.mention.unwrap_or_default().trim().to_owned();
+    if !valid_mention(&mention) {
+        return Err("invalid_kick_mention");
+    }
+    if !(300..=86400).contains(&input.interval_seconds) {
+        return Err("invalid_kick_interval");
+    }
+    Ok((
+        source,
+        target,
+        template,
+        mention,
+        input.enabled,
+        input.interval_seconds,
+    ))
+}
+fn kick_record_json(record: KickSubscriptionRecord) -> serde_json::Value {
+    serde_json::json!({"id":record.id,"guildId":record.guild_id,"sourceHandle":record.source_handle,"targetChannelId":record.target_channel_id,"messageTemplate":record.message_template,"mention":record.mention,"enabled":record.enabled,"intervalSeconds":record.interval_seconds,"lastStreamId":record.last_stream_id,"nextPollAt":record.next_poll_at,"failureCount":record.failure_count,"lastError":record.last_error,"createdBy":record.created_by,"createdAt":record.created_at,"updatedAt":record.updated_at})
+}
+fn kick_approved() -> bool {
+    std::env::var("KICK_APP_APPROVED")
+        .ok()
+        .or_else(|| std::env::var("KICK_API_APPROVED").ok())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
+}
+async fn kick_health(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let _ = require_auth(&state, &headers)?;
+    let configured = state.kick.is_some();
+    let approved = kick_approved();
+    Ok(Json(
+        serde_json::json!({"provider":"kick","configured":configured,"apiApproval":approved,"status":if !approved{"blocked_app_approval"}else if !configured{"missing_credentials"}else{"ready"},"officialApi":true}),
+    ))
+}
+fn require_kick_provider(state: &ApiState) -> Result<&KickClient, (StatusCode, Json<ApiError>)> {
+    if !kick_approved() {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            "kick_app_approval_required",
+        ));
+    }
+    state.kick.as_ref().ok_or_else(|| {
+        client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "kick_provider_not_configured",
+        )
+    })
+}
+async fn kick_subscriptions(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let subscriptions = state
+        .store
+        .kick_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .map(kick_record_json)
+        .collect::<Vec<_>>();
+    Ok(Json(
+        serde_json::json!({"guildId":claims.guild_id,"subscriptions":subscriptions,"provider":"kick"}),
+    ))
+}
+async fn create_kick_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(input): Json<KickSubscriptionInput>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let (source, target, template, mention, enabled, interval) = validate_kick_subscription(input)
+        .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let client = require_kick_provider(&state)?;
+    if enabled {
+        client
+            .latest_stream(&source)
+            .await
+            .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "kick_provider_unavailable"))?;
+    }
+    let record = state
+        .store
+        .create_kick_subscription(
+            &claims.guild_id,
+            &source,
+            &target,
+            &template,
+            &mention,
+            enabled,
+            interval,
+            &claims.user_id,
+        )
+        .map_err(|error| {
+            if error.to_string() == "kick_subscription_exists" {
+                client_error(StatusCode::CONFLICT, "kick_subscription_exists")
+            } else {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
+            }
+        })?;
+    Ok((StatusCode::CREATED, Json(kick_record_json(record))))
+}
+async fn update_kick_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(input): Json<KickSubscriptionInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let (source, target, template, mention, enabled, interval) = validate_kick_subscription(input)
+        .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let _ = require_kick_provider(&state)?;
+    let record = state
+        .store
+        .update_kick_subscription(
+            &claims.guild_id,
+            id,
+            &source,
+            &target,
+            &template,
+            &mention,
+            enabled,
+            interval,
+        )
+        .map_err(|error| {
+            if error.to_string().contains("UNIQUE") {
+                client_error(StatusCode::CONFLICT, "kick_subscription_exists")
+            } else {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
+            }
+        })?;
+    record
+        .map(kick_record_json)
+        .map(Json)
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "kick_subscription_not_found"))
+}
+async fn delete_kick_subscription(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let deleted = state
+        .store
+        .delete_kick_subscription(&claims.guild_id, id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    if !deleted {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "kick_subscription_not_found",
+        ));
+    }
+    Ok(Json(serde_json::json!({"deleted":true,"id":id})))
+}
+
+#[derive(Debug, Deserialize)]
 struct TwitchSubscriptionInput {
     #[serde(rename = "sourceLogin")]
     source_login: String,
@@ -1805,6 +3681,105 @@ async fn delete_twitch_subscription(
         ));
     }
     Ok(Json(serde_json::json!({"deleted": true, "id": id})))
+}
+
+fn stripe_approved() -> bool {
+    std::env::var("STRIPE_CONNECT_APPROVED")
+        .ok()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+}
+
+async fn stripe_health(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let _ = require_auth(&state, &headers)?;
+    let configured = state.stripe.is_some();
+    let approved = stripe_approved();
+    Ok(Json(serde_json::json!({
+        "provider": "stripe_connect",
+        "configured": configured,
+        "approval": approved,
+        "status": if !approved { "blocked_business_review" } else if !configured { "missing_credentials" } else { "ready" },
+        "cardDataStored": false,
+        "webhook": configured,
+    })))
+}
+
+/// Receives signed Stripe events and turns successful server subscriptions
+/// into an idempotent Discord role job. Metadata is supplied by the hosted
+/// checkout; the Helper never receives card details.
+async fn stripe_webhook(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let Some(client) = state.stripe.as_ref() else {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "stripe_not_configured",
+        ));
+    };
+    let signature = headers
+        .get("stripe-signature")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !client.verify_webhook(&body, signature, Utc::now().timestamp()) {
+        return Err(client_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_stripe_signature",
+        ));
+    }
+    let event: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|_| client_error(StatusCode::BAD_REQUEST, "invalid_stripe_event"))?;
+    let event_id = event
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if event_id.is_empty() || event_id.len() > 255 {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_stripe_event_id",
+        ));
+    }
+    if !state
+        .store
+        .record_provider_event("stripe", event_id, &String::from_utf8_lossy(&body))
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+    {
+        return Ok(Json(serde_json::json!({"received":true,"duplicate":true})));
+    }
+    let event_type = event
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let object = event.pointer("/data/object").cloned().unwrap_or_default();
+    if matches!(event_type, "checkout.session.completed" | "invoice.paid") {
+        let metadata = object
+            .get("metadata")
+            .and_then(serde_json::Value::as_object);
+        let guild_id = metadata
+            .and_then(|m| m.get("guild_id"))
+            .and_then(serde_json::Value::as_str);
+        let member_id = metadata
+            .and_then(|m| m.get("member_id"))
+            .and_then(serde_json::Value::as_str);
+        let role_id = metadata
+            .and_then(|m| m.get("role_id"))
+            .and_then(serde_json::Value::as_str);
+        if let (Some(guild_id), Some(member_id), Some(role_id)) = (guild_id, member_id, role_id)
+            && [guild_id, member_id, role_id].iter().all(|value| {
+                value.len() >= 15
+                    && value.len() <= 22
+                    && value.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        {
+            state.store.schedule_typed(guild_id,"monetization_entitlement",member_id,Utc::now().timestamp_millis(),&serde_json::json!({"member_id":member_id,"role_id":role_id,"event_id":event_id}).to_string()).map_err(|_|client_error(StatusCode::INTERNAL_SERVER_ERROR,"store_error"))?;
+        }
+    }
+    Ok(Json(
+        serde_json::json!({"received":true,"eventId":event_id}),
+    ))
 }
 
 fn twitch_error_response(status: StatusCode, code: &'static str) -> Response {
@@ -2521,6 +4496,10 @@ fn permission_bit(permissions: &str, bit: u8) -> bool {
         .unwrap_or(false)
 }
 
+fn permission_bitfield_has(permissions: u64, bit: u8) -> bool {
+    permissions & (1_u64 << 3) != 0 || permissions & (1_u64 << bit) != 0
+}
+
 fn dependency_permission(dependency: &str) -> Option<(u8, &'static str)> {
     Some(match dependency {
         "manage_channels" => (4, "Manage Channels"),
@@ -2609,7 +4588,18 @@ async fn generic_feature_preflight(
         .ok_or_else(|| client_error(StatusCode::FORBIDDEN, "guild_not_managed"))?;
 
     let descriptor = feature_adapter(&key).map(|adapter| adapter.descriptor());
-    let mut issues = validate_feature_config(&key, &request.config);
+    // Disabling a feature must not require a complete replacement config. A
+    // historical revision may intentionally contain `{}` (or a provider
+    // credential may have been removed since it was last enabled). Keep the
+    // object-shape check, but only enforce field-level requirements when the
+    // proposed state will actually run in Discord.
+    let mut issues = if request.enabled {
+        validate_feature_config(&key, &request.config)
+    } else if request.config.is_object() {
+        Vec::new()
+    } else {
+        validate_feature_config(&key, &request.config)
+    };
     if descriptor.is_none() {
         add_dependency_issue(
             &mut issues,
@@ -2619,12 +4609,24 @@ async fn generic_feature_preflight(
             "error",
         );
     }
-    if !feature_is_configurable(&key) {
+    if !feature_configurable_for(&state, &key) {
         add_dependency_issue(
             &mut issues,
             "feature.maturity".into(),
             "feature_not_released",
             "This feature is not released for configuration until its required provider or approval is available.".into(),
+            "error",
+        );
+    }
+    if request.enabled
+        && provider_needs_runtime_ready(&key)
+        && !provider_runtime_ready(&state, &key)
+    {
+        add_dependency_issue(
+            &mut issues,
+            "feature.provider".into(),
+            "provider_not_ready",
+            "The official provider is not ready in this running Helper. Configure its server-side credentials and restart the Helper before enabling this feature.".into(),
             "error",
         );
     }
@@ -2686,9 +4688,10 @@ async fn generic_feature_preflight(
                     | "message_events"
             ) {
                 missing_intents.push(dependency.clone());
-            } else if dependency
-                .chars()
-                .all(|character| character.is_ascii_uppercase() || character == '_')
+            } else if request.enabled
+                && dependency
+                    .chars()
+                    .all(|character| character.is_ascii_uppercase() || character == '_')
                 && std::env::var(dependency)
                     .map(|value| value.trim().is_empty())
                     .unwrap_or(true)
@@ -2761,6 +4764,114 @@ async fn generic_feature_preflight(
             );
         }
     }
+
+    // A role can exist and still be unusable: Discord only lets the bot
+    // assign/edit roles strictly below its highest role, and managed roles
+    // can never be changed by a bot.  Check this before publishing any
+    // feature whose adapter declares Manage Roles.  Without this check a
+    // dashboard save would look successful and fail later in an interaction.
+    let needs_role_management = descriptor.as_ref().is_some_and(|value| {
+        value
+            .dependencies
+            .iter()
+            .any(|dependency| dependency == "manage_roles")
+    });
+    if request.enabled && needs_role_management && snapshot.roles_ready && bot_context_available {
+        let bot_top_position = snapshot
+            .roles
+            .iter()
+            .filter(|role| {
+                role.get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| {
+                        id != claims.guild_id
+                            && snapshot.bot_role_ids.iter().any(|bot_role| bot_role == id)
+                    })
+            })
+            .filter_map(|role| role.get("position").and_then(serde_json::Value::as_i64))
+            .max()
+            .unwrap_or(0);
+        for (path, id) in &configured_roles {
+            let Some(role) = snapshot.roles.iter().find(|role| {
+                role.get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|role_id| role_id == id)
+            }) else {
+                continue;
+            };
+            let managed = role
+                .get("managed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let position = role
+                .get("position")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            if managed || id == &claims.guild_id || position >= bot_top_position {
+                add_dependency_issue(
+                    &mut issues,
+                    format!("{path}.hierarchy"),
+                    "role_not_manageable",
+                    format!(
+                        "The selected role ({id}) must be unmanaged and below the Helper bot's highest role."
+                    ),
+                    "error",
+                );
+            }
+        }
+    }
+
+    // Base guild permissions are not enough when a configured destination
+    // has channel overwrites.  Resolve the effective bot bitfield for every
+    // selected channel and report the exact permission that would fail at
+    // delivery time.  This deliberately stays read-only and uses the same
+    // Discord REST snapshot returned to the panel.
+    if request.enabled
+        && snapshot.channels_ready
+        && bot_context_available
+        && let (Some(descriptor), Some(bot_user_id), Some(base_permissions)) = (
+            descriptor.as_ref(),
+            snapshot.bot_user_id.as_deref(),
+            bot_permissions,
+        )
+    {
+        for (path, id) in &configured_channels {
+            let Some(channel) = snapshot.channels.iter().find(|channel| {
+                channel
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|channel_id| channel_id == id)
+            }) else {
+                continue;
+            };
+            let Some(overwrites) = channel.get("permission_overwrites") else {
+                continue;
+            };
+            let Some(effective) = channel_bot_permissions(
+                base_permissions,
+                &claims.guild_id,
+                bot_user_id,
+                &snapshot.bot_role_ids,
+                overwrites,
+            ) else {
+                continue;
+            };
+            for dependency in &descriptor.dependencies {
+                let Some((bit, label)) = dependency_permission(dependency) else {
+                    continue;
+                };
+                if !permission_bitfield_has(effective, bit) {
+                    add_dependency_issue(
+                        &mut issues,
+                        format!("permissions.channel.{path}.{dependency}"),
+                        "missing_channel_permission",
+                        format!("The Helper bot lacks {label} in the selected channel ({id})."),
+                        "error",
+                    );
+                }
+            }
+        }
+    }
     if request.enabled
         && (!snapshot.channels_ready || !snapshot.roles_ready)
         && descriptor.is_some()
@@ -2786,7 +4897,7 @@ async fn generic_feature_preflight(
         "checks": {
             "guildManaged": true,
             "featureAdapter": descriptor.is_some(),
-            "featureConfigurable": feature_is_configurable(&key),
+            "featureConfigurable": feature_configurable_for(&state, &key),
             "botContextAvailable": bot_context_available,
             "botPermissionBitfieldAvailable": bot_permissions.is_some(),
             "requiredPermissions": required_permissions,
@@ -3939,8 +6050,8 @@ async fn feature_config(
         .iter()
         .map(
             |(key, label, description, category, capability, available)| {
-                let maturity = feature_maturity(key);
-                let configurable = feature_is_configurable(key);
+                let maturity = effective_feature_maturity(&state, key);
+                let configurable = feature_configurable_for(&state, key);
                 let stored = state
                     .store
                     .get_feature_setting(&claims.guild_id, key)
@@ -3954,33 +6065,21 @@ async fn feature_config(
                     .unwrap_or_else(|| serde_json::json!({}));
                 let mut issues = validate_feature_config(key, &config);
                 issues.extend(lifecycle_issues(key, maturity));
-                let enabled = stored
-                    .as_ref()
-                    .map(|value| value.enabled)
-                    .or_else(|| {
-                        state
-                            .store
-                            .get_setting(&claims.guild_id, &feature_key(key))
-                            .ok()
-                            .flatten()
-                            .and_then(|value| value.parse::<bool>().ok())
-                    })
-                    .or_else(|| {
-                        runtime_feature_key(key).and_then(|runtime_key| {
-                            state
-                                .store
-                                .get_setting(&claims.guild_id, runtime_key)
-                                .ok()
-                                .flatten()
-                                .and_then(|value| value.parse::<bool>().ok())
-                        })
-                    })
-                    .unwrap_or(false)
-                    && configurable;
+                // Use the same provider/maturity guard used by feature detail
+                // and runtime checks.  A stale legacy flag must never make a
+                // blocked or dependency-down feature appear active.
+                let enabled = feature_enabled(&state, &claims.guild_id, key);
                 let adapter = feature_adapter(key).map(|value| value.descriptor());
                 let health = FeatureHealthSummary {
-                    status: feature_health_status(key, enabled, maturity, &issues),
-                    operational: feature_is_operational(key, maturity, &issues),
+                    status: feature_health_status(
+                        &state,
+                        &claims.guild_id,
+                        key,
+                        enabled,
+                        maturity,
+                        &issues,
+                    ),
+                    operational: feature_is_operational(&state, key, maturity, &issues),
                     adapter: adapter.as_ref().map(|value| value.source.clone()),
                     dependencies: adapter
                         .as_ref()
@@ -3993,14 +6092,13 @@ async fn feature_config(
                     description: (*description).to_string(),
                     category: (*category).to_string(),
                     capability: (*capability).to_string(),
-                    // `available` used to be a second, stale allow-list which
-                    // left newly registered adapters hidden behind the
-                    // original thirteen cards.  The adapter registry is now
-                    // the source of truth: a feature is discoverable when it
-                    // has a real adapter and is in a configurable lifecycle
-                    // state.  Keep the legacy flag only for compatibility
-                    // with descriptors that predate the registry.
-                    available: (feature_adapter(key).is_some() || *available) && configurable,
+                    // `available` means implemented/discoverable, not
+                    // immediately activatable.  Provider credentials and
+                    // approvals are represented by `maturity`, `health` and
+                    // `configurable`; keeping all adapter-backed entries
+                    // discoverable prevents the old thirteen-card allow-list
+                    // regression while still blocking unsafe activation.
+                    available: feature_adapter(key).is_some() || *available,
                     enabled,
                     maturity,
                     configurable,
@@ -4039,6 +6137,11 @@ fn feature_definition(
 }
 
 fn feature_enabled(state: &ApiState, guild_id: &str, key: &str) -> bool {
+    // Keep runtime/API checks aligned with the lifecycle registry. A legacy
+    // true flag cannot activate a blocked provider or an unknown feature.
+    if !feature_configurable_for(state, key) {
+        return false;
+    }
     state
         .store
         .get_feature_setting(guild_id, key)
@@ -4064,6 +6167,8 @@ fn feature_enabled(state: &ApiState, guild_id: &str, key: &str) -> bool {
             })
         })
         .unwrap_or(false)
+        && provider_dependencies_ready(state, key)
+        && effective_feature_maturity(state, key) != FeatureMaturity::Blocked
 }
 
 fn feature_config_key(key: &str) -> String {
@@ -4464,7 +6569,7 @@ fn lifecycle_issues_legacy(maturity: FeatureMaturity) -> Vec<ValidationIssue> {
         return vec![ValidationIssue {
             path: "feature".into(),
             code: "official_integration_required".into(),
-            message: "Esta integração está bloqueada até existir um fornecedor oficial, credenciais válidas e validação legal.".into(),
+            message: "This integration is blocked until an official provider, valid credentials, and the required legal review are available.".into(),
             severity: "info".into(),
         }];
     }
@@ -4515,19 +6620,97 @@ fn lifecycle_issues(key: &str, maturity: FeatureMaturity) -> Vec<ValidationIssue
     issues
 }
 
+/// Provider-backed features start in the canonical `blocked` lifecycle while
+/// their app review/credentials are absent. Once the server has the approved
+/// official client, the panel can configure the feature in Beta instead of
+/// remaining permanently hidden behind the original global allow-list.
+fn provider_runtime_ready(state: &ApiState, key: &str) -> bool {
+    match key {
+        // Feed/provider adapters are promoted from beta only when the process
+        // has the same client that the worker uses.  This keeps the catalogue
+        // honest: a configured form is not enough to claim operational
+        // delivery.
+        "social.youtube" => state
+            .youtube
+            .as_ref()
+            .is_some_and(YouTubeClient::is_configured),
+        "social.rss" | "social.podcasts" => state.rss.is_some(),
+        "social.twitch" => state
+            .twitch
+            .as_ref()
+            .is_some_and(TwitchClient::is_configured),
+        "web3.gas_tracker" => !state.gas.configured_networks().is_empty(),
+        "web3.nft_stats" | "web3.nft_queries" | "web3.nft_sales" => state.opensea.has_api_key(),
+        "social.reddit" => state.reddit.is_some() && reddit_approved(),
+        "social.x" => state.x.is_some() && x_approved(),
+        "social.tiktok" => state.tiktok.is_some() && tiktok_approved(),
+        "social.instagram" => state.instagram.is_some() && instagram_approved(),
+        "social.kick" => state.kick.is_some() && kick_approved(),
+        "growth.monetization" => state.stripe.is_some() && stripe_approved(),
+        "web3.gating" => {
+            state.siwe.as_ref().is_some_and(SiweVerifier::is_configured)
+                && web3_gating_dependencies_ready()
+        }
+        _ => false,
+    }
+}
+
+fn effective_feature_maturity(state: &ApiState, key: &str) -> FeatureMaturity {
+    let maturity = feature_maturity(key);
+    if provider_runtime_ready(state, key) {
+        // A provider is operational only after its process client and all
+        // required credentials/approvals are present.  Until then a beta
+        // provider remains beta and an unapproved integration remains
+        // blocked; the panel can show the exact dependency instead of a
+        // misleading activation toggle.
+        if matches!(maturity, FeatureMaturity::Beta | FeatureMaturity::Blocked) {
+            return FeatureMaturity::Operational;
+        }
+    }
+    maturity
+}
+
+fn feature_configurable_for(state: &ApiState, key: &str) -> bool {
+    // A registered adapter means the panel has a real schema, validation,
+    // preview and runtime projection.  Provider credentials and approvals
+    // decide whether *enabling* the feature is allowed, not whether the
+    // owner can see/configure its setup page.  Keeping these concepts
+    // separate prevents the old 13/45-card regressions and gives owners an
+    // actionable requirements view for every one of the 52 features.
+    let _ = state;
+    is_known_feature(key) && feature_adapter(key).is_some()
+}
+
 fn feature_health_status(
+    state: &ApiState,
+    guild_id: &str,
     key: &str,
     enabled: bool,
     maturity: FeatureMaturity,
     issues: &[ValidationIssue],
 ) -> &'static str {
+    // `enabled` is the effective runtime state. A revision can still have
+    // requested `enabled=true` while a provider is down (or while a Discord
+    // dependency disappeared). Keep that distinction visible instead of
+    // showing a misleading plain "disabled" badge.
+    let requested_enabled = state
+        .store
+        .get_feature_setting(guild_id, key)
+        .ok()
+        .flatten()
+        .is_some_and(|record| record.enabled);
     if !enabled {
+        if requested_enabled
+            && (maturity == FeatureMaturity::Blocked || !provider_dependencies_ready(state, key))
+        {
+            return "dependency_down";
+        }
         return "disabled";
     }
     if maturity == FeatureMaturity::Blocked {
         return "dependency_down";
     }
-    if !provider_dependencies_ready(key) {
+    if !provider_dependencies_ready(state, key) {
         return "dependency_down";
     }
     if feature_adapter(key).is_none() {
@@ -4539,40 +6722,173 @@ fn feature_health_status(
     "ready"
 }
 
-fn provider_dependencies_ready(key: &str) -> bool {
+fn provider_dependencies_ready(state: &ApiState, key: &str) -> bool {
     match key {
-        "social.youtube" => std::env::var("YOUTUBE_API_KEY")
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty()),
-        "social.twitch" => {
-            [
-                "TWITCH_CLIENT_ID",
-                "TWITCH_CLIENT_SECRET",
-                "TWITCH_EVENTSUB_SECRET",
-            ]
-            .into_iter()
-            .all(|name| {
-                std::env::var(name)
-                    .ok()
-                    .is_some_and(|value| !value.trim().is_empty())
-            }) && (std::env::var("TWITCH_EVENTSUB_CALLBACK_URL")
-                .ok()
-                .or_else(|| std::env::var("TWITCH_CALLBACK_URL").ok())
-                .is_some_and(|value| !value.trim().is_empty()))
+        // Health must inspect the clients constructed at process start, not
+        // the environment again.  This prevents the panel from claiming a
+        // provider is ready after its environment changed while the worker
+        // is still running with an old client (or vice versa).
+        "social.youtube" => state
+            .youtube
+            .as_ref()
+            .is_some_and(YouTubeClient::is_configured),
+        "social.rss" | "social.podcasts" => state.rss.is_some(),
+        "social.twitch" => state
+            .twitch
+            .as_ref()
+            .is_some_and(TwitchClient::is_configured),
+        // Gas tracking is read-only but still needs at least one explicitly
+        // allow-listed HTTPS RPC endpoint.  Do not report a configured card as
+        // operational when the worker would have no network to poll.
+        "web3.gas_tracker" => !state.gas.configured_networks().is_empty(),
+        // OpenSea requires an API key for the v2 collection endpoints.  Keep
+        // the adapter visible in Beta so the panel can explain the missing
+        // dependency, but only mark the provider healthy after a key exists.
+        "web3.nft_stats" | "web3.nft_queries" | "web3.nft_sales" => state.opensea.has_api_key(),
+        "social.reddit" => state.reddit.is_some() && reddit_approved(),
+        "social.x" => state.x.is_some() && x_approved(),
+        "social.tiktok" => state.tiktok.is_some() && tiktok_approved(),
+        "social.instagram" => state.instagram.is_some() && instagram_approved(),
+        "social.kick" => state.kick.is_some() && kick_approved(),
+        "growth.monetization" => state.stripe.is_some() && stripe_approved(),
+        "web3.gating" => {
+            state.siwe.as_ref().is_some_and(SiweVerifier::is_configured)
+                && web3_gating_dependencies_ready()
         }
         _ => true,
     }
 }
 
+fn provider_needs_runtime_ready(key: &str) -> bool {
+    matches!(
+        key,
+        "social.youtube"
+            | "social.twitch"
+            | "web3.gas_tracker"
+            | "web3.nft_stats"
+            | "web3.nft_queries"
+            | "web3.nft_sales"
+            | "social.instagram"
+            | "social.reddit"
+            | "social.x"
+            | "social.tiktok"
+            | "social.kick"
+            | "growth.monetization"
+            | "web3.gating"
+    )
+}
+
+fn web3_gating_dependencies_ready() -> bool {
+    let configured_rpc = [
+        "ETHEREUM_RPC_URL",
+        "POLYGON_RPC_URL",
+        "ARBITRUM_RPC_URL",
+        "BASE_RPC_URL",
+    ]
+    .into_iter()
+    .any(|name| {
+        std::env::var(name)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+    });
+    configured_rpc
+        && std::env::var("SIWE_ALLOWED_CONTRACTS")
+            .ok()
+            .is_some_and(|value| value.split(',').any(|item| is_eth_address(item.trim())))
+}
+
+fn is_eth_address(value: &str) -> bool {
+    let body = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"));
+    body.is_some_and(|text| text.len() == 40 && text.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+fn approved_wallet_contract(value: &str) -> bool {
+    is_eth_address(value)
+        && std::env::var("SIWE_ALLOWED_CONTRACTS")
+            .ok()
+            .is_some_and(|list| {
+                list.split(',')
+                    .any(|item| item.trim().eq_ignore_ascii_case(value))
+            })
+}
+
 fn feature_is_operational(
+    state: &ApiState,
     key: &str,
-    maturity: FeatureMaturity,
+    _maturity: FeatureMaturity,
     issues: &[ValidationIssue],
 ) -> bool {
-    maturity != FeatureMaturity::Blocked
+    // `effective_feature_maturity` is allowed to promote a globally blocked
+    // provider once its official client, credentials and approvals are
+    // present.  Do not re-check the static maturity here: doing so made a
+    // correctly configured provider appear non-operational forever even
+    // though the API had already promoted it to `operational`.
+    effective_feature_maturity(state, key) != FeatureMaturity::Blocked
         && feature_adapter(key).is_some()
-        && provider_dependencies_ready(key)
+        && provider_dependencies_ready(state, key)
         && issues.iter().all(|issue| issue.severity != "error")
+}
+
+/// Health must reflect the same Discord checks that protect a publication.
+/// Keeping this call behind the enabled guard avoids making a disabled card
+/// depend on a live Discord REST request, while an enabled card can never be
+/// reported as ready merely because its JSON happens to validate.
+async fn feature_health_preflight(
+    state: Arc<ApiState>,
+    headers: HeaderMap,
+    key: &str,
+    config: serde_json::Value,
+    enabled: bool,
+) -> serde_json::Value {
+    if !enabled {
+        return serde_json::json!({
+            "ok": true,
+            "skipped": true,
+            "issues": [],
+            "checks": {"reason": "feature_disabled"}
+        });
+    }
+
+    match feature_preflight(
+        State(state),
+        headers,
+        Path(key.to_owned()),
+        Json(FeaturePreflightRequest { config, enabled }),
+    )
+    .await
+    {
+        Ok(Json(value)) => value,
+        Err((status, _)) => serde_json::json!({
+            "ok": false,
+            "skipped": false,
+            "issues": [{
+                "path": "discord.preflight",
+                "code": "preflight_unavailable",
+                "message": format!("Discord preflight could not be completed (HTTP {status}). Refresh the server context and try again."),
+                "severity": "error"
+            }],
+            "checks": {"available": false}
+        }),
+    }
+}
+
+fn preflight_issues(value: &serde_json::Value) -> Vec<ValidationIssue> {
+    value
+        .get("issues")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|issue| {
+            Some(ValidationIssue {
+                path: issue.get("path")?.as_str()?.to_owned(),
+                code: issue.get("code")?.as_str()?.to_owned(),
+                message: issue.get("message")?.as_str()?.to_owned(),
+                severity: issue.get("severity")?.as_str()?.to_owned(),
+            })
+        })
+        .collect()
 }
 
 async fn feature_detail(
@@ -4603,13 +6919,34 @@ async fn feature_detail(
                 .filter(|value| value.is_object())
         })
         .unwrap_or_else(|| serde_json::json!({}));
-    let maturity = feature_maturity(&key);
+    let maturity = effective_feature_maturity(&state, &key);
     let mut issues = validate_feature_config(&key, &config);
     issues.extend(lifecycle_issues(&key, maturity));
     let revision = stored.as_ref().map(|value| value.revision).unwrap_or(0);
     let enabled = feature_enabled(&state, &claims.guild_id, &key);
     let adapter = feature_adapter(&key).map(|value| value.descriptor());
-    let health_status = feature_health_status(&key, enabled, maturity, &issues);
+    let preflight = feature_health_preflight(
+        state.clone(),
+        headers.clone(),
+        &key,
+        config.clone(),
+        enabled,
+    )
+    .await;
+    let preflight_ok = preflight
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let mut health_issues = issues.clone();
+    health_issues.extend(preflight_issues(&preflight));
+    let health_status = feature_health_status(
+        &state,
+        &claims.guild_id,
+        &key,
+        enabled,
+        maturity,
+        &health_issues,
+    );
     Ok(Json(serde_json::json!({
         "guildId": claims.guild_id,
         "key": key,
@@ -4621,9 +6958,9 @@ async fn feature_detail(
         "dependencies": adapter.as_ref().map(|value| value.dependencies.clone()).unwrap_or_default(),
         "revision": revision,
         "maturity": maturity,
-        "configurable": feature_is_configurable(&key),
+        "configurable": feature_configurable_for(&state, &key),
         "schemaVersion": FEATURE_SCHEMA_VERSION,
-        "health": {"maturity": maturity, "status": health_status, "adapter": adapter.as_ref().map(|value| value.source.clone()), "dependencies": adapter.as_ref().map(|value| value.dependencies.clone()).unwrap_or_default(), "operational": feature_is_operational(&key, maturity, &issues), "issues": issues},
+        "health": {"maturity": maturity, "status": health_status, "adapter": adapter.as_ref().map(|value| value.source.clone()), "dependencies": adapter.as_ref().map(|value| value.dependencies.clone()).unwrap_or_default(), "operational": feature_is_operational(&state, &key, maturity, &health_issues) && preflight_ok, "issues": health_issues, "preflight": preflight},
     })))
 }
 
@@ -4653,21 +6990,29 @@ async fn feature_health(
                 .filter(|value| value.is_object())
         })
         .unwrap_or_else(|| serde_json::json!({}));
-    let maturity = feature_maturity(&key);
+    let maturity = effective_feature_maturity(&state, &key);
     let mut issues = validate_feature_config(&key, &config);
     issues.extend(lifecycle_issues(&key, maturity));
     let enabled = feature_enabled(&state, &claims.guild_id, &key);
     let descriptor = feature_adapter(&key).map(|adapter| adapter.descriptor());
+    let preflight =
+        feature_health_preflight(state.clone(), headers.clone(), &key, config, enabled).await;
+    let preflight_ok = preflight
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    issues.extend(preflight_issues(&preflight));
     Ok(Json(serde_json::json!({
         "guildId": claims.guild_id,
         "key": key,
         "enabled": enabled,
         "maturity": maturity,
-        "status": feature_health_status(&key, enabled, maturity, &issues),
-        "operational": feature_is_operational(&key, maturity, &issues),
+        "status": feature_health_status(&state, &claims.guild_id, &key, enabled, maturity, &issues),
+        "operational": feature_is_operational(&state, &key, maturity, &issues) && preflight_ok,
         "adapter": descriptor.as_ref().map(|value| value.source.clone()),
         "dependencies": descriptor.as_ref().map(|value| value.dependencies.clone()).unwrap_or_default(),
         "issues": issues,
+        "preflight": preflight,
     })))
 }
 
@@ -4727,7 +7072,7 @@ async fn update_feature_detail(
     let Some(_definition) = feature_definition(&key) else {
         return Err(client_error(StatusCode::BAD_REQUEST, "unknown_feature"));
     };
-    if !feature_is_configurable(&key) {
+    if !feature_configurable_for(&state, &key) {
         return Err(client_error(
             StatusCode::NOT_IMPLEMENTED,
             "feature_not_available",
@@ -4778,7 +7123,7 @@ async fn update_feature_detail(
         ));
     }
     let issues = validate_feature_config(&key, &update.config);
-    if issues.iter().any(|issue| issue.severity == "error") {
+    if update.enabled && issues.iter().any(|issue| issue.severity == "error") {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
             "invalid_feature_config",
@@ -4799,8 +7144,33 @@ async fn update_feature_detail(
     } else {
         None
     };
+    let reddit_subscription = if key == "social.reddit" {
+        prepare_reddit_feature(&state, &claims, &update.config, update.enabled).await?
+    } else {
+        None
+    };
     let bluesky_subscription = if key == "social.bluesky" {
         prepare_bluesky_feature(&state, &claims, &update.config, update.enabled).await?
+    } else {
+        None
+    };
+    let x_subscription = if key == "social.x" {
+        prepare_x_feature(&state, &claims, &update.config, update.enabled).await?
+    } else {
+        None
+    };
+    let tiktok_subscription = if key == "social.tiktok" {
+        prepare_tiktok_feature(&state, &claims, &update.config, update.enabled).await?
+    } else {
+        None
+    };
+    let instagram_subscription = if key == "social.instagram" {
+        prepare_instagram_feature(&state, &claims, &update.config, update.enabled).await?
+    } else {
+        None
+    };
+    let kick_subscription = if key == "social.kick" {
+        prepare_kick_feature(&state, &claims, &update.config, update.enabled).await?
     } else {
         None
     };
@@ -4847,6 +7217,17 @@ async fn update_feature_detail(
             &projections,
             twitch_subscription.as_ref(),
         )
+    } else if key == "social.reddit" {
+        state.store.publish_reddit_feature_setting(
+            &claims.guild_id,
+            &key,
+            update.enabled,
+            &config_json,
+            update.expected_revision,
+            &claims.user_id,
+            &projections,
+            reddit_subscription.as_ref(),
+        )
     } else if key == "social.bluesky" {
         state.store.publish_bluesky_feature_setting(
             &claims.guild_id,
@@ -4857,6 +7238,50 @@ async fn update_feature_detail(
             &claims.user_id,
             &projections,
             bluesky_subscription.as_ref(),
+        )
+    } else if key == "social.x" {
+        state.store.publish_x_feature_setting(
+            &claims.guild_id,
+            &key,
+            update.enabled,
+            &config_json,
+            update.expected_revision,
+            &claims.user_id,
+            &projections,
+            x_subscription.as_ref(),
+        )
+    } else if key == "social.tiktok" {
+        state.store.publish_tiktok_feature_setting(
+            &claims.guild_id,
+            &key,
+            update.enabled,
+            &config_json,
+            update.expected_revision,
+            &claims.user_id,
+            &projections,
+            tiktok_subscription.as_ref(),
+        )
+    } else if key == "social.instagram" {
+        state.store.publish_instagram_feature_setting(
+            &claims.guild_id,
+            &key,
+            update.enabled,
+            &config_json,
+            update.expected_revision,
+            &claims.user_id,
+            &projections,
+            instagram_subscription.as_ref(),
+        )
+    } else if key == "social.kick" {
+        state.store.publish_kick_feature_setting(
+            &claims.guild_id,
+            &key,
+            update.enabled,
+            &config_json,
+            update.expected_revision,
+            &claims.user_id,
+            &projections,
+            kick_subscription.as_ref(),
         )
     } else {
         state.store.publish_feature_setting(
@@ -4903,7 +7328,7 @@ async fn update_feature_detail(
         serde_json::json!(null)
     };
     Ok(Json(
-        serde_json::json!({ "guildId": claims.guild_id, "key": key, "enabled": record.enabled, "config": update.config, "revision": record.revision, "maturity": feature_maturity(&key), "issues": issues, "discordApply": discord_apply }),
+        serde_json::json!({ "guildId": claims.guild_id, "key": key, "enabled": record.enabled, "config": update.config, "revision": record.revision, "maturity": effective_feature_maturity(&state, &key), "issues": issues, "discordApply": discord_apply }),
     ))
 }
 
@@ -4919,6 +7344,14 @@ struct FeatureTestRequest {
     #[serde(default)]
     reaction_count: Option<u64>,
     #[serde(default)]
+    reactor_ids: Vec<String>,
+    #[serde(default)]
+    author_id: Option<String>,
+    #[serde(default)]
+    author_role_ids: Vec<String>,
+    #[serde(default)]
+    has_attachments: Option<bool>,
+    #[serde(default)]
     join_count: Option<u64>,
     #[serde(default)]
     account_age_days: Option<i64>,
@@ -4926,6 +7359,93 @@ struct FeatureTestRequest {
     has_avatar: Option<bool>,
     #[serde(default)]
     display_name: Option<String>,
+}
+
+fn generic_feature_effect(key: &str) -> Vec<String> {
+    let effect = match key {
+        "community.leaderboard" => {
+            "Read the XP ledger and return a private or public leaderboard for the selected period."
+        }
+        "community.achievements" => {
+            "Evaluate XP, message and event milestones and grant eligible rewards."
+        }
+        "community.birthdays" => {
+            "Run the timezone-aware birthday job without exposing the member's birth year."
+        }
+        "management.nickname" => {
+            "Apply the configured Helper nickname after Discord hierarchy and permission checks."
+        }
+        "management.moderation" => {
+            "Route moderation commands through policy, hierarchy preflight and an audit record."
+        }
+        "management.audit" => {
+            "Record the selected Discord events as bounded metadata and enforce retention."
+        }
+        "management.privacy" => {
+            "Create a guild-scoped export or erasure receipt without deleting moderation evidence."
+        }
+        "management.templates" => {
+            "Render the selected bounded template with approved variables and Discord limits."
+        }
+        "management.custom_commands" => {
+            "Resolve a saved response with bounded variables; no user-provided code is executed."
+        }
+        "utility.help" => {
+            "Return the enabled modules and their dashboard instructions for this server."
+        }
+        "utility.reminders" => {
+            "Schedule an idempotent reminder with the configured timezone and recurrence policy."
+        }
+        "utility.emojis" => {
+            "Read the server emoji inventory and apply the configured filters and result limit."
+        }
+        "utility.embeds" => {
+            "Render the message/embed composer preview with mentions disabled by default."
+        }
+        "utility.search" => {
+            "Query only approved bounded providers and return a rate-limited result set."
+        }
+        "utility.temp_channels" => {
+            "Create a temporary voice room for the member and remove it after ownership ends."
+        }
+        "insights.stats" => {
+            "Update the configured statistics channel from guild activity using the selected window."
+        }
+        "community.economy" => {
+            "Write an idempotent economy ledger entry and derive the member balance from it."
+        }
+        "community.role_panels" => {
+            "Publish role panel components after checking role manageability and hierarchy."
+        }
+        "community.events" => {
+            "Create or update the scheduled event and persist registrations and reminders."
+        }
+        "community.suggestions" => {
+            "Create the suggestion record, apply the voting policy and keep its lifecycle auditable."
+        }
+        "community.giveaways" => {
+            "Create an idempotent giveaway job with bounded winners and requirements."
+        }
+        "management.polls" => {
+            "Publish the poll interaction and persist each vote with duplicate protection."
+        }
+        "support.tickets" => {
+            "Create a private ticket channel with staff roles, transcript and SLA settings."
+        }
+        "support.welcome" => {
+            "Send the welcome message/DM and apply the configured auto-role on member join."
+        }
+        "support.welcome_channel" => {
+            "Publish the guided welcome message with rules, first steps and bounded components."
+        }
+        "studio.rank_card" => {
+            "Render the XP card using only curated backgrounds and colour choices."
+        }
+        _ => {
+            "Apply the validated feature adapter to the Discord runtime and record an audit event."
+        }
+    };
+    vec![effect.into()]
 }
 
 async fn test_feature(
@@ -4939,13 +7459,32 @@ async fn test_feature(
         return Err(client_error(StatusCode::NOT_FOUND, "unknown_feature"));
     }
     let mut issues = validate_feature_config(&key, &test.config);
-    issues.extend(lifecycle_issues(&key, feature_maturity(&key)));
-    let maturity = feature_maturity(&key);
-    if !feature_is_configurable(&key) {
+    let maturity = effective_feature_maturity(&state, &key);
+    issues.extend(lifecycle_issues(&key, maturity));
+    if feature_adapter(&key).is_none() {
         issues.push(ValidationIssue {
             path: "feature".into(),
             code: "feature_not_operational".into(),
             message: "Esta funcionalidade ainda não tem um adaptador operacional.".into(),
+            severity: "error".into(),
+        });
+    }
+    // A provider can expose a real adapter and therefore deserve a setup page
+    // in the catalogue, while still being unable to execute until its official
+    // credentials/approval are present. Keep that distinction explicit in the
+    // simulation: it must never report a blocked provider as applicable.
+    if maturity == FeatureMaturity::Blocked {
+        let message = lifecycle_issues(&key, maturity)
+            .into_iter()
+            .find(|issue| issue.severity == "error")
+            .map(|issue| issue.message)
+            .unwrap_or_else(|| {
+                "This provider is blocked until its official dependencies are ready.".into()
+            });
+        issues.push(ValidationIssue {
+            path: "feature.provider".into(),
+            code: "provider_not_ready".into(),
+            message,
             severity: "error".into(),
         });
     }
@@ -4956,13 +7495,30 @@ async fn test_feature(
         "content": test.content.clone(),
         "channelId": test.channel_id.clone(),
         "reactionCount": test.reaction_count,
+        "reactorIds": test.reactor_ids,
+        "authorId": test.author_id.clone(),
+        "authorRoleIds": test.author_role_ids,
+        "hasAttachments": test.has_attachments,
         "joinCount": test.join_count,
         "accountAgeDays": test.account_age_days,
         "hasAvatar": test.has_avatar,
         "displayName": test.display_name.clone(),
     });
-    let adapter_effects =
-        feature_adapter(&key).map(|adapter| adapter.simulate(&test.config, &adapter_fixture));
+    let adapter_effects = if maturity == FeatureMaturity::Blocked {
+        // A blocked provider must never claim that a JSON draft would be
+        // applied. Keep the simulation useful as a readiness explanation,
+        // while preserving the same validation path used by publication.
+        Some(vec![
+            lifecycle_issues(&key, maturity)
+                .first()
+                .map(|issue| issue.message.clone())
+                .unwrap_or_else(|| {
+                    "This provider is blocked until its official dependencies are ready.".into()
+                }),
+        ])
+    } else {
+        feature_adapter(&key).map(|adapter| adapter.simulate(&test.config, &adapter_fixture))
+    };
     let mut anti_spam_decision: Option<AntiSpamDecision> = None;
     let effects = match key.as_str() {
         "protection.antispam" => {
@@ -5018,72 +7574,80 @@ async fn test_feature(
             }
         }
         "protection.anti_raid" => {
-            let joins = test.join_count.unwrap_or(10);
-            let threshold = test
-                .config
-                .get("joinThreshold")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(10);
-            if joins >= threshold {
+            let policy = anti_raid_policy_from_json(&test.config);
+            let joins = test.join_count.unwrap_or(policy.join_threshold as u64);
+            let decision = evaluate_anti_raid(&policy, joins as u32, policy.alert_only);
+            if decision.armed {
                 vec![format!(
-                    "Contain the burst ({joins} joins reached the {threshold}-join threshold) for {} minutes.",
-                    test.config
-                        .get("incidentMinutes")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(10)
+                    "{} ({}/{} joins in {}s; containment {} for {} minutes).",
+                    if decision.shadow_mode {
+                        "Monitor the burst without automatic containment"
+                    } else {
+                        "Contain the join burst"
+                    },
+                    decision.joins,
+                    policy.join_threshold,
+                    policy.window_seconds,
+                    if decision.shadow_mode {
+                        "disabled"
+                    } else {
+                        "enabled"
+                    },
+                    decision.incident_minutes
                 )]
             } else {
                 vec![format!(
-                    "Keep monitoring: {joins}/{threshold} joins in the current window."
+                    "Keep monitoring: {}/{} joins in the current {}s window.",
+                    decision.joins, policy.join_threshold, policy.window_seconds
                 )]
             }
         }
         "protection.join_gate" => {
-            let account_age_days = test.account_age_days.unwrap_or(30);
-            let minimum_age = test
-                .config
-                .get("minimumAccountDays")
-                .and_then(serde_json::Value::as_i64)
-                .unwrap_or(0);
-            let require_avatar = test
-                .config
-                .get("requireAvatar")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let has_avatar = test.has_avatar.unwrap_or(true);
-            let name = test.display_name.as_deref().unwrap_or("Preview member");
-            let blocked_name = test
-                .config
-                .get("blockedNamePatterns")
-                .and_then(serde_json::Value::as_array)
-                .map(|patterns| {
-                    patterns
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .any(|pattern| {
-                            name.to_ascii_lowercase()
-                                .contains(&pattern.to_ascii_lowercase())
-                        })
-                })
-                .unwrap_or(false);
-            let mut reasons = Vec::new();
-            if account_age_days < minimum_age {
-                reasons.push(format!(
-                    "account age {account_age_days}d is below {minimum_age}d"
-                ));
-            }
-            if require_avatar && !has_avatar {
-                reasons.push("profile avatar is required".to_string());
-            }
-            if blocked_name {
-                reasons.push("display name matches a blocked pattern".to_string());
-            }
-            if reasons.is_empty() {
+            let object = test.config.as_object();
+            let policy = JoinGatePolicy {
+                minimum_account_days: object
+                    .and_then(|values| values.get("minimumAccountDays"))
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0),
+                require_avatar: object
+                    .and_then(|values| values.get("requireAvatar"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                blocked_name_patterns: object
+                    .and_then(|values| values.get("blockedNamePatterns"))
+                    .and_then(serde_json::Value::as_array)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                action: object
+                    .and_then(|values| values.get("action"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("quarantine")
+                    .to_owned(),
+            };
+            let decision = evaluate_join_gate(
+                &policy,
+                &JoinGateObservation {
+                    account_age_days: test.account_age_days.unwrap_or(30),
+                    has_avatar: test.has_avatar.unwrap_or(true),
+                    display_name: test
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| "Preview member".into()),
+                },
+            );
+            if !decision.blocked {
                 vec!["Allow the member and apply the configured auto-role, if any.".into()]
             } else {
                 vec![format!(
-                    "Apply the configured join-gate action because {}.",
-                    reasons.join("; ")
+                    "Apply the {} join-gate action because {}.",
+                    decision.action,
+                    decision.reasons.join("; ")
                 )]
             }
         }
@@ -5094,19 +7658,41 @@ async fn test_feature(
             vec!["Criar um ticket privado com as permissões configuradas".into()]
         }),
         "community.starboard" => {
-            let count = test.reaction_count.unwrap_or(5);
-            let threshold = test
-                .config
-                .get("threshold")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(5);
-            if count >= threshold {
+            let policy = starboard_policy_from_json(&test.config);
+            let reactor_ids = if test.reactor_ids.is_empty() {
+                (0..test.reaction_count.unwrap_or(5))
+                    .map(|index| format!("preview-reactor-{index}"))
+                    .collect()
+            } else {
+                test.reactor_ids.clone()
+            };
+            let decision = evaluate_starboard(
+                &policy,
+                &StarboardObservation {
+                    source_channel_id: test
+                        .channel_id
+                        .clone()
+                        .unwrap_or_else(|| "preview-channel".into()),
+                    author_id: test
+                        .author_id
+                        .clone()
+                        .unwrap_or_else(|| "preview-author".into()),
+                    reactor_ids,
+                    author_role_ids: test.author_role_ids.clone(),
+                    has_attachments: test.has_attachments.unwrap_or(false),
+                },
+            );
+            if decision.should_publish {
                 vec![format!(
-                    "Create or update the starboard mirror ({count}/{threshold} reactions)."
+                    "Create or update the starboard mirror ({}/{} reactions). {}",
+                    decision.count, decision.threshold, decision.reason
                 )]
+            } else if decision.ignored {
+                vec![format!("Do not mirror this message. {}", decision.reason)]
             } else {
                 vec![format!(
-                    "Keep the original message below the board threshold ({count}/{threshold})."
+                    "Keep the original message below the board threshold ({}/{} reactions). {}",
+                    decision.count, decision.threshold, decision.reason
                 )]
             }
         }
@@ -5115,11 +7701,11 @@ async fn test_feature(
         }),
         _ => adapter_effects
             .clone()
-            .unwrap_or_else(|| vec!["Guardar a configuração no contexto deste servidor".into()]),
+            .unwrap_or_else(|| generic_feature_effect(&key)),
     };
     let result = SimulationResult {
         key: key.clone(),
-        would_apply: feature_is_configurable(&key)
+        would_apply: feature_configurable_for(&state, &key)
             && issues.iter().all(|issue| issue.severity != "error"),
         issues,
         effects,
@@ -5173,7 +7759,7 @@ async fn feature_rollback(
     if feature_definition(&key).is_none() {
         return Err(client_error(StatusCode::NOT_FOUND, "unknown_feature"));
     }
-    if !feature_is_configurable(&key) {
+    if !feature_configurable_for(&state, &key) {
         return Err(client_error(
             StatusCode::NOT_IMPLEMENTED,
             "feature_not_available",
@@ -5188,6 +7774,110 @@ async fn feature_rollback(
     };
     let config: serde_json::Value = serde_json::from_str(&previous.config_json)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid_stored_config"))?;
+    // Rollback is a mutation just like a fresh publish: re-run the same
+    // guild-scoped preflight before touching either the feature setting or a
+    // provider subscription. This prevents a historical revision from
+    // bypassing current permissions/hierarchy checks.
+    let preflight = if key == "management.nickname" {
+        nickname_preflight_for_claims(
+            &state,
+            &claims,
+            FeaturePreflightRequest {
+                config: config.clone(),
+                enabled: previous.enabled,
+            },
+        )
+        .await?
+    } else if key == "protection.antispam" {
+        preflight(
+            State(state.clone()),
+            headers.clone(),
+            Json(PreflightRequest {
+                operation: format!("{key}.rollback"),
+                config: config.clone(),
+                enabled: previous.enabled,
+            }),
+        )
+        .await?
+    } else {
+        generic_feature_preflight(
+            State(state.clone()),
+            headers.clone(),
+            key.clone(),
+            FeaturePreflightRequest {
+                config: config.clone(),
+                enabled: previous.enabled,
+            },
+        )
+        .await?
+    };
+    if !preflight
+        .0
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(client_error(
+            StatusCode::PRECONDITION_FAILED,
+            "feature_preflight_failed",
+        ));
+    }
+    let issues = validate_feature_config(&key, &config);
+    if previous.enabled && issues.iter().any(|issue| issue.severity == "error") {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_stored_config",
+        ));
+    }
+    // Provider revisions need their subscription projection restored in the
+    // same transaction as feature_settings/feature_revisions. Reusing the
+    // normal preparation path also validates the historical source and
+    // ensures the provider is still reachable before the transaction starts.
+    let youtube_subscription = if key == "social.youtube" {
+        prepare_youtube_feature(&state, &claims, &config, previous.enabled).await?
+    } else {
+        None
+    };
+    let rss_subscription = if matches!(key.as_str(), "social.rss" | "social.podcasts") {
+        prepare_rss_feature(&state, &claims, &config, previous.enabled).await?
+    } else {
+        None
+    };
+    let twitch_subscription = if key == "social.twitch" {
+        prepare_twitch_feature(&state, &claims, &config, previous.enabled).await?
+    } else {
+        None
+    };
+    let reddit_subscription = if key == "social.reddit" {
+        prepare_reddit_feature(&state, &claims, &config, previous.enabled).await?
+    } else {
+        None
+    };
+    let bluesky_subscription = if key == "social.bluesky" {
+        prepare_bluesky_feature(&state, &claims, &config, previous.enabled).await?
+    } else {
+        None
+    };
+    let x_subscription = if key == "social.x" {
+        prepare_x_feature(&state, &claims, &config, previous.enabled).await?
+    } else {
+        None
+    };
+    let tiktok_subscription = if key == "social.tiktok" {
+        prepare_tiktok_feature(&state, &claims, &config, previous.enabled).await?
+    } else {
+        None
+    };
+    let instagram_subscription = if key == "social.instagram" {
+        prepare_instagram_feature(&state, &claims, &config, previous.enabled).await?
+    } else {
+        None
+    };
+    let kick_subscription = if key == "social.kick" {
+        prepare_kick_feature(&state, &claims, &config, previous.enabled).await?
+    } else {
+        None
+    };
     let mut projections = vec![
         (
             feature_key(&key),
@@ -5202,9 +7892,107 @@ async fn feature_rollback(
             if previous.enabled { "true" } else { "false" }.into(),
         ));
     }
-    let record = state
-        .store
-        .publish_feature_setting(
+    let publish_result = if key == "social.youtube" {
+        state.store.publish_youtube_feature_setting(
+            &claims.guild_id,
+            &key,
+            previous.enabled,
+            &previous.config_json,
+            request.expected_revision,
+            &claims.user_id,
+            &projections,
+            youtube_subscription.as_ref(),
+        )
+    } else if matches!(key.as_str(), "social.rss" | "social.podcasts") {
+        state.store.publish_rss_feature_setting(
+            &claims.guild_id,
+            &key,
+            previous.enabled,
+            &previous.config_json,
+            request.expected_revision,
+            &claims.user_id,
+            &projections,
+            rss_subscription.as_ref(),
+        )
+    } else if key == "social.twitch" {
+        state.store.publish_twitch_feature_setting(
+            &claims.guild_id,
+            &key,
+            previous.enabled,
+            &previous.config_json,
+            request.expected_revision,
+            &claims.user_id,
+            &projections,
+            twitch_subscription.as_ref(),
+        )
+    } else if key == "social.reddit" {
+        state.store.publish_reddit_feature_setting(
+            &claims.guild_id,
+            &key,
+            previous.enabled,
+            &previous.config_json,
+            request.expected_revision,
+            &claims.user_id,
+            &projections,
+            reddit_subscription.as_ref(),
+        )
+    } else if key == "social.bluesky" {
+        state.store.publish_bluesky_feature_setting(
+            &claims.guild_id,
+            &key,
+            previous.enabled,
+            &previous.config_json,
+            request.expected_revision,
+            &claims.user_id,
+            &projections,
+            bluesky_subscription.as_ref(),
+        )
+    } else if key == "social.x" {
+        state.store.publish_x_feature_setting(
+            &claims.guild_id,
+            &key,
+            previous.enabled,
+            &previous.config_json,
+            request.expected_revision,
+            &claims.user_id,
+            &projections,
+            x_subscription.as_ref(),
+        )
+    } else if key == "social.tiktok" {
+        state.store.publish_tiktok_feature_setting(
+            &claims.guild_id,
+            &key,
+            previous.enabled,
+            &previous.config_json,
+            request.expected_revision,
+            &claims.user_id,
+            &projections,
+            tiktok_subscription.as_ref(),
+        )
+    } else if key == "social.instagram" {
+        state.store.publish_instagram_feature_setting(
+            &claims.guild_id,
+            &key,
+            previous.enabled,
+            &previous.config_json,
+            request.expected_revision,
+            &claims.user_id,
+            &projections,
+            instagram_subscription.as_ref(),
+        )
+    } else if key == "social.kick" {
+        state.store.publish_kick_feature_setting(
+            &claims.guild_id,
+            &key,
+            previous.enabled,
+            &previous.config_json,
+            request.expected_revision,
+            &claims.user_id,
+            &projections,
+            kick_subscription.as_ref(),
+        )
+    } else {
+        state.store.publish_feature_setting(
             &claims.guild_id,
             &key,
             previous.enabled,
@@ -5213,13 +8001,14 @@ async fn feature_rollback(
             &claims.user_id,
             &projections,
         )
-        .map_err(|error| {
-            if error.to_string().starts_with("feature_revision_conflict:") {
-                client_error(StatusCode::CONFLICT, "feature_revision_conflict")
-            } else {
-                client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
-            }
-        })?;
+    };
+    let record = publish_result.map_err(|error| {
+        if error.to_string().starts_with("feature_revision_conflict:") {
+            client_error(StatusCode::CONFLICT, "feature_revision_conflict")
+        } else {
+            client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
+        }
+    })?;
     Ok(Json(serde_json::json!({
         "guildId": claims.guild_id,
         "key": key,
@@ -5227,7 +8016,50 @@ async fn feature_rollback(
         "config": config,
         "revision": record.revision,
         "rolledBackFrom": request.revision,
+        "issues": issues,
     })))
+}
+
+/// Rebuild the runtime projection (and any provider subscription) from the
+/// currently published feature configuration.  Repair deliberately goes
+/// through the normal update path so it gets the same authentication,
+/// validation, preflight, revision checks and atomic provider handling as a
+/// regular publish.  A successful repair therefore creates a new revision
+/// instead of mutating history in place.
+async fn feature_repair(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    if feature_definition(&key).is_none() {
+        return Err(client_error(StatusCode::NOT_FOUND, "unknown_feature"));
+    }
+    let Some(current) = state
+        .store
+        .get_feature_setting(&claims.guild_id, &key)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+    else {
+        return Err(client_error(StatusCode::NOT_FOUND, "feature_not_published"));
+    };
+    let config = serde_json::from_str(&current.config_json)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid_stored_config"))?;
+    let response = update_feature_detail(
+        State(state),
+        headers,
+        Path(key),
+        Json(FeatureDetailUpdate {
+            enabled: current.enabled,
+            config,
+            expected_revision: Some(current.revision),
+        }),
+    )
+    .await?;
+    let mut body = response.0;
+    if let Some(object) = body.as_object_mut() {
+        object.insert("repaired".to_string(), serde_json::Value::Bool(true));
+    }
+    Ok(Json(body))
 }
 
 async fn update_feature_config(
@@ -5239,7 +8071,11 @@ async fn update_feature_config(
     if feature_definition(&update.key).is_none() {
         return Err(client_error(StatusCode::BAD_REQUEST, "unknown_feature"));
     }
-    if !feature_is_configurable(&update.key) {
+    // Provider-backed integrations are promoted dynamically once their
+    // official client and approval gate are ready.  Use the same decision as
+    // the catalogue/detail endpoints here; consulting only the static
+    // maturity would make a fully configured provider impossible to publish.
+    if !feature_configurable_for(&state, &update.key) {
         return Err(client_error(
             StatusCode::NOT_IMPLEMENTED,
             "feature_not_available",
@@ -6473,7 +9309,16 @@ mod tests {
             rss: None,
             twitch: None,
             bluesky: Some(BlueskyClient::new()),
+            reddit: RedditClient::from_env(),
+            x: XClient::from_env(),
+            tiktok: TikTokClient::from_env(),
+            instagram: InstagramClient::from_env(),
+            kick: KickClient::from_env(),
+            stripe: StripeConnectClient::from_env(),
+            siwe: SiweVerifier::from_env(),
             coingecko: Some(CoinGeckoClient::new()),
+            gas: GasClient::new(),
+            opensea: OpenSeaClient::new(),
         }
     }
 
@@ -6531,6 +9376,20 @@ mod tests {
         let session = claims("guild-a");
         let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
         store.save_session(&session).unwrap();
+        // Simulate a rolling-deploy/legacy row that says a blocked provider
+        // is enabled.  The catalogue must surface the dependency failure
+        // rather than reporting the feature as merely disabled.
+        store
+            .publish_feature_setting(
+                "guild-a",
+                "social.instagram",
+                true,
+                "{}",
+                None,
+                "migration-test",
+                &[],
+            )
+            .unwrap();
         let app = router(state(store.clone()));
 
         let response = app
@@ -6548,17 +9407,28 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["guildId"], "guild-a");
         assert_eq!(body["features"].as_array().unwrap().len(), 52);
-        // The catalogue must not regress to the original thirteen-card
-        // allow-list. Providers without credentials remain visible as beta
-        // or blocked, while every adapter-backed internal feature is
-        // discoverable from the same API response.
+        // Every adapter-backed feature is discoverable.  Provider credentials
+        // and approvals affect activation/health, not whether the setup page
+        // exists in the catalogue.
         let available_count = body["features"]
             .as_array()
             .unwrap()
             .iter()
             .filter(|item| item["available"].as_bool() == Some(true))
             .count();
-        assert!(available_count >= 37, "available_count={available_count}");
+        // All 52 catalogue entries have a real adapter or an explicit legacy
+        // descriptor, so none should disappear behind a stale frontend list.
+        assert_eq!(available_count, 52, "available_count={available_count}");
+        let configurable_count = body["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["configurable"].as_bool() == Some(true))
+            .count();
+        assert_eq!(
+            configurable_count, 52,
+            "configurable_count={configurable_count}"
+        );
         let mut keys = body["features"]
             .as_array()
             .unwrap()
@@ -6568,12 +9438,63 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), 52);
+        let maturity_count = |value: &str| {
+            body["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["maturity"] == value)
+                .count()
+        };
+        assert_eq!(maturity_count("operational"), 38);
+        assert_eq!(maturity_count("beta"), 7);
+        assert_eq!(maturity_count("blocked"), 7);
+        assert_eq!(maturity_count("planned"), 0);
         assert!(
             body["features"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|item| item["key"] == "community.levels")
+        );
+        let blocked_instagram = body["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["key"] == "social.instagram")
+            .unwrap();
+        assert_eq!(blocked_instagram["maturity"], "blocked");
+        assert_eq!(blocked_instagram["configurable"], true);
+        assert!(
+            blocked_instagram["issues"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Meta app")
+        );
+        assert_eq!(
+            blocked_instagram["health"]["adapter"],
+            "meta_instagram_official_v1"
+        );
+        assert!(
+            blocked_instagram["health"]["dependencies"]
+                .as_array()
+                .is_some_and(|dependencies| !dependencies.is_empty())
+        );
+        assert_eq!(blocked_instagram["health"]["status"], "dependency_down");
+        let blocked_reddit = body["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["key"] == "social.reddit")
+            .unwrap();
+        assert_eq!(
+            blocked_reddit["health"]["adapter"],
+            "reddit_oauth_readonly_v1"
+        );
+        assert!(
+            blocked_reddit["health"]["dependencies"]
+                .as_array()
+                .is_some_and(|dependencies| !dependencies.is_empty())
         );
         let anti_spam = body["features"]
             .as_array()
@@ -6653,6 +9574,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_catalogue_feature_exposes_a_bounded_api_detail() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+
+        for key in helper_core::FEATURE_KEYS {
+            let response = router(state(store.clone()))
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/config/features/{key}"))
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "feature detail must be available for {key}"
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["key"], *key);
+            assert_eq!(body["configurable"], true, "{key} must remain discoverable");
+            assert!(body["adapter"].as_str().is_some(), "{key} has no adapter");
+            assert!(body["schema"].is_object(), "{key} has no schema");
+            assert!(body["defaults"].is_object(), "{key} has no defaults");
+            assert!(body["health"]["status"].as_str().is_some());
+        }
+    }
+
+    #[tokio::test]
     async fn anti_spam_simulation_uses_the_runtime_evaluator() {
         let store = Store::open(":memory:").unwrap();
         let session = claims("guild-a");
@@ -6710,6 +9666,66 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("timeout")
+        );
+    }
+
+    #[tokio::test]
+    async fn feature_repair_republishes_current_revision_atomically() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        store
+            .replace_session_guilds(
+                session.session_id,
+                &[("guild-a".into(), "Alpha".into(), Some("0".into()))],
+            )
+            .unwrap();
+
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config/features/utility.help")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"enabled":false,"config":{}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let initial = store
+            .get_feature_setting("guild-a", "utility.help")
+            .unwrap()
+            .unwrap();
+        assert_eq!(initial.revision, 1);
+
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/config/features/utility.help/repair")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                .unwrap();
+        assert_eq!(body["repaired"], true);
+        assert_eq!(body["rolledBackFrom"], serde_json::Value::Null);
+        assert_eq!(body["revision"], 2);
+        assert_eq!(
+            store
+                .get_feature_setting("guild-a", "utility.help")
+                .unwrap()
+                .unwrap()
+                .revision,
+            2
         );
     }
 
@@ -6826,6 +9842,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blocked_provider_simulation_never_claims_runtime_application() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        let response = router(state(store))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/config/features/social.instagram/simulate")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "config": {
+                                "username": "creator",
+                                "targetChannelId": "123456789012345678"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                .unwrap();
+        assert_eq!(body["ok"], false);
+        assert!(
+            body["result"]["effects"][0]
+                .as_str()
+                .unwrap()
+                .contains("Meta app")
+        );
+        assert!(
+            !body["result"]["effects"][0]
+                .as_str()
+                .unwrap()
+                .contains("Apply runtime setting")
+        );
+    }
+
+    #[tokio::test]
     async fn anti_spam_detail_exposes_runtime_schema_and_defaults() {
         let store = Store::open(":memory:").unwrap();
         let session = claims("guild-a");
@@ -6915,6 +9976,55 @@ mod tests {
                 .unwrap();
         assert_eq!(body["operation"], "protection.antispam.publish");
         assert_eq!(body["guildId"], "guild-a");
+    }
+
+    #[tokio::test]
+    async fn enabled_feature_health_includes_live_discord_preflight() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        // The user has a managed guild but no moderation permissions. The
+        // health endpoint must surface that runtime dependency instead of
+        // calling a valid JSON revision operational.
+        store
+            .replace_session_guilds(
+                session.session_id,
+                &[("guild-a".into(), "Alpha".into(), Some("0".into()))],
+            )
+            .unwrap();
+        store
+            .publish_feature_setting(
+                "guild-a",
+                "management.moderation",
+                true,
+                &serde_json::json!({"requireReason": true, "maxPurge": 100}).to_string(),
+                None,
+                "user-1",
+                &[],
+            )
+            .unwrap();
+
+        let response = router(state(store))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/config/features/management.moderation/health")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                .unwrap();
+        assert_eq!(body["preflight"]["ok"], false);
+        assert_eq!(body["status"], "misconfigured");
+        assert_eq!(body["operational"], false);
+        assert!(body["issues"].as_array().unwrap().iter().any(|issue| {
+            issue["code"] == "missing_permission" || issue["code"] == "discord_context_unavailable"
+        }));
     }
 
     #[tokio::test]

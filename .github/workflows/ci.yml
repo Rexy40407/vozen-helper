@@ -7,6 +7,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Audit Rust dependencies
+        run: cargo audit
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Test Rust workspace
+        run: cargo test --workspace --all-targets
+      - name: Lint Rust workspace
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -16,3 +29,12 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npx vitest run
+      - name: Install dashboard panel
+        working-directory: panel
+        run: npm ci --ignore-scripts --no-audit
+      - name: Audit dashboard panel
+        working-directory: panel
+        run: npm audit --audit-level=high
+      - name: Build dashboard panel
+        working-directory: panel
+        run: npm run build

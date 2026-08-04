@@ -21,7 +21,18 @@ export async function updateMemberCounter(ctx: AppContext, force = false): Promi
   if (!cfg.channelId) return;
   const guild = ctx.client.guilds.cache.get(ctx.env.guildId);
   if (!guild) return;
-  const count = guild.memberCount;
+  // `memberCount` in the local cache can lag behind Discord after joins/leaves
+  // (especially when the process was running during a reconnect). Fetch the
+  // guild before rendering the counter so the channel never keeps an old value.
+  const currentGuild = await guild.fetch().catch((e) => {
+    log.warn(
+      `[counter] não consegui atualizar os dados da guild ${guild.id}:`,
+      (e as Error)?.message,
+    );
+    return null;
+  });
+  if (!currentGuild) return;
+  const count = currentGuild.memberCount;
   const now = Date.now();
   if (!force && (count === lastCounterValue || now - lastCounterAt < COUNTER_MIN_INTERVAL)) return;
 

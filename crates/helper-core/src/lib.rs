@@ -3,10 +3,10 @@
 use anyhow::{Context, Result};
 use helper_contracts::{
     AntiSpamDecision, AntiSpamObservation, AntiSpamPolicy, FeatureAdapterDescriptor,
-    FeatureMaturity, Plan, ValidationIssue,
+    FeatureMaturity, Plan, RANK_CARD_BACKGROUND_PRESETS, RankCardConfig, ValidationIssue,
 };
 use serde::Deserialize;
-use std::{env, net::IpAddr, path::PathBuf, str::FromStr};
+use std::{collections::HashSet, env, net::IpAddr, path::PathBuf, str::FromStr};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -343,6 +343,161 @@ pub fn evaluate_scam(policy: &ScamPolicy, channel_id: &str, content: &str) -> Sc
     }
 }
 
+/// Bounded anti-raid policy shared by the API simulator and the Discord
+/// member-join handler.  The gateway is responsible for counting joins in a
+/// time window; this pure evaluator decides what that count means.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AntiRaidPolicy {
+    pub join_threshold: u32,
+    pub window_seconds: u64,
+    pub incident_minutes: u64,
+    pub verification: String,
+    pub alert_only: bool,
+}
+
+impl Default for AntiRaidPolicy {
+    fn default() -> Self {
+        Self {
+            join_threshold: 10,
+            window_seconds: 10,
+            incident_minutes: 10,
+            verification: "high".into(),
+            alert_only: false,
+        }
+    }
+}
+
+pub fn anti_raid_policy_from_json(value: &serde_json::Value) -> AntiRaidPolicy {
+    let mut policy = AntiRaidPolicy::default();
+    let Some(object) = value.as_object() else {
+        return policy;
+    };
+    if let Some(value) = object
+        .get("joinThreshold")
+        .and_then(serde_json::Value::as_u64)
+    {
+        policy.join_threshold = value.clamp(2, 100) as u32;
+    }
+    if let Some(value) = object
+        .get("windowSeconds")
+        .and_then(serde_json::Value::as_u64)
+    {
+        policy.window_seconds = value.clamp(3, 60);
+    }
+    if let Some(value) = object
+        .get("incidentMinutes")
+        .and_then(serde_json::Value::as_u64)
+    {
+        policy.incident_minutes = value.clamp(1, 120);
+    }
+    if let Some(value) = object
+        .get("verification")
+        .and_then(serde_json::Value::as_str)
+        && matches!(value, "medium" | "high" | "very_high")
+    {
+        policy.verification = value.into();
+    }
+    if let Some(value) = object.get("alertOnly").and_then(serde_json::Value::as_bool) {
+        policy.alert_only = value;
+    }
+    policy
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AntiRaidDecision {
+    pub joins: u32,
+    pub armed: bool,
+    pub shadow_mode: bool,
+    pub incident_minutes: u64,
+    pub reason: String,
+}
+
+pub fn evaluate_anti_raid(
+    policy: &AntiRaidPolicy,
+    joins: u32,
+    shadow_mode: bool,
+) -> AntiRaidDecision {
+    let joins = joins.min(100_000);
+    let armed = joins >= policy.join_threshold;
+    let shadow_mode = shadow_mode || policy.alert_only;
+    AntiRaidDecision {
+        joins,
+        armed,
+        shadow_mode,
+        incident_minutes: policy.incident_minutes,
+        reason: if armed {
+            if shadow_mode {
+                "join_burst_detected_shadow".into()
+            } else {
+                "join_burst_detected_contain".into()
+            }
+        } else {
+            "join_burst_below_threshold".into()
+        },
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinGatePolicy {
+    pub minimum_account_days: i64,
+    pub require_avatar: bool,
+    pub blocked_name_patterns: Vec<String>,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinGateObservation {
+    pub account_age_days: i64,
+    pub has_avatar: bool,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinGateDecision {
+    pub blocked: bool,
+    pub reasons: Vec<String>,
+    pub action: String,
+}
+
+/// Decide whether a member needs verification.  Name matching is deliberately
+/// case-insensitive and bounded by the adapter's validation limits.
+pub fn evaluate_join_gate(
+    policy: &JoinGatePolicy,
+    observation: &JoinGateObservation,
+) -> JoinGateDecision {
+    let account_age_days = observation.account_age_days.clamp(0, 3650);
+    let minimum_account_days = policy.minimum_account_days.clamp(0, 365);
+    let display_name = observation.display_name.to_ascii_lowercase();
+    let mut reasons = Vec::new();
+    if account_age_days < minimum_account_days {
+        reasons.push(format!(
+            "account age {account_age_days}d < {minimum_account_days}d"
+        ));
+    }
+    if policy.require_avatar && !observation.has_avatar {
+        reasons.push("profile avatar is required".into());
+    }
+    if let Some(pattern) = policy
+        .blocked_name_patterns
+        .iter()
+        .map(|pattern| pattern.trim().to_ascii_lowercase())
+        .filter(|pattern| !pattern.is_empty())
+        .take(20)
+        .find(|pattern| display_name.contains(pattern))
+    {
+        reasons.push(format!("display name matches `{pattern}`"));
+    }
+    JoinGateDecision {
+        blocked: !reasons.is_empty(),
+        reasons,
+        action: if policy.action == "alert" {
+            "alert".into()
+        } else {
+            "quarantine".into()
+        },
+    }
+}
+
 /// Every configurable feature will eventually implement this contract. The
 /// first adapter is intentionally small: it proves that the API and gateway
 /// can consume one canonical schema/defaults/validator without pulling UI
@@ -353,22 +508,140 @@ pub trait FeatureAdapter: Sync {
     fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)>;
 
     /// Produce a bounded, side-effect-free preview from the same projection
-    /// that is published to the runtime.  Feature-specific evaluators can
-    /// override this (anti-spam and anti-scam do); the default keeps simple
-    /// adapters honest instead of letting the HTTP layer invent effects.
-    fn simulate(&self, config: &serde_json::Value, _fixture: &serde_json::Value) -> Vec<String> {
+    /// that is published to the runtime.  The helper below is deliberately
+    /// keyed by the adapter descriptor rather than by an HTTP route, so every
+    /// feature gets a meaningful runtime action even when its configuration is
+    /// currently just a feature gate.
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let descriptor = self.descriptor();
         let projection = self.runtime_projection(config);
-        if projection.is_empty() {
-            return vec![format!(
-                "Validate and apply the {} runtime adapter.",
-                self.descriptor().key
-            )];
-        }
-        projection
-            .into_iter()
-            .map(|(key, value)| format!("Apply runtime setting `{key}` = `{value}`."))
-            .collect()
+        simulate_feature_effect(&descriptor.key, config, fixture, &projection)
     }
+}
+
+/// Describe the observable operation represented by a feature publication.
+/// This is intentionally pure and bounded: it never calls Discord or an
+/// external provider.  The Discord handlers consume the same projected
+/// setting keys and the API uses this function for its preview, so the panel
+/// cannot claim that it only "saved JSON".
+fn simulate_feature_effect(
+    key: &str,
+    config: &serde_json::Value,
+    fixture: &serde_json::Value,
+    projection: &[(String, String)],
+) -> Vec<String> {
+    let channel = fixture
+        .get("channelId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("the selected channel");
+    let content = fixture
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("the preview event");
+    let object = config.as_object();
+    let effect = match key {
+        "community.leaderboard" => format!(
+            "Read the XP ledger and publish a {} leaderboard for {channel}.",
+            if object
+                .and_then(|values| values.get("public"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                "public"
+            } else {
+                "private"
+            }
+        ),
+        "community.achievements" =>
+            "Evaluate the member's XP/message milestones and grant each eligible reward once.".into(),
+        "community.birthdays" =>
+            "Run the timezone-aware birthday job and send the configured message without exposing a birth year.".into(),
+        "management.nickname" =>
+            "Apply the Helper nickname after a fresh Manage Nicknames and hierarchy preflight.".into(),
+        "management.moderation" =>
+            "Route the moderation action through policy, hierarchy checks, an idempotency key and an audit record.".into(),
+        "management.audit" =>
+            "Route the selected Discord events to the configured log destination and enforce retention.".into(),
+        "management.privacy" =>
+            "Create a guild-scoped export or erasure receipt while preserving required moderation evidence.".into(),
+        "management.templates" =>
+            "Render the selected template with approved variables and Discord size/mention limits before publishing.".into(),
+        "management.custom_commands" =>
+            "Resolve the saved response with bounded variables; user-provided code is never executed.".into(),
+        "utility.help" =>
+            "Return the enabled modules, command examples and the dashboard link for this server.".into(),
+        "utility.reminders" =>
+            "Create an idempotent reminder job with the configured timezone, recurrence and delivery channel.".into(),
+        "utility.emojis" =>
+            "Read the server emoji inventory, apply the configured filters and return a bounded result set.".into(),
+        "utility.embeds" =>
+            "Render the bounded embed preview with mentions disabled, then publish only after preflight.".into(),
+        "utility.search" =>
+            "Query only the enabled approved providers and return a rate-limited result set; arbitrary URLs are not fetched.".into(),
+        "utility.temp_channels" => {
+            let template = object
+                .and_then(|values| values.get("nameTemplate"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("{user}'s room");
+            let maximum = object
+                .and_then(|values| values.get("maxActive"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(10);
+            format!("Create a temporary voice room named `{template}` (up to {maximum} active rooms) and clean it up after a full disconnect.")
+        }
+        "insights.stats" =>
+            "Update the configured statistics channel from the latest guild counters and expose freshness/health.".into(),
+        "community.economy" =>
+            "Append an idempotent economy ledger entry and derive the member balance from the ledger.".into(),
+        "community.role_panels" =>
+            "Publish bounded role-panel components after checking every role's manageability and hierarchy.".into(),
+        "community.events" =>
+            "Create or update the scheduled event, persist registrations and enqueue the configured reminders.".into(),
+        "community.suggestions" =>
+            "Create the suggestion, apply the voting policy and keep every state transition auditable.".into(),
+        "community.giveaways" =>
+            "Create an idempotent giveaway job with bounded winners, role requirements and a replay-safe draw.".into(),
+        "management.polls" =>
+            "Publish the poll interaction and persist each vote with duplicate protection and a closing job.".into(),
+        "support.tickets" =>
+            "Create a private ticket channel with the configured team overwrites, claim/SLA state and transcript policy.".into(),
+        "support.welcome" =>
+            "Send the welcome message/DM and apply the configured auto-role on member join, with a safe fallback channel.".into(),
+        "support.welcome_channel" =>
+            "Publish the guided welcome panel with rules, first steps and bounded confirmation components.".into(),
+        "studio.rank_card" =>
+            "Render the XP card using only curated backgrounds, colours and the member's current XP snapshot.".into(),
+        "social.youtube" | "social.rss" | "social.podcasts" | "social.twitch" | "social.bluesky"
+        | "social.reddit" | "social.instagram" | "social.x" | "social.tiktok" | "social.kick" =>
+            "Validate the subscription, enqueue a deduplicated provider job and deliver the rendered alert to the selected channel.".into(),
+        "web3.crypto_stats" | "web3.crypto_queries" | "web3.gas_tracker" | "web3.nft_stats"
+        | "web3.nft_queries" | "web3.nft_sales" =>
+            "Query the configured read-only provider with bounded caching, freshness metadata and rate-limit handling.".into(),
+        "growth.monetization" =>
+            "Create or update the server's Connect capability only after onboarding, webhook and compliance checks.".into(),
+        "web3.gating" =>
+            "Verify a single-use SIWE nonce and reconcile only the configured ERC-20/721/1155 role rules.".into(),
+        "protection.antispam" | "protection.antiscam" | "protection.anti_raid" | "protection.join_gate" =>
+            format!("Evaluate `{content}` against the configured protection policy, then apply only the allow-listed action after preflight."),
+        _ if projection.is_empty() =>
+            "Enable the feature's Discord event/command handler and record the publication in the audit stream.".into(),
+        _ => format!(
+            "Publish the validated settings ({}) to the feature's Discord runtime consumer and record an audit event.",
+            projection.len()
+        ),
+    };
+    let mut effects = vec![effect];
+    // Keep the exact projected keys visible in the preview.  This is useful
+    // for operators and, more importantly, proves that the effect is tied to
+    // the same persisted values consumed by the runtime.
+    effects.extend(
+        projection
+            .iter()
+            .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+    );
+    effects
 }
 
 /// Adapter for modules whose Discord behaviour is already command/interaction
@@ -382,6 +655,153 @@ pub struct ToggleOnlyAdapter {
     pub title: &'static str,
     pub description: &'static str,
     pub dependencies: &'static [&'static str],
+}
+
+/// Adapter for provider subscriptions whose persistence and workers live in
+/// the API/modules crates.  The subscription editor still belongs to the
+/// canonical feature registry so production never falls back to a blank
+/// toggle-only form.
+#[derive(Debug, Clone, Copy)]
+pub struct AlertSubscriptionAdapter {
+    pub key: &'static str,
+    pub source: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub source_key: &'static str,
+    pub source_label: &'static str,
+    pub source_help: &'static str,
+    pub default_template: &'static str,
+    pub dependencies: &'static [&'static str],
+}
+
+impl FeatureAdapter for AlertSubscriptionAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: self.key.into(),
+            source: self.source.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": self.source,
+                "sections": [{
+                    "title": self.title,
+                    "description": self.description,
+                    "fields": [
+                        {"key": self.source_key, "label": self.source_label, "kind": "text", "help": self.source_help},
+                        {"key": "targetChannelId", "label": "Discord channel", "kind": "channel"},
+                        {"key": "intervalSeconds", "label": "Polling interval (seconds)", "kind": "number", "min": 900, "max": 86400},
+                        {"key": "messageTemplate", "label": "Alert message", "kind": "textarea", "advanced": true},
+                        {"key": "mention", "label": "Optional mention", "kind": "text", "advanced": true}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({
+                self.source_key: "",
+                "targetChannelId": "",
+                "intervalSeconds": 900,
+                "messageTemplate": self.default_template,
+                "mention": ""
+            }),
+            dependencies: self
+                .dependencies
+                .iter()
+                .map(|value| (*value).into())
+                .collect(),
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "Alert configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        let source = object
+            .get(self.source_key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if source.is_empty() || source.chars().count() > 100 {
+            issues.push(ValidationIssue {
+                path: self.source_key.into(),
+                code: "required".into(),
+                message: format!(
+                    "{} must be provided and at most 100 characters.",
+                    self.source_label
+                ),
+                severity: "error".into(),
+            });
+        }
+        let channel = object
+            .get("targetChannelId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if channel.is_empty() || channel.parse::<u64>().is_err() {
+            issues.push(ValidationIssue {
+                path: "targetChannelId".into(),
+                code: "invalid_discord_id".into(),
+                message: "Choose a real Discord channel for alerts.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(interval) = object
+            .get("intervalSeconds")
+            .and_then(serde_json::Value::as_i64)
+            && !(900..=86_400).contains(&interval)
+        {
+            issues.push(ValidationIssue {
+                path: "intervalSeconds".into(),
+                code: "out_of_range".into(),
+                message: "The polling interval must be between 900 and 86400 seconds.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(template) = object.get("messageTemplate")
+            && (!template.is_string()
+                || template
+                    .as_str()
+                    .is_some_and(|value| value.trim().is_empty() || value.chars().count() > 1_800))
+        {
+            issues.push(ValidationIssue {
+                path: "messageTemplate".into(),
+                code: "invalid_template".into(),
+                message: "The alert message must be non-empty and at most 1800 characters.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let prefix = self.key.replace('.', "_");
+        let mut projection = Vec::new();
+        for field in [
+            self.source_key,
+            "targetChannelId",
+            "intervalSeconds",
+            "messageTemplate",
+            "mention",
+        ] {
+            if let Some(value) = object.get(field) {
+                let value = value
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| value.as_i64().map(|number| number.to_string()));
+                if let Some(value) = value {
+                    projection.push((format!("{prefix}.{field}"), value));
+                }
+            }
+        }
+        projection
+    }
 }
 
 /// Configuration for interaction-driven community modules.  Keeping these
@@ -874,11 +1294,13 @@ impl FeatureAdapter for AuditAdapter {
                     "fields": [
                         {"key":"threshold","label":"Actions before containment","kind":"number","min":2,"max":25},
                         {"key":"windowSeconds","label":"Detection window (seconds)","kind":"number","min":3,"max":60},
-                        {"key":"shadowMode","label":"Shadow mode","kind":"toggle","help":"Record and alert without automatic containment."}
+                        {"key":"shadowMode","label":"Shadow mode","kind":"toggle","help":"Record and alert without automatic containment."},
+                        {"key":"logChannel","label":"Audit log channel (optional)","kind":"channel","advanced":true},
+                        {"key":"includeContent","label":"Include cached message content","kind":"toggle","advanced":true,"help":"Off by default. Discord may not provide content for every edit/delete event."}
                     ]
                 }]
             }),
-            defaults: serde_json::json!({"threshold": 3, "windowSeconds": 10, "shadowMode": false}),
+            defaults: serde_json::json!({"threshold": 3, "windowSeconds": 10, "shadowMode": false, "logChannel": "", "includeContent": false}),
             dependencies: vec!["guild_moderation".into(), "view_audit_log".into()],
         }
     }
@@ -928,6 +1350,29 @@ impl FeatureAdapter for AuditAdapter {
                 severity: "error".into(),
             });
         }
+        if object.get("logChannel").is_some_and(|value| {
+            !value
+                .as_str()
+                .is_some_and(|raw| raw.is_empty() || raw.parse::<u64>().is_ok())
+        }) {
+            issues.push(ValidationIssue {
+                path: "logChannel".into(),
+                code: "invalid_channel_id".into(),
+                message: "Choose a valid Discord channel or leave it empty.".into(),
+                severity: "error".into(),
+            });
+        }
+        if object
+            .get("includeContent")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "includeContent".into(),
+                code: "boolean_required".into(),
+                message: "Content logging must be true or false.".into(),
+                severity: "error".into(),
+            });
+        }
         issues
     }
 
@@ -953,6 +1398,15 @@ impl FeatureAdapter for AuditAdapter {
             .and_then(serde_json::Value::as_bool)
         {
             projection.push(("security.shadow_mode".into(), value.to_string()));
+        }
+        if let Some(value) = object.get("logChannel").and_then(serde_json::Value::as_str) {
+            projection.push(("management.audit.log_channel".into(), value.into()));
+        }
+        if let Some(value) = object
+            .get("includeContent")
+            .and_then(serde_json::Value::as_bool)
+        {
+            projection.push(("management.audit.include_content".into(), value.to_string()));
         }
         projection
     }
@@ -992,8 +1446,13 @@ impl FeatureAdapter for TemplatesAdapter {
             }]
         }
     }
-    fn runtime_projection(&self, _config: &serde_json::Value) -> Vec<(String, String)> {
-        Vec::new()
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        // Templates are consumed by the import/export endpoints rather than a
+        // Discord event handler.  Still publish an explicit, guild-scoped
+        // policy so the adapter cannot appear configured while the module is
+        // silently disabled.
+        let enabled = config.is_object();
+        vec![("management.templates.enabled".into(), enabled.to_string())]
     }
 }
 
@@ -1096,14 +1555,14 @@ impl FeatureAdapter for ToggleOnlyAdapter {
             key: self.key.into(),
             source: self.source.into(),
             schema_version: FEATURE_SCHEMA_VERSION,
+            // Provider integrations have their own subscription builders in
+            // the API.  Do not expose an empty generic section that suggests
+            // a toggle is enough to configure delivery.
             schema: serde_json::json!({
                 "version": FEATURE_SCHEMA_VERSION,
                 "source": self.source,
-                "sections": [{
-                    "title": self.title,
-                    "description": self.description,
-                    "fields": []
-                }]
+                "sections": [],
+                "notes": [{"title": self.title, "description": self.description}]
             }),
             defaults: serde_json::json!({}),
             dependencies: self
@@ -1129,6 +1588,104 @@ impl FeatureAdapter for ToggleOnlyAdapter {
 
     fn runtime_projection(&self, _config: &serde_json::Value) -> Vec<(String, String)> {
         Vec::new()
+    }
+}
+
+/// The XP card has a dedicated editor and renderer, but it still participates
+/// in the common adapter contract.  Keeping its schema and projection here
+/// prevents the specialised endpoint from becoming a second, invisible
+/// configuration source.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RankCardAdapter;
+
+impl RankCardAdapter {
+    pub const KEY: &'static str = "studio.rank_card";
+    pub const SOURCE: &'static str = "rank_card_adapter_v2";
+
+    fn valid_hex(value: &str) -> bool {
+        value.len() == 7
+            && value.starts_with('#')
+            && value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+    }
+
+    fn valid_config(config: &RankCardConfig) -> bool {
+        matches!(
+            config.font.as_str(),
+            "system" | "inter" | "roboto" | "poppins" | "space_grotesk" | "lexend"
+        ) && Self::valid_hex(&config.primary_color)
+            && Self::valid_hex(&config.text_color)
+            && Self::valid_hex(&config.background_color)
+            && Self::valid_hex(&config.avatar_ring_color)
+            && config.overlay_opacity.is_finite()
+            && (0.0..=0.85).contains(&config.overlay_opacity)
+            && config.avatar_ring_width <= 8
+            && config.background_preset.as_deref().is_none_or(|preset| {
+                RANK_CARD_BACKGROUND_PRESETS
+                    .iter()
+                    .any(|(id, _)| *id == preset)
+            })
+            && config.background_url.is_none()
+            && config.background_data.is_none()
+    }
+}
+
+impl FeatureAdapter for RankCardAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "XP card appearance",
+                    "description": "Choose curated backgrounds and colours for the XP card rendered by /rank.",
+                    "fields": [
+                        {"key":"font","label":"Font","kind":"select","options":["system","inter","roboto","poppins","space_grotesk","lexend"]},
+                        {"key":"primaryColor","label":"Primary colour","kind":"color"},
+                        {"key":"textColor","label":"Text colour","kind":"color"},
+                        {"key":"backgroundColor","label":"Background colour","kind":"color"},
+                        {"key":"overlayOpacity","label":"Overlay opacity","kind":"number","min":0,"max":0.85},
+                        {"key":"backgroundPreset","label":"Curated background","kind":"select","advanced":true},
+                        {"key":"avatarRingColor","label":"Avatar ring colour","kind":"color","advanced":true},
+                        {"key":"avatarRingWidth","label":"Avatar ring width","kind":"number","min":0,"max":8,"advanced":true}
+                    ]
+                }]
+            }),
+            defaults: serde_json::to_value(RankCardConfig::default())
+                .expect("rank card defaults serialize"),
+            dependencies: vec!["attach_files".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        match serde_json::from_value::<RankCardConfig>(config.clone()) {
+            Ok(parsed) if Self::valid_config(&parsed) => Vec::new(),
+            Ok(parsed) => vec![ValidationIssue {
+                path: "config".into(),
+                code: "invalid_rank_card".into(),
+                message: if parsed.background_url.is_some() || parsed.background_data.is_some() {
+                    "XP card backgrounds must use one of the curated presets; custom images are not accepted.".into()
+                } else {
+                    "Use a supported font, hexadecimal colours, an opacity between 0 and 0.85, and a curated background.".into()
+                },
+                severity: "error".into(),
+            }],
+            Err(_) => vec![ValidationIssue {
+                path: "config".into(),
+                code: "invalid_rank_card".into(),
+                message: "XP card configuration must match the supported appearance fields.".into(),
+                severity: "error".into(),
+            }],
+        }
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        serde_json::to_string(config)
+            .ok()
+            .map(|value| vec![("community.rank_card".into(), value)])
+            .unwrap_or_default()
     }
 }
 
@@ -1480,6 +2037,405 @@ impl FeatureAdapter for BlueskyAdapter {
     }
 }
 
+/// Read-only Reddit alert contract.  The adapter is intentionally present
+/// even while the catalogue remains blocked: the panel can explain the exact
+/// fields and the API can validate drafts without ever implying that Reddit
+/// commercial access has been approved.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RedditAdapter;
+
+impl RedditAdapter {
+    pub const KEY: &'static str = "social.reddit";
+    pub const SOURCE: &'static str = "reddit_oauth_readonly_v1";
+}
+
+impl FeatureAdapter for RedditAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: Self::KEY.into(),
+            source: Self::SOURCE.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": Self::SOURCE,
+                "sections": [{
+                    "title": "Reddit alerts",
+                    "description": "Read public subreddit posts through Reddit's official OAuth API. Commercial approval is required before enabling delivery.",
+                    "fields": [
+                        {"key":"sourceSubreddit","label":"Subreddit","kind":"text","help":"For example: vozen or r/vozen."},
+                        {"key":"targetChannelId","label":"Discord channel","kind":"channel"},
+                        {"key":"intervalSeconds","label":"Polling interval (seconds)","kind":"number","min":300,"max":86400},
+                        {"key":"messageTemplate","label":"Alert message","kind":"textarea","advanced":true},
+                        {"key":"mention","label":"Optional mention","kind":"text","advanced":true}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({
+                "sourceSubreddit": "",
+                "targetChannelId": "",
+                "intervalSeconds": 900,
+                "messageTemplate": "New post in r/{subreddit}: **{title}**\\n{permalink}",
+                "mention": ""
+            }),
+            dependencies: vec![
+                "Reddit OAuth application".into(),
+                "Commercial API approval".into(),
+                "Send Messages".into(),
+            ],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "Reddit alert configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let source = object
+            .get("sourceSubreddit")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let valid_source = (2..=50).contains(&source.len())
+            && source
+                .trim_start_matches('/')
+                .trim_start_matches("r/")
+                .trim_start_matches("subreddit/")
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        let target = object
+            .get("targetChannelId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let mut issues = Vec::new();
+        if !valid_source {
+            issues.push(ValidationIssue {
+                path: "sourceSubreddit".into(),
+                code: "invalid_subreddit".into(),
+                message: "Use a subreddit name such as vozen or r/vozen; URLs are not accepted."
+                    .into(),
+                severity: "error".into(),
+            });
+        }
+        if target.is_empty() || target.parse::<u64>().is_err() {
+            issues.push(ValidationIssue {
+                path: "targetChannelId".into(),
+                code: "invalid_discord_id".into(),
+                message: "Choose a real Discord channel for alerts.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(value) = object
+            .get("intervalSeconds")
+            .and_then(serde_json::Value::as_i64)
+            && !(300..=86_400).contains(&value)
+        {
+            issues.push(ValidationIssue {
+                path: "intervalSeconds".into(),
+                code: "out_of_range".into(),
+                message: "Polling interval must be between 300 and 86400 seconds.".into(),
+                severity: "error".into(),
+            });
+        }
+        if object.get("messageTemplate").is_some_and(|value| {
+            value
+                .as_str()
+                .is_none_or(|text| text.trim().is_empty() || text.chars().count() > 1_800)
+        }) {
+            issues.push(ValidationIssue {
+                path: "messageTemplate".into(),
+                code: "invalid_template".into(),
+                message: "Alert messages must be non-empty and at most 1800 characters.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let mut projection = Vec::new();
+        for (field, key) in [
+            ("sourceSubreddit", "social.reddit.subreddit"),
+            ("targetChannelId", "social.reddit.target_channel_id"),
+            ("messageTemplate", "social.reddit.message_template"),
+            ("mention", "social.reddit.mention"),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
+                projection.push((key.into(), value.into()));
+            }
+        }
+        if let Some(value) = object
+            .get("intervalSeconds")
+            .and_then(serde_json::Value::as_i64)
+        {
+            projection.push(("social.reddit.interval_seconds".into(), value.to_string()));
+        }
+        projection
+    }
+}
+
+/// Contract for integrations whose runtime is deliberately gated by an
+/// external provider account, app review, commercial agreement or operator
+/// secret.  Keeping these adapters in the registry means the panel can show
+/// a real schema, validation and exact dependency checklist instead of a
+/// misleading empty form.  The maturity remains `Blocked` until the
+/// provider-specific gate is satisfied.
+#[derive(Debug, Clone, Copy)]
+pub struct ExternalProviderAdapter {
+    pub key: &'static str,
+    pub source: &'static str,
+    pub schema: &'static str,
+    pub defaults: &'static str,
+    pub dependencies: &'static [&'static str],
+}
+
+fn is_eth_address(value: &str) -> bool {
+    let body = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"));
+    body.is_some_and(|text| text.len() == 40 && text.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+impl FeatureAdapter for ExternalProviderAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: self.key.into(),
+            source: self.source.into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::from_str(self.schema).expect("external schema is valid JSON"),
+            defaults: serde_json::from_str(self.defaults)
+                .expect("external defaults are valid JSON"),
+            dependencies: self
+                .dependencies
+                .iter()
+                .map(|value| (*value).into())
+                .collect(),
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "The integration configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        if let Some(value) = object.get("targetChannelId")
+            && !value
+                .as_str()
+                .is_some_and(|text| text.trim().is_empty() || text.trim().parse::<u64>().is_ok())
+        {
+            issues.push(ValidationIssue {
+                path: "targetChannelId".into(),
+                code: "invalid_discord_id".into(),
+                message: "Choose a real Discord channel.".into(),
+                severity: "error".into(),
+            });
+        }
+        for field in ["sourceHandle", "username", "account", "collectionSlug"] {
+            if let Some(value) = object.get(field)
+                && let Some(text) = value.as_str()
+                && !text.trim().is_empty()
+                && (!(2..=100).contains(&text.trim().chars().count())
+                    || text
+                        .trim()
+                        .chars()
+                        .any(|character| character.is_control() || character.is_whitespace()))
+            {
+                issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "invalid_source_identifier".into(),
+                    message: "Use the provider's identifier, not a URL or arbitrary text.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if let Some(value) = object.get("intervalSeconds")
+            && (!value.is_i64()
+                || !value
+                    .as_i64()
+                    .is_some_and(|seconds| (300..=86_400).contains(&seconds)))
+        {
+            issues.push(ValidationIssue {
+                path: "intervalSeconds".into(),
+                code: "out_of_range".into(),
+                message: "Polling intervals must be between 300 and 86400 seconds.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(value) = object.get("messageTemplate")
+            && !value
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty() && text.chars().count() <= 1_800)
+        {
+            issues.push(ValidationIssue {
+                path: "messageTemplate".into(),
+                code: "invalid_template".into(),
+                message: "Alert messages must be at most 1800 characters.".into(),
+                severity: "error".into(),
+            });
+        }
+        if self.key == "growth.monetization" {
+            if let Some(value) = object.get("productName")
+                && (!value.is_string()
+                    || value
+                        .as_str()
+                        .is_some_and(|name| name.trim().is_empty() || name.chars().count() > 80))
+            {
+                issues.push(ValidationIssue {
+                    path: "productName".into(),
+                    code: "invalid_product_name".into(),
+                    message: "Product name must contain 1 to 80 characters.".into(),
+                    severity: "error".into(),
+                });
+            }
+            if let Some(value) = object.get("priceCents")
+                && (!value.is_i64()
+                    || !value
+                        .as_i64()
+                        .is_some_and(|cents| (0..=10_000_000).contains(&cents)))
+            {
+                issues.push(ValidationIssue {
+                    path: "priceCents".into(),
+                    code: "invalid_price".into(),
+                    message: "Prices must be integer cents between 0 and 10000000.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if self.key == "web3.gating"
+            && let Some(value) = object.get("chain")
+            && !value
+                .as_str()
+                .is_some_and(|chain| matches!(chain, "ethereum" | "polygon" | "arbitrum" | "base"))
+        {
+            issues.push(ValidationIssue {
+                path: "chain".into(),
+                code: "unsupported_chain".into(),
+                message: "Choose one of the supported read-only chains.".into(),
+                severity: "error".into(),
+            });
+        }
+        if self.key == "web3.gating" {
+            if let Some(value) = object.get("contractAddress")
+                && let Some(address) = value.as_str()
+                && !address.trim().is_empty()
+                && !is_eth_address(address.trim())
+            {
+                issues.push(ValidationIssue {
+                    path: "contractAddress".into(),
+                    code: "invalid_contract_address".into(),
+                    message: "Use a 0x-prefixed Ethereum contract address.".into(),
+                    severity: "error".into(),
+                });
+            }
+            if let Some(value) = object.get("targetRoleId")
+                && let Some(role) = value.as_str()
+                && !role.trim().is_empty()
+                && role.parse::<u64>().is_err()
+            {
+                issues.push(ValidationIssue {
+                    path: "targetRoleId".into(),
+                    code: "invalid_discord_id".into(),
+                    message: "Choose a real Discord role.".into(),
+                    severity: "error".into(),
+                });
+            }
+            let asset_type = object
+                .get("assetType")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("erc721");
+            if !matches!(asset_type, "erc20" | "erc721" | "erc1155") {
+                issues.push(ValidationIssue {
+                    path: "assetType".into(),
+                    code: "invalid_asset_type".into(),
+                    message: "Choose ERC-20, ERC-721 or ERC-1155.".into(),
+                    severity: "error".into(),
+                });
+            }
+            let minimum = object
+                .get("minimumBalance")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if minimum.is_empty()
+                || minimum.len() > 39
+                || !minimum.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                issues.push(ValidationIssue {
+                    path: "minimumBalance".into(),
+                    code: "invalid_uint".into(),
+                    message: "Minimum balance must be a non-negative decimal integer.".into(),
+                    severity: "error".into(),
+                });
+            }
+            if asset_type == "erc1155" {
+                let token_id = object
+                    .get("tokenId")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                if token_id.is_empty() || token_id.len() > 78 {
+                    issues.push(ValidationIssue {
+                        path: "tokenId".into(),
+                        code: "token_id_required".into(),
+                        message: "ERC-1155 gating requires a bounded token ID.".into(),
+                        severity: "error".into(),
+                    });
+                }
+            }
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let prefix = self.key.replace('.', "_");
+        let mut projection = Vec::new();
+        for (field, suffix) in [
+            ("productName", "product_name"),
+            ("sourceHandle", "source_handle"),
+            ("username", "username"),
+            ("account", "account"),
+            ("collectionSlug", "collection_slug"),
+            ("targetChannelId", "target_channel_id"),
+            ("targetRoleId", "target_role_id"),
+            ("messageTemplate", "message_template"),
+            ("mention", "mention"),
+            ("chain", "chain"),
+            ("contractAddress", "contract_address"),
+            ("minimumBalance", "minimum_balance"),
+            ("assetType", "asset_type"),
+            ("tokenId", "token_id"),
+            ("currency", "currency"),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
+                projection.push((format!("{prefix}.{suffix}"), value.into()));
+            }
+        }
+        for (field, suffix) in [
+            ("intervalSeconds", "interval_seconds"),
+            ("priceCents", "price_cents"),
+            ("trialDays", "trial_days"),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_i64) {
+                projection.push((format!("{prefix}.{suffix}"), value.to_string()));
+            }
+        }
+        projection
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct CryptoAdapter {
     pub key: &'static str,
@@ -1711,6 +2667,282 @@ impl FeatureAdapter for CryptoAdapter {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct GasAdapter;
+
+impl FeatureAdapter for GasAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        FeatureAdapterDescriptor {
+            key: "web3.gas_tracker".into(),
+            source: "operator_rpc_gas_v1".into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({
+                "version": FEATURE_SCHEMA_VERSION,
+                "source": "operator_rpc_gas_v1",
+                "sections": [{
+                    "title": "Gas tracker",
+                    "description": "Publish read-only gas prices from an operator-approved RPC endpoint.",
+                    "fields": [
+                        {"key":"network","label":"Network","kind":"select","options":["ethereum","polygon","arbitrum","base"]},
+                        {"key":"targetChannelId","label":"Discord channel","kind":"channel"},
+                        {"key":"intervalSeconds","label":"Update interval (seconds)","kind":"number","min":300,"max":86400},
+                        {"key":"messageTemplate","label":"Statistics message","kind":"textarea","advanced":true}
+                    ]
+                }]
+            }),
+            defaults: serde_json::json!({
+                "network": "ethereum",
+                "targetChannelId": "",
+                "intervalSeconds": 900,
+                "messageTemplate": "{network} gas: {gasPriceGwei} Gwei (block {blockNumber})"
+            }),
+            dependencies: vec!["Operator-approved HTTPS RPC".into(), "Send Messages".into()],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "Gas tracker configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        let network = object
+            .get("network")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        if !matches!(
+            network.as_str(),
+            "ethereum" | "polygon" | "arbitrum" | "base"
+        ) {
+            issues.push(ValidationIssue {
+                path: "network".into(),
+                code: "unsupported_network".into(),
+                message: "Choose ethereum, polygon, arbitrum or base.".into(),
+                severity: "error".into(),
+            });
+        }
+        validate_channel_and_schedule(object, &mut issues, "gas");
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        project_gas(config)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NftAdapter {
+    pub key: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub sales: bool,
+    pub alerts: bool,
+}
+
+impl FeatureAdapter for NftAdapter {
+    fn descriptor(&self) -> FeatureAdapterDescriptor {
+        let mut fields = vec![
+            serde_json::json!({"key":"collectionSlug","label":"OpenSea collection slug","kind":"text"}),
+        ];
+        if self.sales && !self.alerts {
+            // Collection queries return one bounded collection document; a
+            // result-count control would be decorative and is intentionally
+            // not exposed. Sales alerts use maxResults below because they
+            // fetch an event list.
+        } else {
+            fields.extend([
+                serde_json::json!({"key":"targetChannelId","label":"Discord channel","kind":"channel"}),
+                serde_json::json!({"key":"intervalSeconds","label":"Update interval (seconds)","kind":"number","min":300,"max":86400}),
+                serde_json::json!({"key":"messageTemplate","label":"Statistics message","kind":"textarea","advanced":true}),
+            ]);
+            if self.sales {
+                fields.push(serde_json::json!({"key":"maxResults","label":"Maximum events","kind":"number","min":1,"max":10,"advanced":true}));
+            }
+        }
+        FeatureAdapterDescriptor {
+            key: self.key.into(),
+            source: "opensea_read_only_v1".into(),
+            schema_version: FEATURE_SCHEMA_VERSION,
+            schema: serde_json::json!({"version":FEATURE_SCHEMA_VERSION,"source":"opensea_read_only_v1","sections":[{"title":self.title,"description":self.description,"fields":fields}]}),
+            defaults: if self.sales && !self.alerts {
+                serde_json::json!({"collectionSlug":""})
+            } else {
+                serde_json::json!({"collectionSlug":"","targetChannelId":"","intervalSeconds":900,"messageTemplate":"OpenSea update: {collection}","maxResults":5})
+            },
+            dependencies: vec![
+                "OpenSea API key".into(),
+                if self.sales {
+                    "Use Application Commands".into()
+                } else {
+                    "Send Messages".into()
+                },
+            ],
+        }
+    }
+
+    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
+        let Some(object) = config.as_object() else {
+            return vec![ValidationIssue {
+                path: "config".into(),
+                code: "object_required".into(),
+                message: "NFT configuration must be an object.".into(),
+                severity: "error".into(),
+            }];
+        };
+        let mut issues = Vec::new();
+        let slug = object
+            .get("collectionSlug")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if slug.is_empty()
+            || slug.len() > 128
+            || !slug
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            || slug.starts_with('-')
+            || slug.ends_with('-')
+        {
+            issues.push(ValidationIssue {
+                path: "collectionSlug".into(),
+                code: "invalid_collection_slug".into(),
+                message: "Use the OpenSea collection slug, not a URL.".into(),
+                severity: "error".into(),
+            });
+        }
+        if self.sales
+            && let Some(max) = object.get("maxResults").and_then(serde_json::Value::as_i64)
+            && !(1..=10).contains(&max)
+        {
+            issues.push(ValidationIssue {
+                path: "maxResults".into(),
+                code: "out_of_range".into(),
+                message: "Maximum events must be between 1 and 10.".into(),
+                severity: "error".into(),
+            });
+        }
+        if !self.sales || self.alerts {
+            validate_channel_and_schedule(object, &mut issues, "NFT");
+        }
+        issues
+    }
+
+    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
+        let Some(object) = config.as_object() else {
+            return Vec::new();
+        };
+        let prefix = self.key.replace('.', "_");
+        let mut projection = Vec::new();
+        if let Some(value) = object
+            .get("collectionSlug")
+            .and_then(serde_json::Value::as_str)
+        {
+            projection.push((
+                format!("{prefix}.collection_slug"),
+                value.trim().to_ascii_lowercase(),
+            ));
+        }
+        if let Some(value) = object.get("maxResults").and_then(serde_json::Value::as_i64) {
+            projection.push((format!("{prefix}.max_results"), value.to_string()));
+        }
+        if let Some(value) = object
+            .get("targetChannelId")
+            .and_then(serde_json::Value::as_str)
+        {
+            projection.push((format!("{prefix}.target_channel_id"), value.to_string()));
+        }
+        if let Some(value) = object
+            .get("intervalSeconds")
+            .and_then(serde_json::Value::as_i64)
+        {
+            projection.push((format!("{prefix}.interval_seconds"), value.to_string()));
+        }
+        if let Some(value) = object
+            .get("messageTemplate")
+            .and_then(serde_json::Value::as_str)
+        {
+            projection.push((format!("{prefix}.message_template"), value.to_string()));
+        }
+        projection
+    }
+}
+
+fn validate_channel_and_schedule(
+    object: &serde_json::Map<String, serde_json::Value>,
+    issues: &mut Vec<ValidationIssue>,
+    label: &str,
+) {
+    let target = object
+        .get("targetChannelId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if target.is_empty() || target.parse::<u64>().is_err() {
+        issues.push(ValidationIssue {
+            path: "targetChannelId".into(),
+            code: "invalid_discord_id".into(),
+            message: format!("Choose a real Discord channel for {label} updates."),
+            severity: "error".into(),
+        });
+    }
+    if let Some(interval) = object
+        .get("intervalSeconds")
+        .and_then(serde_json::Value::as_i64)
+        && !(300..=86_400).contains(&interval)
+    {
+        issues.push(ValidationIssue {
+            path: "intervalSeconds".into(),
+            code: "out_of_range".into(),
+            message: "Update interval must be between 300 and 86400 seconds.".into(),
+            severity: "error".into(),
+        });
+    }
+    if object.get("messageTemplate").is_some_and(|value| {
+        value
+            .as_str()
+            .is_none_or(|template| template.trim().is_empty() || template.chars().count() > 1_800)
+    }) {
+        issues.push(ValidationIssue {
+            path: "messageTemplate".into(),
+            code: "invalid_template".into(),
+            message: "Messages must be non-empty and at most 1800 characters.".into(),
+            severity: "error".into(),
+        });
+    }
+}
+
+fn project_gas(config: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(object) = config.as_object() else {
+        return Vec::new();
+    };
+    let mut pairs = Vec::new();
+    for (field, key) in [
+        ("network", "web3.gas_tracker.network"),
+        ("targetChannelId", "web3.gas_tracker.target_channel_id"),
+        ("messageTemplate", "web3.gas_tracker.message_template"),
+    ] {
+        if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
+            pairs.push((key.into(), value.to_string()));
+        }
+    }
+    if let Some(value) = object
+        .get("intervalSeconds")
+        .and_then(serde_json::Value::as_i64)
+    {
+        pairs.push((
+            "web3.gas_tracker.interval_seconds".into(),
+            value.to_string(),
+        ));
+    }
+    pairs
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TicketsAdapter;
 
@@ -1841,11 +3073,12 @@ impl FeatureAdapter for WelcomeAdapter {
                         {"key":"dmMessage","label":"Direct message","kind":"textarea","maxLength":2000,"advanced":true},
                         {"key":"autoRole","label":"Automatic role","kind":"role","advanced":true},
                         {"key":"farewellChannel","label":"Farewell channel","kind":"channel","advanced":true},
-                        {"key":"farewellMessage","label":"Farewell message","kind":"textarea","maxLength":2000,"advanced":true}
+                        {"key":"farewellMessage","label":"Farewell message","kind":"textarea","maxLength":2000,"advanced":true},
+                        {"key":"templateId","label":"Reusable message template","kind":"select","options":[["","No template"]],"help":"Optional: choose a template created in Models and importação.","advanced":true}
                     ]
                 }]
             }),
-            defaults: serde_json::json!({"channel":"","message":"Welcome {member} to {server}!","delaySeconds":0,"sendDm":false,"dmMessage":"Hello {member}, welcome to {server}!","autoRole":"","farewellChannel":"","farewellMessage":"Goodbye {member}. We hope to see you again!"}),
+            defaults: serde_json::json!({"channel":"","message":"Welcome {member} to {server}!","delaySeconds":0,"sendDm":false,"dmMessage":"Hello {member}, welcome to {server}!","autoRole":"","farewellChannel":"","farewellMessage":"Goodbye {member}. We hope to see you again!","templateId":""}),
             dependencies: vec!["guild_members_intent".into(), "send_messages".into()],
         }
     }
@@ -1882,6 +3115,22 @@ impl FeatureAdapter for WelcomeAdapter {
             }) {
                 issues.push(ValidationIssue { path: field.into(), code: "invalid_message".into(), message: "Messages must be at most 2000 characters and contain no control characters.".into(), severity: "error".into() });
             }
+        }
+        if object.get("templateId").is_some_and(|value| {
+            !value.as_str().is_some_and(|raw| {
+                raw.is_empty()
+                    || ((1..=64).contains(&raw.len())
+                        && raw.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+                        }))
+            })
+        }) {
+            issues.push(ValidationIssue {
+                path: "templateId".into(),
+                code: "invalid_template_id".into(),
+                message: "Choose a template from this guild.".into(),
+                severity: "error".into(),
+            });
         }
         if object
             .get("sendDm")
@@ -1920,6 +3169,7 @@ impl FeatureAdapter for WelcomeAdapter {
             ("autoRole", "support.welcome.auto_role"),
             ("farewellChannel", "support.welcome.farewell_channel_id"),
             ("farewellMessage", "support.welcome.farewell_message"),
+            ("templateId", "support.welcome.template_id"),
         ] {
             if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
                 pairs.push((key.into(), value.into()));
@@ -2501,14 +3751,17 @@ impl FeatureAdapter for StatsAdapter {
                 "source": Self::SOURCE,
                 "sections": [{
                     "title": "Server statistics",
-                    "description": "Control the period and visibility of /serverstats.",
+                    "description": "Control the period, visibility and optional live counter channel for server statistics.",
                     "fields": [
                         {"key":"windowDays","label":"Reporting window (days)","kind":"number","min":1,"max":30,"help":"Number of recent daily snapshots included."},
-                        {"key":"public","label":"Show publicly","kind":"toggle","help":"When disabled, only the requesting member sees the summary."}
+                        {"key":"public","label":"Show publicly","kind":"toggle","help":"When disabled, only the requesting member sees the summary."},
+                        {"key":"channelId","label":"Live counter channel (optional)","kind":"channel","help":"Rename one existing voice or text channel with the latest message count."},
+                        {"key":"intervalMinutes","label":"Counter refresh (minutes)","kind":"number","min":5,"max":1440,"advanced":true},
+                        {"key":"nameTemplate","label":"Channel name template","kind":"text","max":100,"help":"Use {messages}, {joins}, {leaves} and {days}."}
                     ]
                 }]
             }),
-            defaults: serde_json::json!({"windowDays": 7, "public": false}),
+            defaults: serde_json::json!({"windowDays": 7, "public": false, "channelId": "", "intervalMinutes": 15, "nameTemplate": "messages-{messages}"}),
             dependencies: vec!["message_events".into(), "scheduler".into()],
         }
     }
@@ -2553,6 +3806,44 @@ impl FeatureAdapter for StatsAdapter {
                 severity: "error".into(),
             });
         }
+        if let Some(value) = object.get("channelId")
+            && (!value.is_string()
+                || value
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty() && value.parse::<u64>().is_err()))
+        {
+            issues.push(ValidationIssue {
+                path: "channelId".into(),
+                code: "channel_id_required".into(),
+                message: "Live counter channel must be a Discord channel ID or empty.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(value) = object.get("intervalMinutes")
+            && !value
+                .as_i64()
+                .is_some_and(|value| (5..=1_440).contains(&value))
+        {
+            issues.push(ValidationIssue {
+                path: "intervalMinutes".into(),
+                code: "out_of_range".into(),
+                message: "Counter refresh must be between 5 and 1440 minutes.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(value) = object.get("nameTemplate")
+            && (!value.is_string()
+                || value.as_str().is_some_and(|value| {
+                    value.trim().is_empty() || value.chars().count() > 100 || !value.contains('{')
+                }))
+        {
+            issues.push(ValidationIssue {
+                path: "nameTemplate".into(),
+                code: "invalid_template".into(),
+                message: "Channel name template must be non-empty, at most 100 characters and contain a placeholder.".into(),
+                severity: "error".into(),
+            });
+        }
         issues
     }
 
@@ -2566,6 +3857,24 @@ impl FeatureAdapter for StatsAdapter {
         }
         if let Some(value) = object.get("public").and_then(serde_json::Value::as_bool) {
             projection.push(("insights.stats.public".into(), value.to_string()));
+        }
+        if let Some(value) = object.get("channelId").and_then(serde_json::Value::as_str) {
+            projection.push(("insights.stats.channel_id".into(), value.to_string()));
+        }
+        if let Some(value) = object
+            .get("intervalMinutes")
+            .and_then(serde_json::Value::as_i64)
+        {
+            projection.push((
+                "insights.stats.interval_minutes".into(),
+                value.clamp(5, 1_440).to_string(),
+            ));
+        }
+        if let Some(value) = object
+            .get("nameTemplate")
+            .and_then(serde_json::Value::as_str)
+        {
+            projection.push(("insights.stats.name_template".into(), value.to_string()));
         }
         projection
     }
@@ -2920,13 +4229,23 @@ impl FeatureAdapter for WelcomeChannelAdapter {
                     "description": "Post the first steps and server rules when a new member arrives.",
                     "fields": [
                         {"key":"channelId","label":"Welcome channel","kind":"channel"},
-                        {"key":"message","label":"Guide message","kind":"textarea","min":1,"max":2000,"help":"Use {member} and {server} as placeholders."}
+                        {"key":"message","label":"Guide message","kind":"textarea","min":1,"max":2000,"help":"Use {member} and {server} as placeholders."},
+                        {"key":"steps","label":"Guided steps","kind":"tags","max":4,"help":"Choose from rules, introductions, channels and help."},
+                        {"key":"rulesChannel","label":"Rules channel (optional)","kind":"channel","advanced":true},
+                        {"key":"introductionsChannel","label":"Introductions channel (optional)","kind":"channel","advanced":true},
+                        {"key":"channelsChannel","label":"Channels guide (optional)","kind":"channel","advanced":true},
+                        {"key":"templateId","label":"Reusable guide template","kind":"select","options":[["","No template"]],"help":"Optional: choose a template created in Models and importação.","advanced":true}
                     ]
                 }]
             }),
             defaults: serde_json::json!({
                 "channelId": "",
-                "message": "Welcome {member}! Start with the rules, introduce yourself and check the server channels."
+                "message": "Welcome {member}! Start with the rules, introduce yourself and check the server channels.",
+                "steps": ["rules", "introductions", "channels"],
+                "rulesChannel": "",
+                "introductionsChannel": "",
+                "channelsChannel": "",
+                "templateId": ""
             }),
             dependencies: vec!["send_messages".into(), "view_channel".into()],
         }
@@ -2954,6 +4273,22 @@ impl FeatureAdapter for WelcomeChannelAdapter {
                 severity: "error".into(),
             });
         }
+        if object.get("templateId").is_some_and(|value| {
+            !value.as_str().is_some_and(|raw| {
+                raw.is_empty()
+                    || ((1..=64).contains(&raw.len())
+                        && raw.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+                        }))
+            })
+        }) {
+            issues.push(ValidationIssue {
+                path: "templateId".into(),
+                code: "invalid_template_id".into(),
+                message: "Choose a template from this guild.".into(),
+                severity: "error".into(),
+            });
+        }
         if !object
             .get("message")
             .and_then(serde_json::Value::as_str)
@@ -2965,6 +4300,44 @@ impl FeatureAdapter for WelcomeChannelAdapter {
                 message: "The guide message must contain 1-2000 characters.".into(),
                 severity: "error".into(),
             });
+        }
+        if let Some(value) = object.get("steps") {
+            let valid = value.as_array().is_some_and(|steps| {
+                (1..=4).contains(&steps.len())
+                    && steps.iter().all(|step| {
+                        step.as_str().is_some_and(|step| {
+                            matches!(step, "rules" | "introductions" | "channels" | "help")
+                        })
+                    })
+                    && steps
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<std::collections::HashSet<_>>()
+                        .len()
+                        == steps.len()
+            });
+            if !valid {
+                issues.push(ValidationIssue {
+                    path: "steps".into(),
+                    code: "invalid_steps".into(),
+                    message: "Choose one to four unique steps from rules, introductions, channels and help.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        for field in ["rulesChannel", "introductionsChannel", "channelsChannel"] {
+            if object.get(field).is_some_and(|value| {
+                !value
+                    .as_str()
+                    .is_some_and(|raw| raw.is_empty() || raw.parse::<u64>().is_ok())
+            }) {
+                issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "invalid_channel_id".into(),
+                    message: "Choose a valid Discord channel or leave it empty.".into(),
+                    severity: "error".into(),
+                });
+            }
         }
         issues
     }
@@ -2979,6 +4352,34 @@ impl FeatureAdapter for WelcomeChannelAdapter {
         }
         if let Some(value) = object.get("message").and_then(serde_json::Value::as_str) {
             pairs.push(("support.welcome_channel.message".into(), value.into()));
+        }
+        if let Some(values) = object.get("steps").and_then(serde_json::Value::as_array) {
+            pairs.push((
+                "support.welcome_channel.steps".into(),
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ));
+        }
+        for (field, setting) in [
+            ("rulesChannel", "support.welcome_channel.rules_channel"),
+            (
+                "introductionsChannel",
+                "support.welcome_channel.introductions_channel",
+            ),
+            (
+                "channelsChannel",
+                "support.welcome_channel.channels_channel",
+            ),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
+                pairs.push((setting.into(), value.into()));
+            }
+        }
+        if let Some(value) = object.get("templateId").and_then(serde_json::Value::as_str) {
+            pairs.push(("support.welcome_channel.template_id".into(), value.into()));
         }
         pairs
     }
@@ -3302,7 +4703,8 @@ impl FeatureAdapter for StarboardAdapter {
                         {"key":"emoji","label":"Reaction emoji","kind":"text","min":1,"max":32},
                         {"key":"allowSelfStar","label":"Allow authors to star their own message","kind":"toggle","advanced":true},
                         {"key":"includeImages","label":"Include image attachments","kind":"toggle","advanced":true},
-                        {"key":"ignoredChannels","label":"Ignored channels","kind":"channels","max":100,"advanced":true}
+                        {"key":"ignoredChannels","label":"Ignored channels","kind":"channels","max":100,"advanced":true},
+                        {"key":"ignoredRoles","label":"Ignored member roles","kind":"roles","max":100,"advanced":true}
                     ]
                 }]
             }),
@@ -3312,7 +4714,8 @@ impl FeatureAdapter for StarboardAdapter {
                 "emoji": "⭐",
                 "allowSelfStar": false,
                 "includeImages": true,
-                "ignoredChannels": []
+                "ignoredChannels": [],
+                "ignoredRoles": []
             }),
             dependencies: vec![
                 "read_message_history".into(),
@@ -3354,6 +4757,26 @@ impl FeatureAdapter for StarboardAdapter {
                 severity: "error".into(),
             });
         }
+        for field in ["ignoredChannels", "ignoredRoles"] {
+            if let Some(value) = object.get(field) {
+                let valid = value.as_array().is_some_and(|items| {
+                    items.len() <= 100
+                        && items.iter().all(|item| {
+                            item.as_str().is_some_and(|text| {
+                                !text.trim().is_empty() && text.parse::<u64>().is_ok()
+                            })
+                        })
+                });
+                if !valid {
+                    issues.push(ValidationIssue {
+                        path: field.into(),
+                        code: "invalid_discord_ids".into(),
+                        message: "Choose up to 100 valid Discord IDs.".into(),
+                        severity: "error".into(),
+                    });
+                }
+            }
+        }
         issues
     }
 
@@ -3394,7 +4817,154 @@ impl FeatureAdapter for StarboardAdapter {
                     .join(","),
             ));
         }
+        if let Some(values) = object
+            .get("ignoredRoles")
+            .and_then(serde_json::Value::as_array)
+        {
+            pairs.push((
+                "community.starboard.ignored_roles".into(),
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ));
+        }
         pairs
+    }
+}
+
+/// Runtime policy for the starboard.  Both the Discord event handler and the
+/// API simulator consume this type so a preview cannot disagree with the
+/// reaction reconciliation performed by the bot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StarboardPolicy {
+    pub threshold: u64,
+    pub allow_self_star: bool,
+    pub include_images: bool,
+    pub ignored_channels: Vec<String>,
+    pub ignored_roles: Vec<String>,
+}
+
+impl Default for StarboardPolicy {
+    fn default() -> Self {
+        Self {
+            threshold: 3,
+            allow_self_star: false,
+            include_images: true,
+            ignored_channels: Vec::new(),
+            ignored_roles: Vec::new(),
+        }
+    }
+}
+
+pub fn starboard_policy_from_json(config: &serde_json::Value) -> StarboardPolicy {
+    let object = config.as_object();
+    let ids = |field: &str| {
+        object
+            .and_then(|values| values.get(field))
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    StarboardPolicy {
+        threshold: object
+            .and_then(|values| values.get("threshold"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(3)
+            .clamp(1, 100),
+        allow_self_star: object
+            .and_then(|values| values.get("allowSelfStar"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        include_images: object
+            .and_then(|values| values.get("includeImages"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+        ignored_channels: ids("ignoredChannels"),
+        ignored_roles: ids("ignoredRoles"),
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StarboardObservation {
+    pub source_channel_id: String,
+    pub author_id: String,
+    pub reactor_ids: Vec<String>,
+    pub author_role_ids: Vec<String>,
+    pub has_attachments: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StarboardDecision {
+    pub ignored: bool,
+    pub should_publish: bool,
+    pub count: u64,
+    pub threshold: u64,
+    pub reason: String,
+}
+
+pub fn evaluate_starboard(
+    policy: &StarboardPolicy,
+    observation: &StarboardObservation,
+) -> StarboardDecision {
+    let ignored_channel = policy
+        .ignored_channels
+        .iter()
+        .any(|value| value == &observation.source_channel_id);
+    let ignored_role = policy.ignored_roles.iter().any(|ignored| {
+        observation
+            .author_role_ids
+            .iter()
+            .any(|role| role == ignored)
+    });
+    if ignored_channel || ignored_role {
+        return StarboardDecision {
+            ignored: true,
+            should_publish: false,
+            count: 0,
+            threshold: policy.threshold,
+            reason: if ignored_channel {
+                "The source channel is ignored by the starboard policy.".into()
+            } else {
+                "The message author has an ignored role.".into()
+            },
+        };
+    }
+    if observation.has_attachments && !policy.include_images {
+        return StarboardDecision {
+            ignored: true,
+            should_publish: false,
+            count: 0,
+            threshold: policy.threshold,
+            reason: "Image attachments are disabled by the starboard policy.".into(),
+        };
+    }
+    let mut reactors = HashSet::new();
+    for reactor_id in &observation.reactor_ids {
+        if policy.allow_self_star || reactor_id != &observation.author_id {
+            reactors.insert(reactor_id);
+        }
+    }
+    let count = reactors.len() as u64;
+    StarboardDecision {
+        ignored: false,
+        should_publish: count >= policy.threshold,
+        count,
+        threshold: policy.threshold,
+        reason: if count >= policy.threshold {
+            "The message reached the configured star threshold.".into()
+        } else {
+            "The message is below the configured star threshold.".into()
+        },
     }
 }
 
@@ -4229,23 +5799,20 @@ static SEARCH_ADAPTER: SearchAdapter = SearchAdapter;
 
 static TEMP_CHANNELS_ADAPTER: TempChannelsAdapter = TempChannelsAdapter;
 
-static YOUTUBE_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+static YOUTUBE_ADAPTER: AlertSubscriptionAdapter = AlertSubscriptionAdapter {
     key: "social.youtube",
     source: "youtube_data_api_v3_adapter_v1",
     title: "YouTube alerts",
     description: "Polls the official YouTube Data API and delivers deduplicated new-video alerts.",
+    source_key: "sourceChannelId",
+    source_label: "YouTube channel ID",
+    source_help: "Use the channel ID, not a watch URL.",
+    default_template: "New video from {channel}: **{title}**\\n{url}",
     dependencies: &["YOUTUBE_API_KEY", "send_messages", "embed_links"],
 };
-// XP card uses a dedicated endpoint and renderer instead of the generic
-// feature-settings publisher. Registering it here keeps catalogue health
-// truthful while the specialised editor owns its colours and backgrounds.
-static RANK_CARD_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
-    key: "studio.rank_card",
-    source: "rank_card_adapter_v1",
-    title: "XP card",
-    description: "Render the curated XP card configuration for Discord.",
-    dependencies: &["attach_files"],
-};
+// XP card uses a dedicated endpoint and renderer, while its schema and
+// projection remain owned by the same registry as every other feature.
+static RANK_CARD_ADAPTER: RankCardAdapter = RankCardAdapter;
 static RSS_ADAPTER: FeedAdapter = FeedAdapter {
     key: "social.rss",
     source: "rss_atom_adapter_v1",
@@ -4260,11 +5827,15 @@ static PODCASTS_ADAPTER: FeedAdapter = FeedAdapter {
     description: "Polls a public podcast RSS or Atom feed with the same SSRF protection and deduplication as RSS alerts.",
     dependencies: &["outbound_https", "send_messages"],
 };
-static TWITCH_ADAPTER: ToggleOnlyAdapter = ToggleOnlyAdapter {
+static TWITCH_ADAPTER: AlertSubscriptionAdapter = AlertSubscriptionAdapter {
     key: "social.twitch",
     source: "twitch_eventsub_adapter_v1",
     title: "Twitch alerts",
     description: "Uses the official Helix/EventSub API with signed webhook verification and deduplication.",
+    source_key: "sourceLogin",
+    source_label: "Twitch channel login",
+    source_help: "Use the channel login, without a URL or @ prefix.",
+    default_template: "{handle} is live: **{title}**\\n{url}",
     dependencies: &[
         "TWITCH_CLIENT_ID",
         "TWITCH_CLIENT_SECRET",
@@ -4349,8 +5920,8 @@ impl FeatureAdapter for EconomyAdapter {
             key: Self::KEY.into(),
             source: Self::SOURCE.into(),
             schema_version: FEATURE_SCHEMA_VERSION,
-            schema: serde_json::json!({"version": FEATURE_SCHEMA_VERSION, "source": Self::SOURCE, "sections":[{"title":"Daily reward", "description":"A bounded daily reward backed by an auditable balance ledger.", "fields":[{"key":"dailyReward","label":"Daily reward","kind":"number","min":1,"max":10000}]}]}),
-            defaults: serde_json::json!({"dailyReward": 100}),
+            schema: serde_json::json!({"version": FEATURE_SCHEMA_VERSION, "source": Self::SOURCE, "sections":[{"title":"Rewards", "description":"Bounded community rewards backed by an auditable balance ledger.", "fields":[{"key":"currencyName","label":"Currency name","kind":"text","maxLength":24},{"key":"dailyReward","label":"Daily reward","kind":"number","min":1,"max":10000},{"key":"workReward","label":"Work reward","kind":"number","min":1,"max":10000},{"key":"workCooldownMinutes","label":"Work cooldown (minutes)","kind":"number","min":5,"max":1440}]}]}),
+            defaults: serde_json::json!({"currencyName":"credits","dailyReward":100,"workReward":50,"workCooldownMinutes":60}),
             dependencies: vec!["scheduler".into()],
         }
     }
@@ -4363,35 +5934,78 @@ impl FeatureAdapter for EconomyAdapter {
                 severity: "error".into(),
             }];
         };
-        match object.get("dailyReward") {
-            Some(value)
-                if value
-                    .as_i64()
-                    .is_some_and(|value| (1..=10_000).contains(&value)) =>
-            {
-                Vec::new()
+        let mut issues = Vec::new();
+        if let Some(value) = object.get("currencyName") {
+            let valid = value.as_str().is_some_and(|name| {
+                let trimmed = name.trim();
+                !trimmed.is_empty() && trimmed.chars().count() <= 24
+            });
+            if !valid {
+                issues.push(ValidationIssue {
+                    path: "currencyName".into(),
+                    code: "invalid_name".into(),
+                    message: "Currency name must contain 1 to 24 characters.".into(),
+                    severity: "error".into(),
+                });
             }
-            Some(value) if value.as_i64().is_some() => vec![ValidationIssue {
-                path: "dailyReward".into(),
-                code: "out_of_range".into(),
-                message: "Daily reward must be between 1 and 10000.".into(),
-                severity: "error".into(),
-            }],
-            Some(_) => vec![ValidationIssue {
-                path: "dailyReward".into(),
-                code: "integer_required".into(),
-                message: "Daily reward must be an integer.".into(),
-                severity: "error".into(),
-            }],
-            None => Vec::new(),
         }
+        for (path, min, max) in [
+            ("dailyReward", 1_i64, 10_000_i64),
+            ("workReward", 1_i64, 10_000_i64),
+            ("workCooldownMinutes", 5_i64, 1_440_i64),
+        ] {
+            match object.get(path) {
+                Some(value)
+                    if value
+                        .as_i64()
+                        .is_some_and(|number| (min..=max).contains(&number)) => {}
+                Some(value) if value.as_i64().is_some() => issues.push(ValidationIssue {
+                    path: path.into(),
+                    code: "out_of_range".into(),
+                    message: format!("{path} must be between {min} and {max}."),
+                    severity: "error".into(),
+                }),
+                Some(_) => issues.push(ValidationIssue {
+                    path: path.into(),
+                    code: "integer_required".into(),
+                    message: format!("{path} must be an integer."),
+                    severity: "error".into(),
+                }),
+                None => {}
+            }
+        }
+        issues
     }
     fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
-        config
+        let mut projection = Vec::new();
+        if let Some(value) = config
+            .get("currencyName")
+            .and_then(serde_json::Value::as_str)
+        {
+            projection.push((
+                "community.economy.currency_name".into(),
+                value.trim().to_string(),
+            ));
+        }
+        if let Some(value) = config
             .get("dailyReward")
             .and_then(serde_json::Value::as_i64)
-            .map(|value| vec![("community.economy.daily_reward".into(), value.to_string())])
-            .unwrap_or_default()
+        {
+            projection.push(("community.economy.daily_reward".into(), value.to_string()));
+        }
+        if let Some(value) = config.get("workReward").and_then(serde_json::Value::as_i64) {
+            projection.push(("community.economy.work_reward".into(), value.to_string()));
+        }
+        if let Some(value) = config
+            .get("workCooldownMinutes")
+            .and_then(serde_json::Value::as_i64)
+        {
+            projection.push((
+                "community.economy.work_cooldown_ms".into(),
+                (value.saturating_mul(60_000)).to_string(),
+            ));
+        }
+        projection
     }
 }
 
@@ -4512,6 +6126,202 @@ impl FeatureAdapter for SearchAdapter {
 static EMBEDS_ADAPTER: EmbedsAdapter = EmbedsAdapter;
 static ECONOMY_ADAPTER: EconomyAdapter = EconomyAdapter;
 static BLUESKY_ADAPTER: BlueskyAdapter = BlueskyAdapter;
+static REDDIT_ADAPTER: RedditAdapter = RedditAdapter;
+static INSTAGRAM_ADAPTER: ExternalProviderAdapter = ExternalProviderAdapter {
+    key: "social.instagram",
+    source: "meta_instagram_official_v1",
+    schema: r#"{
+        "version": 1,
+        "source": "meta_instagram_official_v1",
+        "sections": [{
+            "title": "Instagram alerts",
+            "description": "Notify a Discord channel about posts from a professional Instagram account authorised through Meta OAuth.",
+            "fields": [
+                {"key":"username","label":"Professional account","kind":"text","help":"The account must explicitly authorise Vozen through Meta OAuth."},
+                {"key":"targetChannelId","label":"Discord channel","kind":"channel"},
+                {"key":"intervalSeconds","label":"Check interval (seconds)","kind":"number","min":300,"max":86400},
+                {"key":"messageTemplate","label":"Alert message","kind":"textarea","advanced":true},
+                {"key":"mention","label":"Optional mention","kind":"text","advanced":true}
+            ]
+        }]
+    }"#,
+    defaults: r#"{
+        "username":"",
+        "targetChannelId":"",
+        "intervalSeconds":900,
+        "messageTemplate":"New Instagram post from @{username}: {url}",
+        "mention":""
+    }"#,
+    dependencies: &[
+        "Meta Instagram API app",
+        "Professional account OAuth grant",
+        "Meta App Review and deletion callbacks",
+        "Send Messages",
+    ],
+};
+static X_ADAPTER: ExternalProviderAdapter = ExternalProviderAdapter {
+    key: "social.x",
+    source: "x_api_official_v1",
+    schema: r#"{
+        "version": 1,
+        "source": "x_api_official_v1",
+        "sections": [{
+            "title": "X alerts",
+            "description": "Notify a Discord channel about posts from an X account through the official API.",
+            "fields": [
+                {"key":"sourceHandle","label":"X handle","kind":"text","help":"Enter the handle without an @ or URL."},
+                {"key":"targetChannelId","label":"Discord channel","kind":"channel"},
+                {"key":"intervalSeconds","label":"Check interval (seconds)","kind":"number","min":300,"max":86400},
+                {"key":"messageTemplate","label":"Alert message","kind":"textarea","advanced":true},
+                {"key":"mention","label":"Optional mention","kind":"text","advanced":true}
+            ]
+        }]
+    }"#,
+    defaults: r#"{
+        "sourceHandle":"",
+        "targetChannelId":"",
+        "intervalSeconds":900,
+        "messageTemplate":"New post from @{sourceHandle}: {url}",
+        "mention":""
+    }"#,
+    dependencies: &[
+        "X developer application",
+        "Official OAuth access",
+        "Approved API budget",
+        "Send Messages",
+    ],
+};
+static TIKTOK_ADAPTER: ExternalProviderAdapter = ExternalProviderAdapter {
+    key: "social.tiktok",
+    source: "tiktok_display_api_v1",
+    schema: r#"{
+        "version": 1,
+        "source": "tiktok_display_api_v1",
+        "sections": [{
+            "title": "TikTok alerts",
+            "description": "Notify a Discord channel about videos from a creator who authorises the Display API scopes.",
+            "fields": [
+                {"key":"username","label":"Creator username","kind":"text","help":"The creator must authorise the Vozen application."},
+                {"key":"targetChannelId","label":"Discord channel","kind":"channel"},
+                {"key":"intervalSeconds","label":"Check interval (seconds)","kind":"number","min":300,"max":86400},
+                {"key":"messageTemplate","label":"Alert message","kind":"textarea","advanced":true},
+                {"key":"mention","label":"Optional mention","kind":"text","advanced":true}
+            ]
+        }]
+    }"#,
+    defaults: r#"{
+        "username":"",
+        "targetChannelId":"",
+        "intervalSeconds":900,
+        "messageTemplate":"New TikTok video from @{username}: {url}",
+        "mention":""
+    }"#,
+    dependencies: &[
+        "TikTok Display API app",
+        "TikTok App Review",
+        "Creator OAuth grant",
+        "Send Messages",
+    ],
+};
+static KICK_ADAPTER: ExternalProviderAdapter = ExternalProviderAdapter {
+    key: "social.kick",
+    source: "kick_official_api_v1",
+    schema: r#"{
+        "version": 1,
+        "source": "kick_official_api_v1",
+        "sections": [{
+            "title": "Kick alerts",
+            "description": "Notify a Discord channel about streams through an approved Kick API application.",
+            "fields": [
+                {"key":"sourceHandle","label":"Kick channel","kind":"text","help":"Enter the channel slug, not a web URL."},
+                {"key":"targetChannelId","label":"Discord channel","kind":"channel"},
+                {"key":"intervalSeconds","label":"Check interval (seconds)","kind":"number","min":300,"max":86400},
+                {"key":"messageTemplate","label":"Alert message","kind":"textarea","advanced":true},
+                {"key":"mention","label":"Optional mention","kind":"text","advanced":true}
+            ]
+        }]
+    }"#,
+    defaults: r#"{
+        "sourceHandle":"",
+        "targetChannelId":"",
+        "intervalSeconds":900,
+        "messageTemplate":"{sourceHandle} is live on Kick: {url}",
+        "mention":""
+    }"#,
+    dependencies: &[
+        "Approved Kick developer application",
+        "Official Kick API/webhook access",
+        "Send Messages",
+    ],
+};
+static MONETIZATION_ADAPTER: ExternalProviderAdapter = ExternalProviderAdapter {
+    key: "growth.monetization",
+    source: "stripe_connect_server_sales_v1",
+    schema: r#"{
+        "version": 1,
+        "source": "stripe_connect_server_sales_v1",
+        "sections": [{
+            "title": "Server monetization",
+            "description": "Offer a server subscription through Stripe Connect. Production requires legal, tax and support approval.",
+            "fields": [
+                {"key":"productName","label":"Product name","kind":"text","max":80},
+                {"key":"targetRoleId","label":"Subscriber role","kind":"role"},
+                {"key":"priceCents","label":"Monthly price (cents)","kind":"number","min":0,"max":10000000},
+                {"key":"currency","label":"Currency","kind":"text","help":"ISO 4217 lowercase code, for example eur."},
+                {"key":"trialDays","label":"Trial days","kind":"number","min":0,"max":30}
+            ]
+        }]
+    }"#,
+    defaults: r#"{
+        "productName":"",
+        "targetRoleId":"",
+        "priceCents":0,
+        "currency":"eur",
+        "trialDays":0
+    }"#,
+    dependencies: &[
+        "Stripe Connect account",
+        "KYC, tax and refund policy",
+        "Signed Stripe webhooks",
+        "Support and chargeback process",
+    ],
+};
+static WALLET_GATING_ADAPTER: ExternalProviderAdapter = ExternalProviderAdapter {
+    key: "web3.gating",
+    source: "siwe_read_only_role_gate_v1",
+    schema: r#"{
+        "version": 1,
+        "source": "siwe_read_only_role_gate_v1",
+        "sections": [{
+            "title": "Wallet gating",
+            "description": "Grant a Discord role after a one-time SIWE signature and read-only contract check.",
+            "fields": [
+                {"key":"chain","label":"Network","kind":"select","options":["ethereum","polygon","arbitrum","base"]},
+                {"key":"contractAddress","label":"Contract address","kind":"text","help":"Only an approved contract is accepted; never enter a private key."},
+                {"key":"assetType","label":"Token standard","kind":"select","options":["erc20","erc721","erc1155"]},
+                {"key":"tokenId","label":"Token ID (ERC-1155)","kind":"text","advanced":true},
+                {"key":"targetRoleId","label":"Holder role","kind":"role"},
+                {"key":"minimumBalance","label":"Minimum balance","kind":"text"},
+                {"key":"intervalSeconds","label":"Recheck interval (seconds)","kind":"number","min":900,"max":86400}
+            ]
+        }]
+    }"#,
+    defaults: r#"{
+        "chain":"ethereum",
+        "contractAddress":"",
+        "assetType":"erc721",
+        "tokenId":"",
+        "targetRoleId":"",
+        "minimumBalance":"1",
+        "intervalSeconds":3600
+    }"#,
+    dependencies: &[
+        "SIWE domain and session secret",
+        "Operator-approved RPC endpoint",
+        "Approved contract allow-list",
+        "Manage Roles",
+    ],
+};
 static CRYPTO_STATS_ADAPTER: CryptoAdapter = CryptoAdapter {
     key: "web3.crypto_stats",
     title: "Crypto statistics",
@@ -4523,6 +6333,28 @@ static CRYPTO_QUERIES_ADAPTER: CryptoAdapter = CryptoAdapter {
     title: "Crypto queries",
     description: "Query read-only CoinGecko prices from an application command.",
     stats: false,
+};
+static GAS_TRACKER_ADAPTER: GasAdapter = GasAdapter;
+static NFT_STATS_ADAPTER: NftAdapter = NftAdapter {
+    key: "web3.nft_stats",
+    title: "NFT collection statistics",
+    description: "Read-only floor, volume and sales statistics from OpenSea.",
+    sales: false,
+    alerts: true,
+};
+static NFT_QUERIES_ADAPTER: NftAdapter = NftAdapter {
+    key: "web3.nft_queries",
+    title: "NFT collection queries",
+    description: "Query one approved OpenSea collection from an application command.",
+    sales: true,
+    alerts: false,
+};
+static NFT_SALES_ADAPTER: NftAdapter = NftAdapter {
+    key: "web3.nft_sales",
+    title: "NFT sales and listings",
+    description: "Read-only recent sales from an approved OpenSea collection.",
+    sales: true,
+    alerts: true,
 };
 
 pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
@@ -4563,11 +6395,22 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         "social.podcasts" => Some(&PODCASTS_ADAPTER as &dyn FeatureAdapter),
         "social.twitch" => Some(&TWITCH_ADAPTER as &dyn FeatureAdapter),
         BlueskyAdapter::KEY => Some(&BLUESKY_ADAPTER as &dyn FeatureAdapter),
+        RedditAdapter::KEY => Some(&REDDIT_ADAPTER as &dyn FeatureAdapter),
+        "social.instagram" => Some(&INSTAGRAM_ADAPTER as &dyn FeatureAdapter),
+        "social.x" => Some(&X_ADAPTER as &dyn FeatureAdapter),
+        "social.tiktok" => Some(&TIKTOK_ADAPTER as &dyn FeatureAdapter),
+        "social.kick" => Some(&KICK_ADAPTER as &dyn FeatureAdapter),
+        "growth.monetization" => Some(&MONETIZATION_ADAPTER as &dyn FeatureAdapter),
+        "web3.gating" => Some(&WALLET_GATING_ADAPTER as &dyn FeatureAdapter),
         "studio.rank_card" => Some(&RANK_CARD_ADAPTER as &dyn FeatureAdapter),
         EmbedsAdapter::KEY => Some(&EMBEDS_ADAPTER as &dyn FeatureAdapter),
         EconomyAdapter::KEY => Some(&ECONOMY_ADAPTER as &dyn FeatureAdapter),
         "web3.crypto_stats" => Some(&CRYPTO_STATS_ADAPTER as &dyn FeatureAdapter),
         "web3.crypto_queries" => Some(&CRYPTO_QUERIES_ADAPTER as &dyn FeatureAdapter),
+        "web3.gas_tracker" => Some(&GAS_TRACKER_ADAPTER as &dyn FeatureAdapter),
+        "web3.nft_stats" => Some(&NFT_STATS_ADAPTER as &dyn FeatureAdapter),
+        "web3.nft_queries" => Some(&NFT_QUERIES_ADAPTER as &dyn FeatureAdapter),
+        "web3.nft_sales" => Some(&NFT_SALES_ADAPTER as &dyn FeatureAdapter),
         _ => None,
     }
 }
@@ -4667,7 +6510,8 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "social.bluesky"
         | "web3.crypto_stats"
         | "web3.crypto_queries" => FeatureMaturity::Operational,
-        "social.youtube" | "social.rss" | "social.twitch" => FeatureMaturity::Beta,
+        "social.youtube" | "social.rss" | "social.twitch" | "web3.gas_tracker"
+        | "web3.nft_stats" | "web3.nft_queries" | "web3.nft_sales" => FeatureMaturity::Beta,
         // Podcast feeds reuse the official RSS/Atom transport and its SSRF
         // protection, so they do not require a second provider or secret.
         "social.podcasts" => FeatureMaturity::Operational,
@@ -4679,10 +6523,6 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "social.tiktok"
         | "social.kick"
         | "growth.monetization"
-        | "web3.nft_stats"
-        | "web3.nft_queries"
-        | "web3.nft_sales"
-        | "web3.gas_tracker"
         | "web3.gating" => FeatureMaturity::Blocked,
         _ => FeatureMaturity::Planned,
     }
@@ -4827,13 +6667,199 @@ mod tests {
             "social.tiktok",
             "social.kick",
             "growth.monetization",
+            "web3.gating",
+        ] {
+            assert_eq!(feature_maturity(key), FeatureMaturity::Blocked);
+            let adapter = feature_adapter(key).expect("blocked feature still has a contract");
+            assert!(!adapter.descriptor().dependencies.is_empty());
+            assert!(!adapter.descriptor().schema.as_object().unwrap().is_empty());
+        }
+        for key in [
             "web3.nft_stats",
             "web3.nft_queries",
             "web3.nft_sales",
             "web3.gas_tracker",
-            "web3.gating",
         ] {
-            assert_eq!(feature_maturity(key), FeatureMaturity::Blocked);
+            // The adapters and Discord commands are real, but the providers
+            // remain Beta until their production credentials/endpoints are
+            // configured and health checks succeed.
+            assert_eq!(feature_maturity(key), FeatureMaturity::Beta);
+        }
+    }
+
+    #[test]
+    fn every_catalogue_key_has_a_runtime_adapter_or_an_explicit_blocker() {
+        for key in FEATURE_KEYS {
+            let maturity = feature_maturity(key);
+            assert!(
+                feature_adapter(key).is_some() || maturity == FeatureMaturity::Blocked,
+                "{key} would otherwise be a silent no-op in the panel"
+            );
+        }
+    }
+
+    #[test]
+    fn every_catalogue_adapter_has_a_bounded_preview_and_runtime_projection() {
+        let fixture = serde_json::json!({
+            "content": "preview message",
+            "channelId": "123456789012345678",
+            "reactionCount": 5,
+            "joinCount": 10,
+            "accountAgeDays": 30,
+            "hasAvatar": true,
+            "displayName": "Preview member"
+        });
+
+        for key in FEATURE_KEYS {
+            let adapter = feature_adapter(key).expect("catalogue key must have an adapter");
+            let descriptor = adapter.descriptor();
+            assert_eq!(descriptor.key, *key, "adapter key drifted for {key}");
+            assert_eq!(descriptor.schema_version, FEATURE_SCHEMA_VERSION);
+            assert!(
+                descriptor.schema.is_object(),
+                "{key} must expose an object schema"
+            );
+            assert!(
+                descriptor.defaults.is_object(),
+                "{key} must expose object defaults"
+            );
+
+            // A preview is deliberately side-effect free, but it must still
+            // explain what the runtime would do.  This catches adapters that
+            // only persist JSON and would otherwise render a misleading
+            // Configure button in the panel.
+            let effects = adapter.simulate(&descriptor.defaults, &fixture);
+            assert!(
+                !effects.is_empty() && effects.iter().all(|effect| !effect.trim().is_empty()),
+                "{key} has no usable runtime preview"
+            );
+
+            // Projection can be empty only for a toggle-only adapter.  Those
+            // adapters are still covered by the non-empty simulate contract
+            // above; configurable schemas must project at least one setting.
+            if descriptor
+                .schema
+                .get("sections")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|sections| !sections.is_empty())
+            {
+                assert!(
+                    !adapter.runtime_projection(&descriptor.defaults).is_empty(),
+                    "{key} exposes fields but publishes no runtime projection"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_catalogue_preview_describes_an_actionable_runtime_decision() {
+        let fixture = serde_json::json!({
+            "content": "preview message",
+            "channelId": "123456789012345678",
+            "reactionCount": 5,
+            "joinCount": 10,
+            "accountAgeDays": 30,
+            "hasAvatar": true,
+            "displayName": "Preview member"
+        });
+
+        for key in FEATURE_KEYS {
+            let adapter = feature_adapter(key).expect("catalogue key must have an adapter");
+            let descriptor = adapter.descriptor();
+            let effects = adapter.simulate(&descriptor.defaults, &fixture);
+            assert!(
+                effects.iter().all(|effect| {
+                    !effect.contains("Validate and apply")
+                        && !effect.contains("only persist")
+                        && !effect.contains("guardar JSON")
+                }),
+                "{key} still exposes a generic persistence-only preview"
+            );
+            let projection = adapter.runtime_projection(&descriptor.defaults);
+            if !projection.is_empty() {
+                assert!(
+                    effects
+                        .iter()
+                        .any(|effect| effect.contains("Runtime setting")),
+                    "{key} preview does not expose the values consumed by the runtime"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_schema_field_changes_the_published_runtime_projection() {
+        fn probe_value(
+            kind: &str,
+            current: Option<&serde_json::Value>,
+            min: Option<i64>,
+            max: Option<i64>,
+        ) -> serde_json::Value {
+            match current {
+                Some(value) if value.is_boolean() => serde_json::json!(!value.as_bool().unwrap()),
+                Some(value) if value.is_number() => {
+                    let current = value.as_i64().unwrap_or_default();
+                    let candidate = if min.is_none_or(|bound| current > bound) {
+                        current.saturating_sub(1)
+                    } else {
+                        current.saturating_add(1)
+                    };
+                    let candidate = max.map_or(candidate, |bound| candidate.min(bound));
+                    serde_json::json!(min.map_or(candidate, |bound| candidate.max(bound)))
+                }
+                Some(value) if value.is_array() => serde_json::json!(["123456789012345678"]),
+                Some(value) if value.is_string() => {
+                    serde_json::json!(format!("{}-probe", value.as_str().unwrap_or_default()))
+                }
+                Some(_) | None if kind == "toggle" => serde_json::json!(true),
+                Some(_) | None if matches!(kind, "number" | "slider") => serde_json::json!(1),
+                Some(_) | None if matches!(kind, "tags" | "channels" | "roles") => {
+                    serde_json::json!(["123456789012345678"])
+                }
+                _ => serde_json::json!("probe"),
+            }
+        }
+
+        for key in FEATURE_KEYS {
+            let adapter = feature_adapter(key).expect("catalogue key must have an adapter");
+            let descriptor = adapter.descriptor();
+            let baseline = adapter.runtime_projection(&descriptor.defaults);
+            let sections = descriptor.schema["sections"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            for section in sections {
+                for field in section["fields"].as_array().cloned().unwrap_or_default() {
+                    let Some(field_key) = field["key"].as_str() else {
+                        continue;
+                    };
+                    let kind = field["kind"].as_str().unwrap_or("text");
+                    let min = field["min"].as_i64();
+                    let max = field["max"].as_i64();
+                    let mut candidate = descriptor.defaults.clone();
+                    let object = candidate
+                        .as_object_mut()
+                        .expect("feature defaults must be a JSON object");
+                    let current = object.get(field_key);
+                    object.insert(field_key.into(), probe_value(kind, current, min, max));
+                    let projected = adapter.runtime_projection(&candidate);
+                    assert_ne!(
+                        projected, baseline,
+                        "{key}.{field_key} is exposed but does not change runtime projection"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_known_key_has_a_declared_lifecycle() {
+        for key in FEATURE_KEYS {
+            assert_ne!(
+                feature_maturity(key),
+                FeatureMaturity::Planned,
+                "{key} must be operational, beta, or explicitly blocked"
+            );
         }
     }
 
@@ -4959,9 +6985,15 @@ mod tests {
                     "message": "Welcome {member}",
                     "sendDm": true,
                     "dmMessage": "Hello {member}",
-                    "autoRole": "456"
+                    "autoRole": "456",
+                    "templateId": "welcome-1"
                 }))
                 .contains(&("support.welcome.send_dm".into(), "true".into()))
+        );
+        assert!(
+            welcome
+                .runtime_projection(&serde_json::json!({"templateId": "welcome-1"}))
+                .contains(&("support.welcome.template_id".into(), "welcome-1".into()))
         );
 
         for key in [
@@ -5010,6 +7042,58 @@ mod tests {
         }));
         assert!(feed_projection.contains(&("social.feed.target_channel_id".into(), "123".into())));
         assert!(feed_projection.contains(&("social.feed.interval_seconds".into(), "600".into())));
+
+        let youtube = feature_adapter("social.youtube").expect("youtube adapter");
+        let youtube_descriptor = youtube.descriptor();
+        let youtube_fields = youtube_descriptor.schema["sections"][0]["fields"]
+            .as_array()
+            .expect("youtube schema fields");
+        assert!(
+            youtube_fields
+                .iter()
+                .any(|field| field["key"] == "sourceChannelId")
+        );
+        assert!(
+            youtube_fields
+                .iter()
+                .any(|field| field["key"] == "targetChannelId")
+        );
+        assert!(
+            youtube
+                .validate(&serde_json::json!({}))
+                .iter()
+                .any(|issue| issue.path == "sourceChannelId")
+        );
+        assert!(
+            youtube
+                .validate(&serde_json::json!({
+                    "sourceChannelId": "UC123",
+                    "targetChannelId": "123456789012345678",
+                    "intervalSeconds": 900,
+                    "messageTemplate": "New video: {title}"
+                }))
+                .is_empty()
+        );
+
+        let twitch = feature_adapter("social.twitch").expect("twitch adapter");
+        let twitch_descriptor = twitch.descriptor();
+        let twitch_fields = twitch_descriptor.schema["sections"][0]["fields"]
+            .as_array()
+            .expect("twitch schema fields");
+        assert!(
+            twitch_fields
+                .iter()
+                .any(|field| field["key"] == "sourceLogin")
+        );
+        assert!(
+            twitch
+                .runtime_projection(&serde_json::json!({
+                    "sourceLogin": "vozen",
+                    "targetChannelId": "987654321098765432",
+                    "intervalSeconds": 1800
+                }))
+                .contains(&("social_twitch.sourceLogin".into(), "vozen".into()))
+        );
     }
 
     #[test]
@@ -5033,10 +7117,22 @@ mod tests {
         let audit_projection = audit.runtime_projection(&serde_json::json!({
             "threshold": 5,
             "windowSeconds": 20,
-            "shadowMode": true
+            "shadowMode": true,
+            "logChannel": "123",
+            "includeContent": true
         }));
         assert!(audit_projection.contains(&("security.anti_nuke.actions".into(), "5".into())));
         assert!(audit_projection.contains(&("security.shadow_mode".into(), "true".into())));
+        assert!(audit_projection.contains(&("management.audit.log_channel".into(), "123".into())));
+        assert!(
+            audit_projection.contains(&("management.audit.include_content".into(), "true".into()))
+        );
+        assert!(
+            audit
+                .validate(&serde_json::json!({"logChannel": "not-a-channel"}))
+                .iter()
+                .any(|issue| issue.path == "logChannel")
+        );
 
         let templates = feature_adapter("management.templates").expect("templates adapter");
         assert!(templates.validate(&serde_json::json!({})).is_empty());
@@ -5230,6 +7326,28 @@ mod tests {
             feature_maturity("support.welcome_channel"),
             FeatureMaturity::Operational
         );
+        assert!(
+            adapter
+                .validate(&serde_json::json!({
+                    "channelId": "123",
+                    "message": "Hi",
+                    "steps": ["rules", "rules"]
+                }))
+                .iter()
+                .any(|issue| issue.path == "steps")
+        );
+        let projection = adapter.runtime_projection(&serde_json::json!({
+            "channelId": "123",
+            "message": "Hi",
+            "steps": ["rules", "help"],
+            "rulesChannel": "456"
+        }));
+        assert!(
+            projection.contains(&("support.welcome_channel.steps".into(), "rules,help".into()))
+        );
+        assert!(
+            projection.contains(&("support.welcome_channel.rules_channel".into(), "456".into()))
+        );
     }
 
     #[test]
@@ -5300,6 +7418,11 @@ mod tests {
                     "emoji": "⭐"
                 }))
                 .contains(&("community.starboard.threshold".into(), "5".into()))
+        );
+        assert!(
+            starboard
+                .runtime_projection(&serde_json::json!({"ignoredRoles": ["456"]}))
+                .contains(&("community.starboard.ignored_roles".into(), "456".into()))
         );
     }
 
@@ -5376,9 +7499,27 @@ mod tests {
         assert_eq!(stats.descriptor().source, "stats_adapter_v1");
         assert!(
             stats
-                .validate(&serde_json::json!({"windowDays": 31, "public": false}))
+                .validate(&serde_json::json!({
+                    "windowDays": 31,
+                    "public": false,
+                    "channelId": "not-a-channel",
+                    "intervalMinutes": 2,
+                    "nameTemplate": ""
+                }))
                 .iter()
                 .any(|issue| issue.path == "windowDays")
+        );
+        assert!(stats
+            .validate(&serde_json::json!({"channelId": "123", "intervalMinutes": 15, "nameTemplate": "messages-{messages}"}))
+            .is_empty());
+        assert!(
+            stats
+                .runtime_projection(&serde_json::json!({
+                    "channelId": "123",
+                    "intervalMinutes": 30,
+                    "nameTemplate": "msgs-{messages}"
+                }))
+                .contains(&("insights.stats.channel_id".into(), "123".into()))
         );
         assert_eq!(
             feature_maturity("insights.stats"),
@@ -5465,5 +7606,191 @@ mod tests {
                 }))
                 .contains(&("utility.search.allow_bluesky".into(), "true".into()))
         );
+    }
+
+    #[test]
+    fn reddit_adapter_keeps_oauth_and_commercial_gate_explicit() {
+        let reddit = feature_adapter("social.reddit").expect("reddit adapter");
+        let descriptor = reddit.descriptor();
+        assert_eq!(descriptor.source, "reddit_oauth_readonly_v1");
+        assert!(
+            descriptor
+                .dependencies
+                .iter()
+                .any(|item| item == "Reddit OAuth application")
+        );
+        assert!(
+            descriptor
+                .dependencies
+                .iter()
+                .any(|item| item == "Commercial API approval")
+        );
+        assert!(
+            reddit
+                .validate(&serde_json::json!({
+                    "sourceSubreddit": "https://reddit.com/r/vozen",
+                    "targetChannelId": "123456789012345678",
+                    "intervalSeconds": 900,
+                    "messageTemplate": "{title}"
+                }))
+                .iter()
+                .any(|issue| issue.code == "invalid_subreddit")
+        );
+        assert!(
+            reddit
+                .runtime_projection(&serde_json::json!({
+                    "sourceSubreddit": "vozen",
+                    "targetChannelId": "123456789012345678",
+                    "intervalSeconds": 900,
+                    "messageTemplate": "{title}",
+                    "mention": ""
+                }))
+                .contains(&("social.reddit.interval_seconds".into(), "900".into()))
+        );
+        assert_eq!(feature_maturity("social.reddit"), FeatureMaturity::Blocked);
+    }
+
+    #[test]
+    fn gas_and_nft_adapters_keep_provider_boundaries_explicit() {
+        let gas = feature_adapter("web3.gas_tracker").expect("gas adapter");
+        assert_eq!(gas.descriptor().source, "operator_rpc_gas_v1");
+        assert!(
+            gas.validate(&serde_json::json!({
+                "network": "mainnet",
+                "targetChannelId": "123",
+                "intervalSeconds": 900
+            }))
+            .iter()
+            .any(|issue| issue.path == "network")
+        );
+        assert!(
+            gas.runtime_projection(&serde_json::json!({
+                "network": "ethereum",
+                "targetChannelId": "123",
+                "intervalSeconds": 600
+            }))
+            .contains(&("web3.gas_tracker.network".into(), "ethereum".into()))
+        );
+
+        for key in ["web3.nft_stats", "web3.nft_queries", "web3.nft_sales"] {
+            let nft = feature_adapter(key).expect("NFT adapter");
+            assert_eq!(nft.descriptor().source, "opensea_read_only_v1");
+            assert!(
+                nft.validate(
+                    &serde_json::json!({"collectionSlug": "https://opensea.io/collection/x"})
+                )
+                .iter()
+                .any(|issue| issue.path == "collectionSlug")
+            );
+            // The adapter is implemented and read-only; availability is
+            // dependency-gated by the OpenSea key, so the catalogue exposes
+            // it as beta rather than silently pretending it is blocked.
+            assert_eq!(feature_maturity(key), FeatureMaturity::Beta);
+        }
+    }
+
+    #[test]
+    fn anti_raid_evaluator_is_shared_and_respects_shadow_mode() {
+        let policy = anti_raid_policy_from_json(&serde_json::json!({
+            "joinThreshold": 5,
+            "windowSeconds": 12,
+            "incidentMinutes": 20,
+            "alertOnly": false
+        }));
+        let below = evaluate_anti_raid(&policy, 4, false);
+        assert!(!below.armed);
+        assert_eq!(below.reason, "join_burst_below_threshold");
+
+        let contained = evaluate_anti_raid(&policy, 5, false);
+        assert!(contained.armed);
+        assert!(!contained.shadow_mode);
+        assert_eq!(contained.incident_minutes, 20);
+
+        let shadow = evaluate_anti_raid(&policy, 5, true);
+        assert!(shadow.armed);
+        assert!(shadow.shadow_mode);
+        assert_eq!(shadow.reason, "join_burst_detected_shadow");
+    }
+
+    #[test]
+    fn join_gate_evaluator_explains_all_blocking_reasons() {
+        let policy = JoinGatePolicy {
+            minimum_account_days: 7,
+            require_avatar: true,
+            blocked_name_patterns: vec!["free nitro".into()],
+            action: "quarantine".into(),
+        };
+        let decision = evaluate_join_gate(
+            &policy,
+            &JoinGateObservation {
+                account_age_days: 1,
+                has_avatar: false,
+                display_name: "Free Nitro winner".into(),
+            },
+        );
+        assert!(decision.blocked);
+        assert_eq!(decision.action, "quarantine");
+        assert_eq!(decision.reasons.len(), 3);
+
+        let allowed = evaluate_join_gate(
+            &policy,
+            &JoinGateObservation {
+                account_age_days: 30,
+                has_avatar: true,
+                display_name: "Community member".into(),
+            },
+        );
+        assert!(!allowed.blocked);
+        assert!(allowed.reasons.is_empty());
+    }
+
+    #[test]
+    fn starboard_evaluator_matches_threshold_and_exemptions() {
+        let policy = starboard_policy_from_json(&serde_json::json!({
+            "threshold": 3,
+            "allowSelfStar": false,
+            "includeImages": false,
+            "ignoredChannels": ["999"],
+            "ignoredRoles": ["777"]
+        }));
+        let decision = evaluate_starboard(
+            &policy,
+            &StarboardObservation {
+                source_channel_id: "123".into(),
+                author_id: "1".into(),
+                reactor_ids: vec!["1".into(), "2".into(), "2".into(), "3".into(), "4".into()],
+                author_role_ids: vec![],
+                has_attachments: false,
+            },
+        );
+        assert_eq!(decision.count, 3);
+        assert!(decision.should_publish);
+        assert!(!decision.ignored);
+
+        let ignored = evaluate_starboard(
+            &policy,
+            &StarboardObservation {
+                source_channel_id: "999".into(),
+                author_id: "1".into(),
+                reactor_ids: vec!["2".into(), "3".into(), "4".into()],
+                author_role_ids: vec![],
+                has_attachments: false,
+            },
+        );
+        assert!(ignored.ignored);
+        assert!(!ignored.should_publish);
+
+        let image = evaluate_starboard(
+            &policy,
+            &StarboardObservation {
+                source_channel_id: "123".into(),
+                author_id: "1".into(),
+                reactor_ids: vec!["2".into(), "3".into(), "4".into()],
+                author_role_ids: vec![],
+                has_attachments: true,
+            },
+        );
+        assert!(image.ignored);
+        assert!(image.reason.contains("attachments"));
     }
 }

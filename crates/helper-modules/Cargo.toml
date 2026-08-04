@@ -13,11 +13,15 @@ hex.workspace = true
 helper-contracts = { path = "../helper-contracts" }
 helper-core = { path = "../helper-core" }
 helper-store = { path = "../helper-store" }
+k256.workspace = true
+rand.workspace = true
 reqwest.workspace = true
 quick-xml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+sha3.workspace = true
+subtle.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
