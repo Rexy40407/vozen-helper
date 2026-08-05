@@ -903,6 +903,109 @@ pub fn evaluate_achievements(policy: &AchievementPolicy, xp: i64) -> Vec<Achieve
     .collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModerationPolicy {
+    pub require_reason: bool,
+    pub max_purge: u64,
+}
+
+impl Default for ModerationPolicy {
+    fn default() -> Self {
+        Self {
+            require_reason: true,
+            max_purge: 100,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModerationObservation {
+    pub action: String,
+    pub reason: String,
+    pub requested_count: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModerationDecision {
+    pub allowed: bool,
+    pub effective_count: Option<u64>,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+/// Evaluate the bounded safety envelope used by manual moderation commands.
+/// This function has no Discord or store dependency, so API simulations and
+/// production command handlers cannot drift apart on reasons or purge limits.
+pub fn evaluate_moderation(
+    policy: &ModerationPolicy,
+    observation: &ModerationObservation,
+) -> ModerationDecision {
+    let action = observation.action.trim().to_ascii_lowercase();
+    let supported = [
+        "warn", "kick", "ban", "timeout", "tempban", "softban", "purge",
+    ];
+    if !supported.contains(&action.as_str()) {
+        return ModerationDecision {
+            allowed: false,
+            effective_count: None,
+            reason_code: "unsupported_action",
+            explanation: format!("The moderation action `{action}` is not supported."),
+        };
+    }
+
+    if action == "purge" {
+        let Some(requested) = observation.requested_count else {
+            return ModerationDecision {
+                allowed: false,
+                effective_count: None,
+                reason_code: "count_required",
+                explanation: "Choose how many messages to purge.".into(),
+            };
+        };
+        if requested <= 0 {
+            return ModerationDecision {
+                allowed: false,
+                effective_count: None,
+                reason_code: "invalid_count",
+                explanation: "The purge count must be at least 1.".into(),
+            };
+        }
+        let maximum = policy.max_purge.clamp(1, 100);
+        let effective = (requested as u64).min(maximum);
+        let explanation = if requested as u64 > maximum {
+            format!("Purge is limited to {maximum} messages by this server's policy.")
+        } else {
+            format!("Purge up to {effective} message(s).")
+        };
+        return ModerationDecision {
+            allowed: true,
+            effective_count: Some(effective),
+            reason_code: if requested as u64 > maximum {
+                "count_clamped"
+            } else {
+                "allowed"
+            },
+            explanation,
+        };
+    }
+
+    if policy.require_reason && observation.reason.trim().is_empty() {
+        return ModerationDecision {
+            allowed: false,
+            effective_count: None,
+            reason_code: "reason_required",
+            explanation: "Provide a reason so the action can be audited.".into(),
+        };
+    }
+
+    ModerationDecision {
+        allowed: true,
+        effective_count: None,
+        reason_code: "allowed",
+        explanation: format!("The `{action}` action is allowed by the server policy."),
+    }
+}
+
 /// Every configurable feature will eventually implement this contract. The
 /// first adapter is intentionally small: it proves that the API and gateway
 /// can consume one canonical schema/defaults/validator without pulling UI
@@ -4734,6 +4837,54 @@ impl FeatureAdapter for ModerationAdapter {
         }
         pairs
     }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let policy = ModerationPolicy {
+            require_reason: config
+                .get("requireReason")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true),
+            max_purge: config
+                .get("maxPurge")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(100)
+                .clamp(1, 100) as u64,
+        };
+        let action = fixture_string(fixture, "action", "action", "purge");
+        let reason = fixture_string(fixture, "reason", "reason", "");
+        let requested_count = fixture
+            .get("requestedCount")
+            .or_else(|| fixture.get("requested_count"))
+            .and_then(serde_json::Value::as_i64);
+        let decision = evaluate_moderation(
+            &policy,
+            &ModerationObservation {
+                action: action.to_owned(),
+                reason: reason.to_owned(),
+                requested_count,
+            },
+        );
+        let mut effects = if decision.allowed {
+            if let Some(count) = decision.effective_count {
+                vec![format!(
+                    "Allow `{action}` with an effective limit of {count} message(s)."
+                )]
+            } else {
+                vec![format!(
+                    "Allow `{action}` after the configured safety checks."
+                )]
+            }
+        } else {
+            vec![format!("Block `{action}`: {}", decision.explanation)]
+        };
+        effects.push(format!("Decision code: `{}`.", decision.reason_code));
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -8532,6 +8683,65 @@ mod tests {
         assert_eq!(
             feature_maturity("management.moderation"),
             FeatureMaturity::Operational
+        );
+    }
+
+    #[test]
+    fn moderation_evaluator_requires_reasons_and_clamps_purge() {
+        let policy = ModerationPolicy {
+            require_reason: true,
+            max_purge: 12,
+        };
+        let missing_reason = evaluate_moderation(
+            &policy,
+            &ModerationObservation {
+                action: "ban".into(),
+                reason: " ".into(),
+                requested_count: None,
+            },
+        );
+        assert!(!missing_reason.allowed);
+        assert_eq!(missing_reason.reason_code, "reason_required");
+
+        let purge = evaluate_moderation(
+            &policy,
+            &ModerationObservation {
+                action: "purge".into(),
+                reason: String::new(),
+                requested_count: Some(50),
+            },
+        );
+        assert!(purge.allowed);
+        assert_eq!(purge.effective_count, Some(12));
+        assert_eq!(purge.reason_code, "count_clamped");
+    }
+
+    #[test]
+    fn moderation_adapter_simulation_uses_runtime_evaluator() {
+        let adapter = feature_adapter("management.moderation").expect("moderation adapter");
+        let blocked = adapter.simulate(
+            &serde_json::json!({"requireReason": true, "maxPurge": 12}),
+            &serde_json::json!({"action": "ban", "reason": ""}),
+        );
+        assert!(
+            blocked
+                .iter()
+                .any(|effect| effect.contains("reason_required"))
+        );
+
+        let clamped = adapter.simulate(
+            &serde_json::json!({"requireReason": true, "maxPurge": 12}),
+            &serde_json::json!({"action": "purge", "requestedCount": 50}),
+        );
+        assert!(
+            clamped
+                .iter()
+                .any(|effect| effect.contains("effective limit of 12"))
+        );
+        assert!(
+            clamped
+                .iter()
+                .any(|effect| effect.contains("count_clamped"))
         );
     }
 

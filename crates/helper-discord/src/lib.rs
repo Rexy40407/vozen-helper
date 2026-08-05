@@ -5,10 +5,11 @@ use chrono::{Datelike, Duration as ChronoDuration, TimeZone, Utc};
 use helper_contracts::{AntiSpamObservation, AntiSpamPolicy, Plan};
 use helper_core::{
     AchievementPolicy, AntiRaidPolicy, Config, JoinGateObservation, JoinGatePolicy,
-    LeaderboardEntry, StarboardObservation, WorkflowObservation, WorkflowPolicy,
-    anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
-    evaluate_join_gate, evaluate_leaderboard, evaluate_scam_with_roles, evaluate_starboard,
-    evaluate_workflow, feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
+    LeaderboardEntry, ModerationObservation, ModerationPolicy, StarboardObservation,
+    WorkflowObservation, WorkflowPolicy, anti_spam_policy_from_json, evaluate_achievements,
+    evaluate_anti_raid, evaluate_anti_spam, evaluate_join_gate, evaluate_leaderboard,
+    evaluate_moderation, evaluate_scam_with_roles, evaluate_starboard, evaluate_workflow,
+    feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
     parse_utc_offset_minutes, quota_limit, scam_policy_from_json, starboard_policy_from_json,
 };
 use helper_modules::{
@@ -5712,8 +5713,15 @@ impl Handler {
                     let target = command.data.options.iter().find_map(|option| match &option.value { CommandDataOptionValue::User(user) => Some(*user), _ => None });
                     if let Some(target) = target {
                         let reason = command.data.options.iter().find_map(|option| match &option.value { CommandDataOptionValue::String(value) => Some(value.as_str()), _ => None }).unwrap_or("");
-                        if setting_bool(&self.store, &guild_id.to_string(), "management.moderation.require_reason", true) && reason.trim().is_empty() {
-                            return respond(ctx, command, "Provide a reason so the warning can be audited.").await;
+                        let decision = moderation_decision(
+                            &self.store,
+                            &guild_id.to_string(),
+                            "warn",
+                            reason,
+                            None,
+                        );
+                        if !decision.allowed {
+                            return respond(ctx, command, &decision.explanation).await;
                         }
                         let reason = if reason.trim().is_empty() { "No reason provided" } else { reason };
                         let case_id = self.store.record_case(&guild_id.to_string(), "warn", &target.to_string(), &command.user.id.to_string(), reason, None)?;
@@ -5825,8 +5833,20 @@ impl Handler {
                     CommandDataOptionValue::Integer(value) if option.name == "count" => Some(value),
                     _ => None,
                 }).unwrap_or(0);
-                let max_purge = setting_u64(&self.store, &command.guild_id.map(|id| id.to_string()).unwrap_or_default(), "management.moderation.max_purge", 100).clamp(1, 100);
-                let count = raw_count.clamp(1, max_purge as i64) as u8;
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let decision = moderation_decision(
+                    &self.store,
+                    &guild_id.to_string(),
+                    "purge",
+                    "",
+                    Some(raw_count),
+                );
+                if !decision.allowed {
+                    return respond(ctx, command, &decision.explanation).await;
+                }
+                let count = decision.effective_count.unwrap_or(1) as u8;
                 let messages = command.channel_id.messages(&ctx.http, serenity::all::GetMessages::new().limit(count)).await?;
                 if messages.is_empty() {
                     "No messages found to delete.".to_string()
@@ -5847,8 +5867,15 @@ impl Handler {
                     return respond(ctx, command, "Indica um membro.").await;
                 };
                 let reason = option_string(command, "reason").unwrap_or("");
-                if setting_bool(&self.store, &guild_id.to_string(), "management.moderation.require_reason", true) && reason.trim().is_empty() {
-                    return respond(ctx, command, "Provide a reason so the action can be audited.").await;
+                let decision = moderation_decision(
+                    &self.store,
+                    &guild_id.to_string(),
+                    &command.data.name,
+                    reason,
+                    None,
+                );
+                if !decision.allowed {
+                    return respond(ctx, command, &decision.explanation).await;
                 }
                 let reason = if reason.trim().is_empty() { "No reason provided" } else { reason };
                 let action = guild_id.ban_with_reason(&ctx.http, target, 0, reason).await;
@@ -5884,8 +5911,15 @@ impl Handler {
                     CommandDataOptionValue::String(value) => Some(value.as_str()),
                     _ => None,
                 }).unwrap_or("");
-                if setting_bool(&self.store, &guild_id.to_string(), "management.moderation.require_reason", true) && reason.trim().is_empty() {
-                    return respond(ctx, command, "Provide a reason so the action can be audited.").await;
+                let decision = moderation_decision(
+                    &self.store,
+                    &guild_id.to_string(),
+                    &command.data.name,
+                    reason,
+                    None,
+                );
+                if !decision.allowed {
+                    return respond(ctx, command, &decision.explanation).await;
                 }
                 let reason = if reason.trim().is_empty() { "No reason provided" } else { reason };
                 let action = if command.data.name == "kick" {
@@ -10390,6 +10424,36 @@ fn setting_bool(store: &Store, guild_id: &str, key: &str, default: bool) -> bool
     setting_string(store, guild_id, key)
         .and_then(|value| value.parse::<bool>().ok())
         .unwrap_or(default)
+}
+
+fn moderation_policy_for_store(store: &Store, guild_id: &str) -> ModerationPolicy {
+    ModerationPolicy {
+        require_reason: setting_bool(
+            store,
+            guild_id,
+            "management.moderation.require_reason",
+            true,
+        ),
+        max_purge: setting_u64(store, guild_id, "management.moderation.max_purge", 100)
+            .clamp(1, 100),
+    }
+}
+
+fn moderation_decision(
+    store: &Store,
+    guild_id: &str,
+    action: &str,
+    reason: &str,
+    requested_count: Option<i64>,
+) -> helper_core::ModerationDecision {
+    evaluate_moderation(
+        &moderation_policy_for_store(store, guild_id),
+        &ModerationObservation {
+            action: action.to_owned(),
+            reason: reason.to_owned(),
+            requested_count,
+        },
+    )
 }
 
 fn anti_spam_policy_for_store(store: &Store, guild_id: &str) -> AntiSpamPolicy {
