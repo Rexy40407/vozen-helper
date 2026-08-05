@@ -18,9 +18,12 @@ import {
   type RankCardConfig,
   type RolePanelRecord,
   type RssSubscription,
+  type RssSubscriptionHealth,
   type StudioTemplate,
   type TwitchSubscription,
+  type TwitchSubscriptionHealth,
   type YouTubeSubscription,
+  type YouTubeSubscriptionHealth,
 } from './api';
 
 const defaultRankCard: RankCardConfig = {
@@ -60,6 +63,10 @@ type Route = {
   page: 'overview' | 'features' | 'activity' | 'rank-card' | 'quick-setup' | 'detail';
   key?: string;
 };
+type ProviderSubscriptionHealth =
+  | RssSubscriptionHealth
+  | TwitchSubscriptionHealth
+  | YouTubeSubscriptionHealth;
 type FieldSpec = {
   key: string;
   label: string;
@@ -1952,6 +1959,7 @@ function App() {
   const [detailSchema, setDetailSchema] = useState<FeatureSchema | null>(null);
   const [detailEnabled, setDetailEnabled] = useState(false);
   const [detailRevision, setDetailRevision] = useState(0);
+  const [providerHealth, setProviderHealth] = useState<ProviderSubscriptionHealth | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error' | 'auth' | 'saving'>(
     'loading',
   );
@@ -2267,6 +2275,33 @@ function App() {
       setDetailEnabled(subscription.enabled);
     }
   }, [route.page, route.key, twitchSubscriptions]);
+  useEffect(() => {
+    setProviderHealth(null);
+    if (localPreviewMode || route.page !== 'detail') return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        let health: ProviderSubscriptionHealth | null = null;
+        if (route.key === 'social.youtube' && youtubeSubscriptions[0]) {
+          health = await api.youtubeHealth(youtubeSubscriptions[0].id);
+        } else if (
+          (route.key === 'social.rss' || route.key === 'social.podcasts') &&
+          rssSubscriptions[0]
+        ) {
+          health = await api.rssHealth(rssSubscriptions[0].id);
+        } else if (route.key === 'social.twitch' && twitchSubscriptions[0]) {
+          health = await api.twitchHealth(twitchSubscriptions[0].id);
+        }
+        if (!cancelled) setProviderHealth(health);
+      } catch {
+        if (!cancelled) setProviderHealth(null);
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [route.page, route.key, youtubeSubscriptions, rssSubscriptions, twitchSubscriptions]);
   useEffect(() => {
     const provider = route.key ? externalProviderForFeature(route.key) : null;
     const subscription = provider ? externalSubscriptions[provider]?.[0] : undefined;
@@ -2910,6 +2945,7 @@ function App() {
               onTest={() => void testDetail()}
               templates={studioTemplates}
               onTemplatesChange={setStudioTemplates}
+              providerHealth={providerHealth}
               saving={status === 'saving'}
               onBack={() => navigate('#/features')}
             />
@@ -3809,6 +3845,7 @@ function FeatureDetail({
   onTest,
   templates,
   onTemplatesChange,
+  providerHealth,
   saving,
   onBack,
 }: {
@@ -3825,6 +3862,7 @@ function FeatureDetail({
   onTest: () => void;
   templates: StudioTemplate[];
   onTemplatesChange: (templates: StudioTemplate[]) => void;
+  providerHealth: ProviderSubscriptionHealth | null;
   saving: boolean;
   onBack: () => void;
 }) {
@@ -3960,6 +3998,7 @@ function FeatureDetail({
               ? 'Enviar teste para o Discord'
               : 'Simular configuração'}
           </button>
+          {providerHealth && <ProviderHealthPanel health={providerHealth} />}
           {!localPreviewMode && feature?.health?.status && feature.health.status !== 'ready' && (
             <button className="secondary full" onClick={onRepair} disabled={saving}>
               Reparar publicação
@@ -3980,6 +4019,38 @@ function FeatureDetail({
         </button>
       </div>
     </section>
+  );
+}
+
+function ProviderHealthPanel({ health }: { health: ProviderSubscriptionHealth }) {
+  const labels: Record<ProviderSubscriptionHealth['status'], string> = {
+    ready: 'Pronto',
+    degraded: 'Degradado',
+    dependency_down: 'Dependencia indisponivel',
+  };
+  const provider = health.provider === 'rss' ? 'RSS' : health.provider === 'youtube' ? 'YouTube' : 'Twitch';
+  const source =
+    health.provider === 'youtube'
+      ? health.latestVideo?.title
+      : health.provider === 'rss'
+        ? health.feed?.latestTitle
+        : health.channel?.displayName;
+  return (
+    <div className={`provider-health ${health.status}`} role="status">
+      <div className="provider-health-heading">
+        <span className="eyebrow">SAUDE · {provider}</span>
+        <strong>{labels[health.status]}</strong>
+      </div>
+      <p>
+        {health.message ??
+          (health.status === 'ready'
+            ? 'A fonte respondeu e esta subscricao pode ser testada.'
+            : 'Verifica as credenciais e a fonte configurada.')}
+      </p>
+      {source && <small>Ultima fonte: {source}</small>}
+      {health.failureCount > 0 && <small>Falhas consecutivas: {health.failureCount}</small>}
+      {health.lastError && <small className="provider-health-error">Ultimo erro: {health.lastError}</small>}
+    </div>
   );
 }
 
