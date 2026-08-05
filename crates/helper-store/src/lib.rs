@@ -779,6 +779,11 @@ impl Store {
             }
         }
         conn.execute_batch("CREATE TABLE IF NOT EXISTS helper_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS helper_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, guild_id TEXT NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, revoked_at TEXT); CREATE TABLE IF NOT EXISTS helper_session_guilds (session_id TEXT NOT NULL, guild_id TEXT NOT NULL, name TEXT NOT NULL, permissions TEXT, PRIMARY KEY(session_id,guild_id)); CREATE TABLE IF NOT EXISTS helper_oauth_states (state_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, used_at INTEGER); CREATE TABLE IF NOT EXISTS helper_entitlements (subject_id TEXT PRIMARY KEY, payload TEXT NOT NULL, fetched_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS helper_usage (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, quota_key TEXT NOT NULL, period TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,user_id,quota_key,period)); CREATE TABLE IF NOT EXISTS cases (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, type TEXT NOT NULL, target_id TEXT NOT NULL, moderator_id TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', duration_ms INTEGER, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_cases_guild_time ON cases(guild_id, created_at DESC); CREATE TABLE IF NOT EXISTS settings (guild_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(guild_id,key)); CREATE TABLE IF NOT EXISTS activity_log (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, type TEXT NOT NULL, user_id TEXT NOT NULL, user_tag TEXT, actor_id TEXT, detail TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_activity_guild_time ON activity_log(guild_id, created_at DESC); CREATE TABLE IF NOT EXISTS scheduled_actions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, type TEXT NOT NULL, target_id TEXT NOT NULL, execute_at INTEGER NOT NULL, payload TEXT NOT NULL DEFAULT '', case_id INTEGER); CREATE INDEX IF NOT EXISTS idx_scheduled_due ON scheduled_actions(execute_at); CREATE TABLE IF NOT EXISTS infractions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, target_id TEXT NOT NULL, weight INTEGER NOT NULL DEFAULT 1, source TEXT NOT NULL DEFAULT 'manual', created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS afk (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', since INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE TABLE IF NOT EXISTS tags (guild_id TEXT NOT NULL, name TEXT NOT NULL, content TEXT NOT NULL, author_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(guild_id,name)); CREATE TABLE IF NOT EXISTS levels (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, xp INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,user_id)); CREATE TABLE IF NOT EXISTS achievements (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, achievement_key TEXT NOT NULL, threshold INTEGER NOT NULL, unlocked_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id,achievement_key)); CREATE INDEX IF NOT EXISTS idx_achievements_guild_user ON achievements(guild_id,user_id,unlocked_at); CREATE TABLE IF NOT EXISTS stats (guild_id TEXT NOT NULL, date TEXT NOT NULL, messages INTEGER NOT NULL DEFAULT 0, joins INTEGER NOT NULL DEFAULT 0, leaves INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,date)); CREATE TABLE IF NOT EXISTS invite_snapshots (guild_id TEXT NOT NULL, code TEXT NOT NULL, uses INTEGER NOT NULL DEFAULT 0, inviter_id TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY(guild_id,code)); CREATE TABLE IF NOT EXISTS invite_attributions (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, code TEXT NOT NULL, inviter_id TEXT, joined_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE INDEX IF NOT EXISTS idx_invite_attributions_guild ON invite_attributions(guild_id,joined_at DESC);")?;
+        // XP awards are recorded separately from the materialized balance so
+        // gateway retries and worker replays cannot inflate a member's XP.
+        // The event key is scoped to a guild because Discord identifiers from
+        // different sources may legitimately overlap in fixtures/imports.
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS xp_events (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, event_key TEXT NOT NULL, source TEXT NOT NULL, amount INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(guild_id,event_key)); CREATE INDEX IF NOT EXISTS idx_xp_events_user_time ON xp_events(guild_id,user_id,created_at DESC);")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS birthdays (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, month INTEGER NOT NULL, day INTEGER NOT NULL, last_announced_year INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE INDEX IF NOT EXISTS idx_birthdays_day ON birthdays(month,day,last_announced_year); CREATE TABLE IF NOT EXISTS economy_accounts (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, balance INTEGER NOT NULL DEFAULT 0, last_daily_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE INDEX IF NOT EXISTS idx_economy_guild_balance ON economy_accounts(guild_id,balance DESC); CREATE TABLE IF NOT EXISTS economy_ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, user_id TEXT NOT NULL, amount INTEGER NOT NULL, reason TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_economy_ledger_account ON economy_ledger(guild_id,user_id,created_at DESC); CREATE TABLE IF NOT EXISTS temp_channels (guild_id TEXT NOT NULL, channel_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_temp_channels_guild ON temp_channels(guild_id); CREATE TABLE IF NOT EXISTS voice_sessions (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, channel_id TEXT NOT NULL, started_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE INDEX IF NOT EXISTS idx_voice_sessions_guild ON voice_sessions(guild_id,started_at);")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS economy_cooldowns (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, kind TEXT NOT NULL, last_claim_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id,kind)); CREATE INDEX IF NOT EXISTS idx_economy_cooldowns_kind ON economy_cooldowns(guild_id,kind,last_claim_at);")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS provider_events (provider TEXT NOT NULL, event_id TEXT NOT NULL, payload TEXT NOT NULL, received_at INTEGER NOT NULL, PRIMARY KEY(provider,event_id));")?;
@@ -1324,6 +1329,10 @@ impl Store {
             (
                 "levels",
                 "DELETE FROM levels WHERE guild_id=?2 AND user_id=?1",
+            ),
+            (
+                "xp_events",
+                "DELETE FROM xp_events WHERE guild_id=?2 AND user_id=?1",
             ),
             (
                 "voice_sessions",
@@ -3621,6 +3630,7 @@ impl Store {
              UNION ALL SELECT 'birthday' AS kind, printf('%02d-%02d', month, day), created_at FROM birthdays WHERE guild_id=?1 AND user_id=?2
              UNION ALL SELECT 'economy' AS kind, CAST(balance AS TEXT), created_at FROM economy_accounts WHERE guild_id=?1 AND user_id=?2
              UNION ALL SELECT 'economy_transaction' AS kind, printf('%+d %s', amount, reason), created_at FROM economy_ledger WHERE guild_id=?1 AND user_id=?2
+             UNION ALL SELECT 'xp_event' AS kind, printf('%+d %s', amount, source), created_at FROM xp_events WHERE guild_id=?1 AND user_id=?2
              ORDER BY kind",
         )?;
         for row in stmt.query_map(params![guild_id, user_id], |row| {
@@ -3717,6 +3727,10 @@ impl Store {
             (
                 "levels",
                 "DELETE FROM levels WHERE guild_id=?2 AND user_id=?1",
+            ),
+            (
+                "xp_events",
+                "DELETE FROM xp_events WHERE guild_id=?2 AND user_id=?1",
             ),
             (
                 "voice_sessions",
@@ -3991,6 +4005,7 @@ impl Store {
             "DELETE FROM afk WHERE guild_id=?1",
             "DELETE FROM tags WHERE guild_id=?1",
             "DELETE FROM levels WHERE guild_id=?1",
+            "DELETE FROM xp_events WHERE guild_id=?1",
             "DELETE FROM achievements WHERE guild_id=?1",
             "DELETE FROM welcome_delivery_claims WHERE guild_id=?1",
             "DELETE FROM voice_sessions WHERE guild_id=?1",
@@ -4116,6 +4131,10 @@ impl Store {
             "stats",
             tx.execute("DELETE FROM stats WHERE date < ?1", [&cutoff_date_1y])?,
         );
+        remove(
+            "xp_events",
+            tx.execute("DELETE FROM xp_events WHERE created_at < ?1", [cutoff_1y])?,
+        );
         // A gateway disconnect can leave a voice session without a matching
         // leave event. Sessions older than the bounded XP window are stale
         // and must not survive indefinitely or receive retroactive XP.
@@ -4164,6 +4183,56 @@ impl Store {
             params![guild_id, user_id],
             |row| row.get(0),
         )?)
+    }
+
+    /// Apply one XP award exactly once and return the resulting balance.
+    ///
+    /// Discord can redeliver gateway events and a release can replay a job
+    /// after a process restart.  The event insert and materialized balance
+    /// update therefore happen in one transaction, keyed by the caller's
+    /// stable event identifier.  `None` means this event was already applied.
+    pub fn add_xp_event(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        event_key: &str,
+        source: &str,
+        amount: i64,
+        created_at: i64,
+    ) -> Result<Option<i64>> {
+        if guild_id.trim().is_empty()
+            || user_id.trim().is_empty()
+            || event_key.trim().is_empty()
+            || source.trim().is_empty()
+            || guild_id.len() > 64
+            || user_id.len() > 64
+            || event_key.len() > 160
+            || source.len() > 48
+        {
+            bail!("invalid_xp_event");
+        }
+        let amount = amount.clamp(0, 2_000);
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO xp_events(guild_id,user_id,event_key,source,amount,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![guild_id, user_id, event_key, source, amount, created_at],
+        )?;
+        if inserted == 0 {
+            tx.commit()?;
+            return Ok(None);
+        }
+        tx.execute(
+            "INSERT INTO levels(guild_id,user_id,xp) VALUES(?1,?2,?3) ON CONFLICT(guild_id,user_id) DO UPDATE SET xp=xp+excluded.xp",
+            params![guild_id, user_id, amount],
+        )?;
+        let xp = tx.query_row(
+            "SELECT xp FROM levels WHERE guild_id=?1 AND user_id=?2",
+            params![guild_id, user_id],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        Ok(Some(xp))
     }
 
     /// Start or replace the active voice session for a member. Replaying the
@@ -6208,6 +6277,36 @@ mod tests {
         );
         assert!(store.get_tag("g1", "rules").unwrap().is_none());
         assert_eq!(store.recent_cases("g2", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn xp_events_are_idempotent_and_guild_scoped() {
+        let store = Store::open(":memory:").unwrap();
+        assert_eq!(
+            store
+                .add_xp_event("g1", "u1", "message:42", "message", 25, 100)
+                .unwrap(),
+            Some(25)
+        );
+        assert_eq!(
+            store
+                .add_xp_event("g1", "u1", "message:42", "message", 25, 101)
+                .unwrap(),
+            None
+        );
+        assert_eq!(store.level_for("g1", "u1").unwrap(), 25);
+        assert_eq!(
+            store
+                .add_xp_event("g2", "u1", "message:42", "message", 10, 102)
+                .unwrap(),
+            Some(10)
+        );
+        assert_eq!(store.level_for("g2", "u1").unwrap(), 10);
+        assert!(
+            store
+                .add_xp_event("g1", "u1", "", "message", 1, 103)
+                .is_err()
+        );
     }
 
     #[test]

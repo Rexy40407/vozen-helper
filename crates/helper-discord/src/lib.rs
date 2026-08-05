@@ -1851,26 +1851,44 @@ impl EventHandler for Handler {
                     })
                 {
                     let before = self.store.level_for(&guild_text, &user_text).unwrap_or(0);
-                    if let Err(error) = self.store.add_xp(&guild_text, &user_text, xp) {
-                        warn!(%guild_id, user = %new.user_id, %error, "failed to award voice XP");
-                    } else {
-                        let after = self
-                            .store
-                            .level_for(&guild_text, &user_text)
-                            .unwrap_or(before);
-                        self.announce_achievement_unlocks(&ctx, guild_id, &user_text, after, None)
+                    let event_key = previous_session
+                        .as_ref()
+                        .map(|session| {
+                            format!(
+                                "voice:{}:{}:{}",
+                                session.user_id, session.channel_id, session.started_at
+                            )
+                        })
+                        .unwrap_or_else(|| format!("voice:{}:{}", user_text, now));
+                    match self.store.add_xp_event(
+                        &guild_text,
+                        &user_text,
+                        &event_key,
+                        "voice",
+                        xp,
+                        now.saturating_mul(1_000),
+                    ) {
+                        Ok(Some(after)) => {
+                            self.announce_achievement_unlocks(
+                                &ctx, guild_id, &user_text, after, None,
+                            )
                             .await;
-                        self.apply_level_rewards(&ctx, guild_id, &user_text, after / 100 + 1)
-                            .await;
-                        if after / 100 > before / 100 {
-                            info!(
-                                %guild_id,
-                                user = %new.user_id,
-                                xp,
-                                before,
-                                after,
-                                "voice XP awarded with level-up"
-                            );
+                            self.apply_level_rewards(&ctx, guild_id, &user_text, after / 100 + 1)
+                                .await;
+                            if after / 100 > before / 100 {
+                                info!(
+                                    %guild_id,
+                                    user = %new.user_id,
+                                    xp,
+                                    before,
+                                    after,
+                                    "voice XP awarded with level-up"
+                                );
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            warn!(%guild_id, user = %new.user_id, %error, "failed to award voice XP");
                         }
                     }
                 }
@@ -3257,41 +3275,58 @@ impl EventHandler for Handler {
                     });
                     let amount = minimum + (stable % span) as i64;
                     let before = self.store.level_for(&guild_text, &user_text).unwrap_or(0);
-                    let _ = self.store.add_xp(&guild_text, &user_text, amount);
-                    let after = self
-                        .store
-                        .level_for(&guild_text, &user_text)
-                        .unwrap_or(before);
-                    self.announce_achievement_unlocks(
-                        &ctx,
-                        guild_id,
+                    let event_key = format!("message:{}", message.id);
+                    let award = match self.store.add_xp_event(
+                        &guild_text,
                         &user_text,
-                        after,
-                        Some(message.channel_id),
-                    )
-                    .await;
-                    let before_level = before / 100 + 1;
-                    let after_level = after / 100 + 1;
-                    if after_level > before_level {
-                        self.apply_level_rewards(&ctx, guild_id, &user_text, after_level)
-                            .await;
-                        let text = setting_string(
-                            &self.store,
-                            &guild_text,
-                            "community.levels.announce_template",
+                        &event_key,
+                        "message",
+                        amount,
+                        Utc::now().timestamp_millis(),
+                    ) {
+                        Ok(Some(after)) => Some(after),
+                        Ok(None) => {
+                            // The event was already applied by an earlier
+                            // delivery; its announcements were already sent.
+                            None
+                        }
+                        Err(error) => {
+                            warn!(%guild_id, user = %message.author.id, %error, "failed to award message XP");
+                            None
+                        }
+                    };
+                    if let Some(after) = award {
+                        self.announce_achievement_unlocks(
+                            &ctx,
+                            guild_id,
+                            &user_text,
+                            after,
+                            Some(message.channel_id),
                         )
-                        .unwrap_or_else(|| "{member} reached level {level}!".to_string())
-                        .replace("{member}", &format!("<@{}>", message.author.id))
-                        .replace("{level}", &after_level.to_string())
-                        .replace("{server}", "this server");
-                        let channel = setting_u64_optional(
-                            &self.store,
-                            &guild_text,
-                            "community.levels.announce_channel",
-                        )
-                        .map(ChannelId::new)
-                        .unwrap_or(message.channel_id);
-                        let _ = channel.say(&ctx.http, text).await;
+                        .await;
+                        let before_level = before / 100 + 1;
+                        let after_level = after / 100 + 1;
+                        if after_level > before_level {
+                            self.apply_level_rewards(&ctx, guild_id, &user_text, after_level)
+                                .await;
+                            let text = setting_string(
+                                &self.store,
+                                &guild_text,
+                                "community.levels.announce_template",
+                            )
+                            .unwrap_or_else(|| "{member} reached level {level}!".to_string())
+                            .replace("{member}", &format!("<@{}>", message.author.id))
+                            .replace("{level}", &after_level.to_string())
+                            .replace("{server}", "this server");
+                            let channel = setting_u64_optional(
+                                &self.store,
+                                &guild_text,
+                                "community.levels.announce_channel",
+                            )
+                            .map(ChannelId::new)
+                            .unwrap_or(message.channel_id);
+                            let _ = channel.say(&ctx.http, text).await;
+                        }
                     }
                 }
             }
