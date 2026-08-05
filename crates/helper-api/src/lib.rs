@@ -8672,6 +8672,12 @@ struct FeatureTestRequest {
     options: Vec<String>,
     #[serde(default, rename = "durationMs")]
     duration_ms: Option<i64>,
+    #[serde(default)]
+    prize: Option<String>,
+    #[serde(default)]
+    winners: Option<i64>,
+    #[serde(default, rename = "requiredRole")]
+    required_role: Option<String>,
 }
 
 fn generic_feature_effect(key: &str) -> Vec<String> {
@@ -8852,6 +8858,9 @@ async fn test_feature(
         "question": test.question.clone(),
         "options": test.options.clone(),
         "durationMs": test.duration_ms,
+        "prize": test.prize.clone(),
+        "winners": test.winners,
+        "requiredRole": test.required_role.clone(),
     });
     let adapter_effects = if maturity == FeatureMaturity::Blocked {
         // A blocked provider must never claim that a JSON draft would be

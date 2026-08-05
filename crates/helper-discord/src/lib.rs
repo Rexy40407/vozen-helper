@@ -8,12 +8,12 @@ use helper_core::{
     LeaderboardEntry, ModerationObservation, ModerationPolicy, ReminderObservation, ReminderPolicy,
     RolePanelObservation, StarboardObservation, WorkflowObservation, WorkflowPolicy,
     anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
-    evaluate_custom_command, evaluate_embed, evaluate_join_gate, evaluate_leaderboard,
-    evaluate_moderation, evaluate_poll, evaluate_reminder, evaluate_role_panel,
-    evaluate_scam_with_roles, evaluate_starboard, evaluate_temp_channel, evaluate_welcome_channel,
-    evaluate_workflow, feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
-    parse_utc_offset_minutes, quota_limit, render_member_message, scam_policy_from_json,
-    starboard_policy_from_json,
+    evaluate_custom_command, evaluate_embed, evaluate_giveaway, evaluate_join_gate,
+    evaluate_leaderboard, evaluate_moderation, evaluate_poll, evaluate_reminder,
+    evaluate_role_panel, evaluate_scam_with_roles, evaluate_starboard, evaluate_temp_channel,
+    evaluate_welcome_channel, evaluate_workflow, feature_is_configurable, feature_maturity,
+    leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit, render_member_message,
+    scam_policy_from_json, starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -7249,8 +7249,26 @@ impl Handler {
                     CommandDataOptionValue::Role(role) if option.name == "required_role" => Some(role.to_string()),
                     _ => None,
                 }).or_else(|| setting_string(&self.store, &guild_id.to_string(), "community.giveaways.required_role").filter(|value| !value.trim().is_empty()));
-                let end_at = chrono::Utc::now().timestamp_millis() + delay;
-                let id = self.store.create_giveaway(&guild_id.to_string(), &command.channel_id.to_string(), prize, winners, end_at, required_role.as_deref(), &command.user.id.to_string())?;
+                let giveaway_config = serde_json::json!({
+                    "defaultDurationHours": default_hours,
+                    "defaultWinners": setting_u64(&self.store, &guild_id.to_string(), "community.giveaways.default_winners", 1),
+                    "requiredRole": required_role.clone().unwrap_or_default(),
+                });
+                let decision = evaluate_giveaway(
+                    &giveaway_config,
+                    prize,
+                    Some(winners),
+                    Some(delay),
+                    required_role.as_deref(),
+                );
+                if !decision.allowed {
+                    return respond(ctx, command, &decision.explanation).await;
+                }
+                let prize = decision.prize;
+                let winners = decision.winners as i64;
+                let required_role = decision.required_role_id;
+                let end_at = chrono::Utc::now().timestamp_millis() + decision.duration_ms;
+                let id = self.store.create_giveaway(&guild_id.to_string(), &command.channel_id.to_string(), &prize, winners, end_at, required_role.as_deref(), &command.user.id.to_string())?;
                 let message = command.channel_id.send_message(&ctx.http, serenity::all::CreateMessage::new()
                     .content(format!("🎉 **Giveaway #{id}**\nPrize: **{prize}**\nWinners: **{winners}**\nEnds <t:{}:R>\nClick the button to join.", end_at / 1_000))
                     .components(vec![CreateActionRow::Buttons(vec![CreateButton::new(format!("giveaway:join:{id}")).label("Join").style(ButtonStyle::Primary)])])).await?;

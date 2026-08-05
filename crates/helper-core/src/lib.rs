@@ -1548,6 +1548,101 @@ pub fn evaluate_poll(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GiveawayDecision {
+    pub allowed: bool,
+    pub prize: String,
+    pub winners: u64,
+    pub duration_ms: i64,
+    pub required_role_id: Option<String>,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+/// Bound giveaway creation before a durable draw is scheduled.  The API
+/// preview and the Discord command use the same prize, winner, duration and
+/// eligibility rules.
+pub fn evaluate_giveaway(
+    config: &serde_json::Value,
+    prize: &str,
+    winners_override: Option<i64>,
+    duration_override_ms: Option<i64>,
+    required_role_override: Option<&str>,
+) -> GiveawayDecision {
+    let prize = prize.trim();
+    if prize.is_empty() {
+        return GiveawayDecision {
+            allowed: false,
+            prize: String::new(),
+            winners: 0,
+            duration_ms: 0,
+            required_role_id: None,
+            reason_code: "prize_required",
+            explanation: "A giveaway needs a prize description.".into(),
+        };
+    }
+    if prize.chars().count() > 200 {
+        return GiveawayDecision {
+            allowed: false,
+            prize: prize.chars().take(200).collect(),
+            winners: 0,
+            duration_ms: 0,
+            required_role_id: None,
+            reason_code: "prize_too_long",
+            explanation: "The giveaway prize must be 200 characters or fewer.".into(),
+        };
+    }
+    let object = config.as_object();
+    let winners = winners_override
+        .or_else(|| {
+            object
+                .and_then(|values| values.get("defaultWinners"))
+                .and_then(serde_json::Value::as_i64)
+        })
+        .unwrap_or(1)
+        .clamp(1, 20);
+    let default_hours = object
+        .and_then(|values| values.get("defaultDurationHours"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(24)
+        .clamp(1, 168);
+    let duration_ms = duration_override_ms
+        .filter(|value| (60_000..=168 * 3_600_000).contains(value))
+        .unwrap_or(default_hours * 3_600_000);
+    let required_role = required_role_override
+        .or_else(|| {
+            object
+                .and_then(|values| values.get("requiredRole"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .filter(|value| !value.trim().is_empty())
+        .map(str::trim)
+        .map(str::to_owned);
+    if required_role
+        .as_deref()
+        .is_some_and(|value| value.parse::<u64>().is_err())
+    {
+        return GiveawayDecision {
+            allowed: false,
+            prize: prize.into(),
+            winners: winners as u64,
+            duration_ms,
+            required_role_id: required_role,
+            reason_code: "invalid_required_role",
+            explanation: "The required giveaway role must be a valid Discord role ID.".into(),
+        };
+    }
+    GiveawayDecision {
+        allowed: true,
+        prize: prize.into(),
+        winners: winners as u64,
+        duration_ms,
+        required_role_id: required_role,
+        reason_code: "giveaway_ready",
+        explanation: "The giveaway is within bounded prize, winner and duration limits.".into(),
+    }
+}
+
 /// Evaluate a single role-panel click without touching Discord.  Keeping
 /// this transition in `helper-core` means the API preview and the Serenity
 /// interaction handler cannot drift on unique/multiple or toggle-off rules.
@@ -1995,6 +2090,48 @@ impl FeatureAdapter for CommunityInteractionAdapter {
                     decision.options.len(),
                     decision.channel_id,
                     decision.duration_ms / 3_600_000
+                )]
+            };
+            effects.extend(
+                self.runtime_projection(config)
+                    .into_iter()
+                    .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+            );
+            return effects;
+        }
+        if self.key == "community.giveaways" {
+            let prize = fixture_string(fixture, "prize", "prize", "Preview prize");
+            let winners = fixture
+                .get("winners")
+                .or_else(|| fixture.get("winnerCount"))
+                .and_then(serde_json::Value::as_i64);
+            let duration_override_ms = fixture
+                .get("durationMs")
+                .or_else(|| fixture.get("duration_ms"))
+                .and_then(serde_json::Value::as_i64);
+            let required_role = fixture
+                .get("requiredRole")
+                .or_else(|| fixture.get("required_role"))
+                .and_then(serde_json::Value::as_str);
+            let decision =
+                evaluate_giveaway(config, prize, winners, duration_override_ms, required_role);
+            let mut effects = if !decision.allowed {
+                vec![format!(
+                    "Giveaway rejected ({}): {}",
+                    decision.reason_code, decision.explanation
+                )]
+            } else {
+                let role = decision
+                    .required_role_id
+                    .as_deref()
+                    .map(|value| format!(" requiring <@&{value}>"))
+                    .unwrap_or_default();
+                vec![format!(
+                    "Create giveaway `{}` with {} winner(s) for {} hour(s){} and schedule an idempotent draw.",
+                    decision.prize,
+                    decision.winners,
+                    decision.duration_ms / 3_600_000,
+                    role
                 )]
             };
             effects.extend(
@@ -9973,6 +10110,24 @@ mod tests {
             }),
         );
         assert!(rejected[0].contains("options_required"));
+
+        let giveaways = feature_adapter("community.giveaways").expect("giveaways adapter");
+        let giveaway_preview = giveaways.simulate(
+            &serde_json::json!({"defaultDurationHours": 24, "defaultWinners": 2}),
+            &serde_json::json!({
+                "prize": "Community bundle",
+                "winners": 3,
+                "durationMs": 7_200_000,
+                "requiredRole": "456"
+            }),
+        );
+        assert!(giveaway_preview[0].contains("Create giveaway"));
+        assert!(giveaway_preview[0].contains("3 winner(s)"));
+        let rejected = giveaways.simulate(
+            &serde_json::json!({"defaultDurationHours": 24}),
+            &serde_json::json!({"prize": "No role", "requiredRole": "not-a-role"}),
+        );
+        assert!(rejected[0].contains("invalid_required_role"));
     }
 
     #[test]
