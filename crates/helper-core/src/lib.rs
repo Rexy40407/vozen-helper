@@ -203,6 +203,49 @@ pub fn anti_spam_policy_from_json(value: &serde_json::Value) -> AntiSpamPolicy {
     policy
 }
 
+/// Convert the bounded fixture accepted by the API into the observation used
+/// by the Discord gateway.  Both camelCase (panel payloads) and snake_case
+/// (Rust fixtures) are accepted so the simulation contract remains stable
+/// across clients without duplicating the decision logic.
+pub fn anti_spam_observation_from_json(value: &serde_json::Value) -> AntiSpamObservation {
+    let object = value.as_object();
+    let string = |camel: &str, snake: &str, fallback: &str| {
+        object
+            .and_then(|values| values.get(camel).or_else(|| values.get(snake)))
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(fallback)
+            .to_owned()
+    };
+    let number = |camel: &str, snake: &str, fallback: u32| {
+        object
+            .and_then(|values| values.get(camel).or_else(|| values.get(snake)))
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value.min(u32::MAX as u64) as u32)
+            .unwrap_or(fallback)
+    };
+    let roles = object
+        .and_then(|values| values.get("roleIds").or_else(|| values.get("role_ids")))
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .take(100)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    AntiSpamObservation {
+        channel_id: string("channelId", "channel_id", "preview-channel"),
+        role_ids: roles,
+        message_count: number("messageCount", "message_count", 6),
+        duplicate_count: number("duplicateCount", "duplicate_count", 3),
+        mention_count: number("mentionCount", "mention_count", 5),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScamPolicy {
     pub block_invites: bool,
@@ -5466,6 +5509,48 @@ impl FeatureAdapter for AntiSpamAdapter {
         }
         pairs
     }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let policy = anti_spam_policy_from_json(config);
+        let observation = anti_spam_observation_from_json(fixture);
+        let decision = evaluate_anti_spam(&policy, &observation);
+        if decision.ignored {
+            return vec!["Ignore the message because its channel or member role is exempt.".into()];
+        }
+        if decision.matched.is_empty() {
+            return vec!["Record no match and leave the message unchanged.".into()];
+        }
+        let mode = if decision.should_act {
+            "action"
+        } else {
+            "monitor-only"
+        };
+        let action = if decision.should_act && decision.timeout_seconds > 0 {
+            format!(" and apply a {} second timeout", decision.timeout_seconds)
+        } else {
+            String::new()
+        };
+        let mut effects = vec![format!(
+            "Record {} in {mode} mode{action} ({} messages, {} duplicate(s), {} mention(s)).",
+            decision.matched.join(", "),
+            observation.message_count,
+            observation.duplicate_count,
+            observation.mention_count
+        )];
+        if let Some(channel) = config
+            .get("logChannel")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            effects.push(format!("Publish the decision to log channel {channel}."));
+        }
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(key, value)| format!("Runtime setting {key}={value}.")),
+        );
+        effects
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -6954,6 +7039,43 @@ mod tests {
         assert!(projection.contains(&("security.antispam.ignored_channels".into(), "123".into())));
         assert!(projection.contains(&("security.antispam.alert_only".into(), "true".into())));
         assert!(feature_adapter("community.levels").is_some());
+    }
+
+    #[test]
+    fn anti_spam_adapter_preview_uses_camel_and_snake_case_fixtures() {
+        let adapter = feature_adapter("protection.antispam").expect("adapter registered");
+        let config = serde_json::json!({
+            "floodCount": 4,
+            "duplicateLimit": 2,
+            "mentionLimit": 3,
+            "timeoutSeconds": 90,
+            "logChannel": "987654321098765432"
+        });
+        for fixture in [
+            serde_json::json!({
+                "channelId": "general",
+                "roleIds": [],
+                "messageCount": 4,
+                "duplicateCount": 2,
+                "mentionCount": 3
+            }),
+            serde_json::json!({
+                "channel_id": "general",
+                "role_ids": [],
+                "message_count": 4,
+                "duplicate_count": 2,
+                "mention_count": 3
+            }),
+        ] {
+            let effects = adapter.simulate(&config, &fixture);
+            assert!(effects[0].contains("90 second timeout"));
+            assert!(effects.iter().any(|effect| effect.contains("log channel")));
+            assert!(
+                effects
+                    .iter()
+                    .any(|effect| effect.contains("security.antispam.flood_count=4"))
+            );
+        }
     }
 
     #[test]

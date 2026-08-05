@@ -7491,9 +7491,20 @@ async fn test_feature(
     // The adapter owns the projection used for a preview.  The HTTP layer
     // only supplies bounded fixture data and keeps specialised evaluators
     // (anti-spam/scam) below for their detailed explanations.
+    let anti_spam_fixture = test.fixture.clone().unwrap_or_else(|| AntiSpamObservation {
+        channel_id: "preview-channel".into(),
+        role_ids: Vec::new(),
+        message_count: 6,
+        duplicate_count: 3,
+        mention_count: 5,
+    });
     let adapter_fixture = serde_json::json!({
         "content": test.content.clone(),
-        "channelId": test.channel_id.clone(),
+        "channelId": test.channel_id.clone().unwrap_or_else(|| anti_spam_fixture.channel_id.clone()),
+        "roleIds": anti_spam_fixture.role_ids.clone(),
+        "messageCount": anti_spam_fixture.message_count,
+        "duplicateCount": anti_spam_fixture.duplicate_count,
+        "mentionCount": anti_spam_fixture.mention_count,
         "reactionCount": test.reaction_count,
         "reactorIds": test.reactor_ids,
         "authorId": test.author_id.clone(),
@@ -7522,32 +7533,12 @@ async fn test_feature(
     let mut anti_spam_decision: Option<AntiSpamDecision> = None;
     let effects = match key.as_str() {
         "protection.antispam" => {
-            let fixture = test.fixture.unwrap_or_else(|| AntiSpamObservation {
-                channel_id: "preview-channel".into(),
-                role_ids: Vec::new(),
-                message_count: 6,
-                duplicate_count: 3,
-                mention_count: 5,
-            });
+            let fixture = anti_spam_fixture.clone();
             let decision = evaluate_anti_spam(&anti_spam_policy_from_json(&test.config), &fixture);
-            let effects = if decision.ignored {
-                vec!["Ignorar a mensagem por causa de uma exceção configurada".into()]
-            } else if decision.matched.is_empty() {
-                vec!["Não aplicar qualquer ação".into()]
-            } else if decision.should_act {
-                vec![format!(
-                    "Registar {} e aplicar timeout de {} segundo(s)",
-                    decision.matched.join(", "),
-                    decision.timeout_seconds
-                )]
-            } else {
-                vec![format!(
-                    "Registar {} em modo de monitorização, sem timeout",
-                    decision.matched.join(", ")
-                )]
-            };
             anti_spam_decision = Some(decision);
-            effects
+            adapter_effects.clone().unwrap_or_else(|| {
+                vec!["The anti-spam adapter could not produce a preview.".into()]
+            })
         }
         "protection.antiscam" => {
             let content = test
