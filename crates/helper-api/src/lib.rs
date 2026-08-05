@@ -7991,7 +7991,10 @@ fn provider_needs_runtime_ready(key: &str) -> bool {
     matches!(
         key,
         "social.youtube"
+            | "social.rss"
+            | "social.podcasts"
             | "social.twitch"
+            | "social.bluesky"
             | "web3.gas_tracker"
             | "web3.nft_stats"
             | "web3.nft_queries"
@@ -11347,6 +11350,27 @@ mod tests {
                 .unwrap()
                 .contains("Apply runtime setting")
         );
+    }
+
+    #[test]
+    fn every_subscription_provider_requires_a_live_runtime_client_before_enable() {
+        for key in [
+            "social.youtube",
+            "social.rss",
+            "social.podcasts",
+            "social.twitch",
+            "social.bluesky",
+            "social.reddit",
+            "social.x",
+            "social.tiktok",
+            "social.instagram",
+            "social.kick",
+        ] {
+            assert!(
+                provider_needs_runtime_ready(key),
+                "{key} must be guarded by provider readiness before it can be enabled"
+            );
+        }
     }
 
     #[tokio::test]
