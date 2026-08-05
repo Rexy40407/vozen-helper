@@ -8,11 +8,11 @@ use helper_core::{
     LeaderboardEntry, ModerationObservation, ModerationPolicy, ReminderObservation, ReminderPolicy,
     RolePanelObservation, StarboardObservation, WorkflowObservation, WorkflowPolicy,
     anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
-    evaluate_embed, evaluate_join_gate, evaluate_leaderboard, evaluate_moderation,
-    evaluate_reminder, evaluate_role_panel, evaluate_scam_with_roles, evaluate_starboard,
-    evaluate_temp_channel, evaluate_workflow, feature_is_configurable, feature_maturity,
-    leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit, render_member_message,
-    scam_policy_from_json, starboard_policy_from_json,
+    evaluate_custom_command, evaluate_embed, evaluate_join_gate, evaluate_leaderboard,
+    evaluate_moderation, evaluate_reminder, evaluate_role_panel, evaluate_scam_with_roles,
+    evaluate_starboard, evaluate_temp_channel, evaluate_workflow, feature_is_configurable,
+    feature_maturity, leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit,
+    render_member_message, scam_policy_from_json, starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -3348,81 +3348,87 @@ impl EventHandler for Handler {
                 .await;
         }
         if feature_enabled(&self.store, &guild_text, "management.custom_commands", None) {
-            let prefix = setting_string(
-                &self.store,
-                &guild_text,
-                "management.custom_commands.trigger_prefix",
-            )
-            .filter(|value| {
-                let value = value.trim();
-                !value.is_empty()
-                    && value.len() <= 3
-                    && value.chars().all(|character| {
-                        !character.is_whitespace()
-                            && !character.is_control()
-                            && !matches!(character, '@' | '#' | ':' | '`')
-                    })
-            })
-            .unwrap_or_else(|| "!".to_string());
             let staff_only = setting_bool(
                 &self.store,
                 &guild_text,
                 "management.custom_commands.staff_only",
                 false,
             );
-            let ignored = setting_string(
+            let ignored_channels = setting_string(
                 &self.store,
                 &guild_text,
                 "management.custom_commands.ignored_channels",
-            );
-            if !custom_command_channel_ignored(ignored, message.channel_id)
-                && (!staff_only
-                    || custom_command_is_staff(
-                        message
-                            .member
-                            .as_ref()
-                            .and_then(|member| member.permissions),
-                    ))
-                && let Some(parsed) = parse_custom_command(&message.content, &prefix)
-                && let Ok(Some(tag)) = self.store.get_tag(&guild_text, &parsed.name)
-            {
-                let max_length = setting_u64(
+            )
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+            let config = serde_json::json!({
+                "triggerPrefix": setting_string(
+                    &self.store,
+                    &guild_text,
+                    "management.custom_commands.trigger_prefix",
+                )
+                .unwrap_or_else(|| "!".into()),
+                "ignoredChannels": ignored_channels,
+                "staffOnly": staff_only,
+                "maxResponseLength": setting_u64(
                     &self.store,
                     &guild_text,
                     "management.custom_commands.max_response_length",
                     1_000,
-                )
-                .clamp(1, 2_000) as usize;
-                // The gateway context intentionally does not retain a broad
-                // cache. Keep the variable deterministic without performing a
-                // second Discord request in the message hot path.
-                let server_name = format!("server {guild_text}");
-                let response = render_custom_command(
-                    &tag.content,
-                    message.author.id,
-                    message.channel_id,
+                ),
+            });
+            let actor_is_staff = custom_command_is_staff(
+                message
+                    .member
+                    .as_ref()
+                    .and_then(|member| member.permissions),
+            );
+            let server_name = format!("server {guild_text}");
+            let preview = evaluate_custom_command(
+                &config,
+                &message.content,
+                &message.channel_id.to_string(),
+                actor_is_staff,
+                None,
+                &message.author.id.to_string(),
+                &server_name,
+            );
+            if preview.reason_code == "tag_not_found"
+                && let Ok(Some(tag)) = self.store.get_tag(&guild_text, &preview.command_name)
+            {
+                let decision = evaluate_custom_command(
+                    &config,
+                    &message.content,
+                    &message.channel_id.to_string(),
+                    actor_is_staff,
+                    Some(&tag.content),
+                    &message.author.id.to_string(),
                     &server_name,
-                    &parsed.args,
-                    max_length,
                 );
-                if !response.trim().is_empty()
+                if decision.allowed
                     && message
                         .channel_id
                         .send_message(
                             &ctx.http,
-                            CreateMessage::new().content(response).allowed_mentions(
-                                CreateAllowedMentions::new()
-                                    .everyone(false)
-                                    .empty_users()
-                                    .empty_roles()
-                                    .replied_user(false),
-                            ),
+                            CreateMessage::new()
+                                .content(&decision.response)
+                                .allowed_mentions(
+                                    CreateAllowedMentions::new()
+                                        .everyone(false)
+                                        .empty_users()
+                                        .empty_roles()
+                                        .replied_user(false),
+                                ),
                         )
                         .await
                         .is_ok()
                 {
                     let detail = serde_json::json!({
-                        "command": parsed.name,
+                        "command": decision.command_name,
                         "messageId": message.id.to_string(),
                         "channelId": message.channel_id.to_string(),
                         "staffOnly": staff_only,
@@ -10358,12 +10364,14 @@ fn truncate(value: &str, max_chars: usize) -> String {
     output
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedCustomCommand {
     name: String,
     args: String,
 }
 
+#[cfg(test)]
 fn parse_custom_command(content: &str, prefix: &str) -> Option<ParsedCustomCommand> {
     let prefix = prefix.trim();
     if prefix.is_empty() || !content.starts_with(prefix) {
@@ -10392,6 +10400,7 @@ fn parse_custom_command(content: &str, prefix: &str) -> Option<ParsedCustomComma
     })
 }
 
+#[cfg(test)]
 fn custom_command_channel_ignored(raw_channels: Option<String>, channel_id: ChannelId) -> bool {
     raw_channels.is_some_and(|channels| {
         channels
@@ -10408,6 +10417,7 @@ fn custom_command_is_staff(permissions: Option<Permissions>) -> bool {
     })
 }
 
+#[cfg(test)]
 fn render_custom_command(
     template: &str,
     user_id: serenity::all::UserId,

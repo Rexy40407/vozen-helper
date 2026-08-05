@@ -2168,6 +2168,152 @@ impl FeatureAdapter for TempChannelsAdapter {
     }
 }
 
+/// Decision returned by the bounded custom-command evaluator.  The same
+/// parser, guards and renderer are used by the API preview and gateway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomCommandDecision {
+    pub allowed: bool,
+    pub command_name: String,
+    pub args: String,
+    pub response: String,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+fn parse_custom_command_input(content: &str, prefix: &str) -> Option<(String, String)> {
+    let prefix = prefix.trim();
+    if prefix.is_empty() || !content.starts_with(prefix) {
+        return None;
+    }
+    let remainder = content[prefix.len()..].trim_start();
+    let mut parts = remainder.splitn(2, char::is_whitespace);
+    let name = parts.next()?.trim().to_lowercase();
+    if name.is_empty()
+        || name.len() > 32
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return None;
+    }
+    Some((
+        name,
+        parts
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .chars()
+            .take(512)
+            .collect(),
+    ))
+}
+
+/// Evaluate a saved response without Discord or store access. `tag_content`
+/// is `None` when the named tag does not exist in the guild.
+pub fn evaluate_custom_command(
+    config: &serde_json::Value,
+    content: &str,
+    channel_id: &str,
+    actor_is_staff: bool,
+    tag_content: Option<&str>,
+    user_id: &str,
+    server_name: &str,
+) -> CustomCommandDecision {
+    let prefix = config
+        .get("triggerPrefix")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("!");
+    let Some((command_name, args)) = parse_custom_command_input(content, prefix) else {
+        return CustomCommandDecision {
+            allowed: false,
+            command_name: String::new(),
+            args: String::new(),
+            response: String::new(),
+            reason_code: "not_a_custom_command",
+            explanation: "The message does not use the configured command prefix.".into(),
+        };
+    };
+    let ignored = config
+        .get("ignoredChannels")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|channels| {
+            channels.iter().any(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|candidate| candidate.trim() == channel_id)
+            })
+        });
+    if ignored {
+        return CustomCommandDecision {
+            allowed: false,
+            command_name,
+            args,
+            response: String::new(),
+            reason_code: "channel_ignored",
+            explanation: "Custom commands are disabled in this channel.".into(),
+        };
+    }
+    if config
+        .get("staffOnly")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        && !actor_is_staff
+    {
+        return CustomCommandDecision {
+            allowed: false,
+            command_name,
+            args,
+            response: String::new(),
+            reason_code: "staff_only",
+            explanation: "Only server staff can use custom commands in this server.".into(),
+        };
+    }
+    let Some(tag_content) = tag_content else {
+        return CustomCommandDecision {
+            allowed: false,
+            command_name,
+            args,
+            response: String::new(),
+            reason_code: "tag_not_found",
+            explanation: "No saved response exists for this command.".into(),
+        };
+    };
+    let max_chars = config
+        .get("maxResponseLength")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1_000)
+        .clamp(1, 2_000) as usize;
+    let response = tag_content
+        .replace("{user}", &format!("<@{user_id}>"))
+        .replace("{channel}", &format!("<#{}>", channel_id))
+        .replace("{server}", server_name)
+        .replace("{args}", &args)
+        .replace("@everyone", "@\u{200b}everyone")
+        .replace("@here", "@\u{200b}here")
+        .chars()
+        .take(max_chars)
+        .collect::<String>();
+    if response.trim().is_empty() {
+        return CustomCommandDecision {
+            allowed: false,
+            command_name,
+            args,
+            response,
+            reason_code: "empty_response",
+            explanation: "The saved response is empty after rendering.".into(),
+        };
+    }
+    CustomCommandDecision {
+        allowed: true,
+        command_name,
+        args,
+        response,
+        reason_code: "custom_command_ready",
+        explanation: "The saved response can be sent with broadcast mentions disabled.".into(),
+    }
+}
+
 /// Adapter for the tag-backed custom command module.  Tags are the bounded,
 /// user-authored responses exposed by `/tag` and `/tag-set`; the adapter keeps
 /// the limits in the same source of truth as the runtime instead of leaving
@@ -2350,6 +2496,57 @@ impl FeatureAdapter for CustomCommandsAdapter {
             ));
         }
         projection
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let content = fixture
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("!rules");
+        let channel_id = fixture
+            .get("channelId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("preview-channel");
+        let actor_is_staff = fixture
+            .get("actorIsStaff")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let decision = evaluate_custom_command(
+            config,
+            content,
+            channel_id,
+            actor_is_staff,
+            fixture
+                .get("tagContent")
+                .or_else(|| fixture.get("template"))
+                .and_then(serde_json::Value::as_str),
+            fixture
+                .get("userId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("preview-user"),
+            fixture
+                .get("serverName")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Preview server"),
+        );
+        let mut effects = if decision.allowed {
+            vec![format!(
+                "Send custom command `{}` with {} characters and broadcast mentions disabled.",
+                decision.command_name,
+                decision.response.chars().count()
+            )]
+        } else {
+            vec![format!(
+                "Custom command rejected ({}): {}",
+                decision.reason_code, decision.explanation
+            )]
+        };
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
@@ -9735,6 +9932,34 @@ mod tests {
             "management.custom_commands.staff_only".into(),
             "true".into()
         )));
+        let decision = evaluate_custom_command(
+            &serde_json::json!({
+                "triggerPrefix": "!",
+                "staffOnly": true,
+                "maxResponseLength": 80
+            }),
+            "!rules read this",
+            "123",
+            true,
+            Some("Hello {user}: {args} @everyone"),
+            "42",
+            "Preview server",
+        );
+        assert!(decision.allowed);
+        assert_eq!(decision.command_name, "rules");
+        assert!(decision.response.contains("<@42>"));
+        assert!(decision.response.contains("@\u{200b}everyone"));
+        let preview = custom.simulate(
+            &serde_json::json!({"triggerPrefix":"!", "maxResponseLength":80}),
+            &serde_json::json!({
+                "content":"!rules read this",
+                "channelId":"123",
+                "actorIsStaff":true,
+                "tagContent":"Hello {user}: {args}",
+                "userId":"42"
+            }),
+        );
+        assert!(preview[0].contains("Send custom command `rules`"));
 
         let audit = feature_adapter("management.audit").expect("audit adapter");
         assert_eq!(audit.descriptor().defaults["threshold"], 3);
