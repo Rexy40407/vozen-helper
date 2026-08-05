@@ -4401,6 +4401,32 @@ impl Store {
         Ok(())
     }
 
+    pub fn try_open_ticket(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        channel_id: &str,
+        max_open: u32,
+    ) -> Result<bool> {
+        let limit = i64::from(max_open.clamp(1, 10));
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let open_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM tickets WHERE guild_id=?1 AND opener_id=?2 AND status='open'",
+            params![guild_id, user_id],
+            |row| row.get(0),
+        )?;
+        if open_count >= limit {
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO tickets(guild_id,channel_id,opener_id,status,claimed_by,created_at) VALUES(?1,?3,?2,'open',NULL,?4)",
+            params![guild_id, user_id, channel_id, Utc::now().timestamp_millis()],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn active_ticket_for_user(
         &self,
         guild_id: &str,
@@ -4412,6 +4438,16 @@ impl Store {
             params![guild_id, user_id],
             |row| Ok(TicketRecord { guild_id: row.get(0)?, user_id: row.get(1)?, channel_id: row.get(2)?, status: row.get(3)?, claimed_by: row.get(4)?, category: row.get(5)?, priority: row.get(6)?, notes: row.get(7)?, csat: row.get(8)?, created_at: row.get(9)?, closed_at: row.get(10)? }),
         ).optional()?)
+    }
+
+    pub fn active_ticket_count_for_user(&self, guild_id: &str, user_id: &str) -> Result<u32> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let count = conn.query_row(
+            "SELECT COUNT(*) FROM tickets WHERE guild_id=?1 AND opener_id=?2 AND status='open'",
+            params![guild_id, user_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count.try_into().unwrap_or(u32::MAX))
     }
 
     pub fn ticket_by_channel(&self, channel_id: &str) -> Result<Option<TicketRecord>> {
@@ -5225,7 +5261,11 @@ mod tests {
         assert_eq!(jobs[0].0, id);
         assert_eq!(jobs[0].4, r#"{"channel_id":"2","text":"hello"}"#);
         store.open_ticket("g", "u", "20").unwrap();
+        assert_eq!(store.active_ticket_count_for_user("g", "u").unwrap(), 1);
+        assert!(!store.try_open_ticket("g", "u", "21", 1).unwrap());
         assert!(store.close_ticket("20").unwrap());
+        assert_eq!(store.active_ticket_count_for_user("g", "u").unwrap(), 0);
+        assert!(store.try_open_ticket("g", "u", "21", 1).unwrap());
         assert_eq!(
             store.ticket_by_channel("20").unwrap().unwrap().status,
             "closed"

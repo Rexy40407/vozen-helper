@@ -3589,11 +3589,12 @@ impl FeatureAdapter for TicketsAdapter {
                         {"key":"categoryId","label":"Ticket category","kind":"category","help":"New ticket channels are created inside this category."},
                         {"key":"staffRole","label":"Support team role","kind":"role","help":"This role can claim, close and reopen tickets."},
                         {"key":"transcriptChannel","label":"Transcript channel","kind":"channel","help":"Closed ticket transcripts are sent here."},
+                        {"key":"maxOpen","label":"Open tickets per member","kind":"number","min":1,"max":10,"help":"Limit the number of simultaneous tickets one member can open."},
                         {"key":"closeAfterHours","label":"SLA reminder (hours)","kind":"number","min":1,"max":168,"help":"The Helper records an overdue ticket job after this period."}
                     ]
                 }]
             }),
-            defaults: serde_json::json!({"categoryId":"","staffRole":"","transcriptChannel":"","closeAfterHours":1}),
+            defaults: serde_json::json!({"categoryId":"","staffRole":"","transcriptChannel":"","maxOpen":1,"closeAfterHours":1}),
             dependencies: vec![
                 "manage_channels".into(),
                 "send_messages".into(),
@@ -3638,6 +3639,18 @@ impl FeatureAdapter for TicketsAdapter {
                 severity: "error".into(),
             });
         }
+        if let Some(value) = object.get("maxOpen")
+            && !value
+                .as_i64()
+                .is_some_and(|count| (1..=10).contains(&count))
+        {
+            issues.push(ValidationIssue {
+                path: "maxOpen".into(),
+                code: "out_of_range".into(),
+                message: "Open tickets per member must be between 1 and 10.".into(),
+                severity: "error".into(),
+            });
+        }
         issues
     }
 
@@ -3666,6 +3679,9 @@ impl FeatureAdapter for TicketsAdapter {
                 "support.ticket.sla_ms".into(),
                 (value * 3_600_000).to_string(),
             ));
+        }
+        if let Some(value) = object.get("maxOpen").and_then(serde_json::Value::as_i64) {
+            pairs.push(("support.ticket.max_open".into(), value.to_string()));
         }
         pairs
     }
@@ -8709,6 +8725,7 @@ mod tests {
                     "categoryId": "789",
                     "staffRole": "123",
                     "transcriptChannel": "456",
+                    "maxOpen": 3,
                     "closeAfterHours": 2
                 }))
                 .contains(&("support.ticket.category_id".into(), "789".into()))
@@ -8719,9 +8736,15 @@ mod tests {
                     "categoryId": "789",
                     "staffRole": "123",
                     "transcriptChannel": "456",
+                    "maxOpen": 3,
                     "closeAfterHours": 2
                 }))
                 .contains(&("support.ticket.sla_ms".into(), "7200000".into()))
+        );
+        assert!(
+            tickets
+                .runtime_projection(&serde_json::json!({"maxOpen": 3}))
+                .contains(&("support.ticket.max_open".into(), "3".into()))
         );
 
         let welcome = feature_adapter("support.welcome").expect("welcome adapter registered");

@@ -8401,14 +8401,22 @@ impl Handler {
                     )
                     .await;
                 }
-                if let Some(ticket) = self
-                    .store
-                    .active_ticket_for_user(&guild_id.to_string(), &component.user.id.to_string())?
-                {
+                let max_open = setting_u64(
+                    &self.store,
+                    &guild_id.to_string(),
+                    "support.ticket.max_open",
+                    1,
+                )
+                .clamp(1, 10);
+                let open_count = self.store.active_ticket_count_for_user(
+                    &guild_id.to_string(),
+                    &component.user.id.to_string(),
+                )?;
+                if open_count >= max_open as u32 {
                     return respond_component(
                         ctx,
                         component,
-                        &format!("You already have an open ticket: <#{}>.", ticket.channel_id),
+                        &format!("You already have the maximum of {max_open} open ticket(s)."),
                     )
                     .await;
                 }
@@ -8457,11 +8465,20 @@ impl Handler {
                     create = create.category(category_id);
                 }
                 let channel = guild_id.create_channel(&ctx.http, create).await?;
-                self.store.open_ticket(
+                if !self.store.try_open_ticket(
                     &guild_id.to_string(),
                     &component.user.id.to_string(),
                     &channel.id.to_string(),
-                )?;
+                    max_open as u32,
+                )? {
+                    let _ = channel.id.delete(&ctx.http).await;
+                    return respond_component(
+                        ctx,
+                        component,
+                        &format!("You already have the maximum of {max_open} open ticket(s)."),
+                    )
+                    .await;
+                }
                 let sla_ms = self
                     .store
                     .get_setting(&guild_id.to_string(), "support.ticket.sla_ms")?
