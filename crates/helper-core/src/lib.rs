@@ -3590,11 +3590,13 @@ impl FeatureAdapter for TicketsAdapter {
                         {"key":"staffRole","label":"Support team role","kind":"role","help":"This role can claim, close and reopen tickets."},
                         {"key":"transcriptChannel","label":"Transcript channel","kind":"channel","help":"Closed ticket transcripts are sent here."},
                         {"key":"maxOpen","label":"Open tickets per member","kind":"number","min":1,"max":10,"help":"Limit the number of simultaneous tickets one member can open."},
+                        {"key":"panelTitle","label":"Panel title","kind":"text","min":1,"max":100},
+                        {"key":"panelDescription","label":"Panel description","kind":"textarea","min":1,"max":1000},
                         {"key":"closeAfterHours","label":"SLA reminder (hours)","kind":"number","min":1,"max":168,"help":"The Helper records an overdue ticket job after this period."}
                     ]
                 }]
             }),
-            defaults: serde_json::json!({"categoryId":"","staffRole":"","transcriptChannel":"","maxOpen":1,"closeAfterHours":1}),
+            defaults: serde_json::json!({"categoryId":"","staffRole":"","transcriptChannel":"","maxOpen":1,"panelTitle":"Need support?","panelDescription":"Open a private ticket and the support team will help you." ,"closeAfterHours":1}),
             dependencies: vec![
                 "manage_channels".into(),
                 "send_messages".into(),
@@ -3651,6 +3653,32 @@ impl FeatureAdapter for TicketsAdapter {
                 severity: "error".into(),
             });
         }
+        for (field, max, message) in [
+            (
+                "panelTitle",
+                100_usize,
+                "The panel title must contain 1-100 characters.",
+            ),
+            (
+                "panelDescription",
+                1_000_usize,
+                "The panel description must contain 1-1000 characters.",
+            ),
+        ] {
+            if let Some(value) = object.get(field)
+                && !value.as_str().is_some_and(|text| {
+                    let length = text.chars().count();
+                    (1..=max).contains(&length) && !text.chars().any(char::is_control)
+                })
+            {
+                issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "invalid_text".into(),
+                    message: message.into(),
+                    severity: "error".into(),
+                });
+            }
+        }
         issues
     }
 
@@ -3682,6 +3710,14 @@ impl FeatureAdapter for TicketsAdapter {
         }
         if let Some(value) = object.get("maxOpen").and_then(serde_json::Value::as_i64) {
             pairs.push(("support.ticket.max_open".into(), value.to_string()));
+        }
+        for (field, setting) in [
+            ("panelTitle", "support.ticket.panel_title"),
+            ("panelDescription", "support.ticket.panel_description"),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
+                pairs.push((setting.into(), value.into()));
+            }
         }
         pairs
     }
@@ -8726,6 +8762,8 @@ mod tests {
                     "staffRole": "123",
                     "transcriptChannel": "456",
                     "maxOpen": 3,
+                    "panelTitle": "Support",
+                    "panelDescription": "Open a ticket.",
                     "closeAfterHours": 2
                 }))
                 .contains(&("support.ticket.category_id".into(), "789".into()))
@@ -8737,6 +8775,8 @@ mod tests {
                     "staffRole": "123",
                     "transcriptChannel": "456",
                     "maxOpen": 3,
+                    "panelTitle": "Support",
+                    "panelDescription": "Open a ticket.",
                     "closeAfterHours": 2
                 }))
                 .contains(&("support.ticket.sla_ms".into(), "7200000".into()))
@@ -8745,6 +8785,14 @@ mod tests {
             tickets
                 .runtime_projection(&serde_json::json!({"maxOpen": 3}))
                 .contains(&("support.ticket.max_open".into(), "3".into()))
+        );
+        assert!(
+            tickets
+                .runtime_projection(&serde_json::json!({
+                    "panelTitle": "Support",
+                    "panelDescription": "Open a ticket."
+                }))
+                .contains(&("support.ticket.panel_title".into(), "Support".into()))
         );
 
         let welcome = feature_adapter("support.welcome").expect("welcome adapter registered");

@@ -7797,12 +7797,30 @@ impl Handler {
                     )
                     .await;
                 }
+                let title = setting_string(&self.store, &guild_text, "support.ticket.panel_title")
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| "Need support?".to_string());
+                let description = setting_string(
+                    &self.store,
+                    &guild_text,
+                    "support.ticket.panel_description",
+                )
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| {
+                    "Open a private ticket and the support team will help you.".to_string()
+                });
                 let message = command
                     .channel_id
                     .send_message(
                         &ctx.http,
                         serenity::all::CreateMessage::new()
-                            .content("Need help? Open a private ticket.")
+                            .content(format!("**{title}**\n{description}"))
+                            .allowed_mentions(
+                                CreateAllowedMentions::new()
+                                    .everyone(false)
+                                    .empty_users()
+                                    .empty_roles(),
+                            )
                             .components(vec![CreateActionRow::Buttons(vec![
                                 CreateButton::new("ticket:open")
                                     .label("Open ticket")
