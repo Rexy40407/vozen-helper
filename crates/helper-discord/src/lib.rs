@@ -10,7 +10,7 @@ use helper_core::{
     anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
     evaluate_audit, evaluate_birthday, evaluate_custom_command, evaluate_embed, evaluate_event,
     evaluate_giveaway, evaluate_join_gate, evaluate_leaderboard, evaluate_levels,
-    evaluate_moderation, evaluate_poll, evaluate_reminder, evaluate_role_panel,
+    evaluate_moderation, evaluate_nickname, evaluate_poll, evaluate_reminder, evaluate_role_panel,
     evaluate_scam_with_roles, evaluate_starboard, evaluate_suggestion, evaluate_temp_channel,
     evaluate_tickets, evaluate_welcome_channel, evaluate_workflow, feature_is_configurable,
     feature_maturity, leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit,
@@ -4548,9 +4548,12 @@ async fn run_nickname_worker(http: Arc<serenity::http::Http>, store: Store) {
             } else {
                 ""
             };
-            if nickname.chars().count() > 32 {
+            let nickname_config = serde_json::json!({"nickname": nickname});
+            let nickname_decision = evaluate_nickname(&nickname_config);
+            if !nickname_decision.allowed {
                 continue;
             }
+            let nickname = nickname_decision.nickname.as_str();
             let Ok(guild_id) = setting.guild_id.parse::<u64>() else {
                 continue;
             };

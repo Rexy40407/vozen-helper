@@ -5732,6 +5732,52 @@ impl NicknameAdapter {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NicknameDecision {
+    pub allowed: bool,
+    pub nickname: String,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+/// Validate the exact nickname mutation used by the API preview and the
+/// Discord worker. Empty text is intentional: it restores Discord's default
+/// display name when the feature is disabled or cleared.
+pub fn evaluate_nickname(config: &serde_json::Value) -> NicknameDecision {
+    let nickname = config
+        .get("nickname")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(64)
+        .collect::<String>();
+    if nickname.chars().count() > 32 || nickname.chars().any(char::is_control) {
+        return NicknameDecision {
+            allowed: false,
+            nickname,
+            reason_code: "invalid_nickname",
+            explanation:
+                "The nickname must be at most 32 characters and cannot contain control characters."
+                    .into(),
+        };
+    }
+    NicknameDecision {
+        allowed: true,
+        nickname: nickname.clone(),
+        reason_code: if nickname.is_empty() {
+            "restore_default"
+        } else {
+            "nickname_ready"
+        },
+        explanation: if nickname.is_empty() {
+            "The Helper nickname will be cleared and Discord's default name restored.".into()
+        } else {
+            format!("Apply `{nickname}` as the Helper's server nickname after preflight.")
+        },
+    }
+}
+
 impl FeatureAdapter for NicknameAdapter {
     fn descriptor(&self) -> FeatureAdapterDescriptor {
         FeatureAdapterDescriptor {
@@ -5778,6 +5824,24 @@ impl FeatureAdapter for NicknameAdapter {
             .and_then(serde_json::Value::as_str)
             .map(|value| vec![("identity.nickname".into(), value.to_owned())])
             .unwrap_or_default()
+    }
+
+    fn simulate(&self, config: &serde_json::Value, _fixture: &serde_json::Value) -> Vec<String> {
+        let decision = evaluate_nickname(config);
+        let mut effects = vec![if decision.allowed {
+            decision.explanation
+        } else {
+            format!(
+                "Nickname rejected ({}): {}",
+                decision.reason_code, decision.explanation
+            )
+        }];
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
@@ -11889,6 +11953,24 @@ mod tests {
                 }),
             );
         assert!(preview[0].contains("Award 60 XP"));
+    }
+
+    #[test]
+    fn nickname_simulation_uses_the_same_bounded_mutation_contract() {
+        let adapter = feature_adapter("management.nickname").expect("nickname adapter");
+        let ready = evaluate_nickname(&serde_json::json!({"nickname": "Vozen Helper"}));
+        assert!(ready.allowed);
+        assert_eq!(ready.reason_code, "nickname_ready");
+        let preview = adapter.simulate(
+            &serde_json::json!({"nickname": "Vozen Helper"}),
+            &serde_json::json!({}),
+        );
+        assert!(preview[0].contains("Apply `Vozen Helper`"));
+        let invalid = evaluate_nickname(&serde_json::json!({"nickname": "bad\nname"}));
+        assert!(!invalid.allowed);
+        assert_eq!(invalid.reason_code, "invalid_nickname");
+        let clear = evaluate_nickname(&serde_json::json!({"nickname": ""}));
+        assert_eq!(clear.reason_code, "restore_default");
     }
 
     #[test]
