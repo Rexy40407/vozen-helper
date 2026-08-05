@@ -1643,6 +1643,93 @@ pub fn evaluate_giveaway(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuggestionDecision {
+    pub allowed: bool,
+    pub text: String,
+    pub vote_mode: String,
+    pub anonymous: bool,
+    pub channel_id: String,
+    pub staff_channel_id: Option<String>,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+/// Normalize the suggestion publication contract shared by the API preview
+/// and `/suggest`. Cooldowns and role membership remain gateway/store checks,
+/// while message bounds, destinations and voting mode are pure decisions.
+pub fn evaluate_suggestion(
+    config: &serde_json::Value,
+    text: &str,
+    command_channel_id: &str,
+) -> SuggestionDecision {
+    let text = text.trim();
+    if !(3..=1_000).contains(&text.chars().count()) {
+        return SuggestionDecision {
+            allowed: false,
+            text: text.into(),
+            vote_mode: String::new(),
+            anonymous: false,
+            channel_id: String::new(),
+            staff_channel_id: None,
+            reason_code: "text_length_invalid",
+            explanation: "A suggestion must contain between 3 and 1000 characters.".into(),
+        };
+    }
+    let object = config.as_object();
+    let vote_mode = object
+        .and_then(|values| values.get("voteMode"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|mode| matches!(*mode, "up_down" | "up_only"))
+        .unwrap_or("up_down")
+        .to_owned();
+    let channel_id = object
+        .and_then(|values| values.get("channel"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| value.parse::<u64>().is_ok())
+        .unwrap_or(command_channel_id)
+        .to_owned();
+    let staff_channel_id = object
+        .and_then(|values| values.get("staffChannel"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::trim)
+        .map(str::to_owned);
+    if staff_channel_id
+        .as_deref()
+        .is_some_and(|value| value.parse::<u64>().is_err())
+    {
+        return SuggestionDecision {
+            allowed: false,
+            text: text.into(),
+            vote_mode,
+            anonymous: object
+                .and_then(|values| values.get("anonymous"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            channel_id,
+            staff_channel_id,
+            reason_code: "invalid_staff_channel",
+            explanation: "The staff notification destination must be a valid Discord channel ID."
+                .into(),
+        };
+    }
+    SuggestionDecision {
+        allowed: true,
+        text: text.into(),
+        vote_mode,
+        anonymous: object
+            .and_then(|values| values.get("anonymous"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        channel_id,
+        staff_channel_id,
+        reason_code: "suggestion_ready",
+        explanation:
+            "The suggestion is ready for publication with bounded voting and destinations.".into(),
+    }
+}
+
 /// Evaluate a single role-panel click without touching Discord.  Keeping
 /// this transition in `helper-core` means the API preview and the Serenity
 /// interaction handler cannot drift on unique/multiple or toggle-off rules.
@@ -2063,6 +2150,51 @@ impl FeatureAdapter for CommunityInteractionAdapter {
     }
 
     fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        if self.key == "community.suggestions" {
+            let text = fixture_string(
+                fixture,
+                "content",
+                "content",
+                "A bounded suggestion preview.",
+            );
+            let decision = evaluate_suggestion(
+                config,
+                text,
+                fixture_string(fixture, "channelId", "channel_id", "preview-channel"),
+            );
+            let mut effects = if !decision.allowed {
+                vec![format!(
+                    "Suggestion rejected ({}): {}",
+                    decision.reason_code, decision.explanation
+                )]
+            } else {
+                let audience = if decision.anonymous {
+                    "anonymously"
+                } else {
+                    "with the author"
+                };
+                let staff = decision
+                    .staff_channel_id
+                    .as_deref()
+                    .map(|value| format!(" and notify staff in <#{value}>"))
+                    .unwrap_or_default();
+                let cooldown = config
+                    .get("cooldownHours")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(24)
+                    .clamp(0, 720);
+                vec![format!(
+                    "Publish suggestion {audience} in <#{}> with {} voting and a {cooldown}-hour member cooldown{staff}.",
+                    decision.channel_id, decision.vote_mode
+                )]
+            };
+            effects.extend(
+                self.runtime_projection(config)
+                    .into_iter()
+                    .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+            );
+            return effects;
+        }
         if self.key == "management.polls" {
             let question = fixture_string(fixture, "question", "question", "Preview poll");
             let options = fixture_strings(fixture, "options", "options");

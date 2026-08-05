@@ -10,10 +10,10 @@ use helper_core::{
     anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
     evaluate_custom_command, evaluate_embed, evaluate_giveaway, evaluate_join_gate,
     evaluate_leaderboard, evaluate_moderation, evaluate_poll, evaluate_reminder,
-    evaluate_role_panel, evaluate_scam_with_roles, evaluate_starboard, evaluate_temp_channel,
-    evaluate_welcome_channel, evaluate_workflow, feature_is_configurable, feature_maturity,
-    leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit, render_member_message,
-    scam_policy_from_json, starboard_policy_from_json,
+    evaluate_role_panel, evaluate_scam_with_roles, evaluate_starboard, evaluate_suggestion,
+    evaluate_temp_channel, evaluate_welcome_channel, evaluate_workflow, feature_is_configurable,
+    feature_maturity, leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit,
+    render_member_message, scam_policy_from_json, starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -7110,6 +7110,25 @@ impl Handler {
                     return respond(ctx, command, "A sugestão deve ter entre 3 e 1000 caracteres.").await;
                 }
                 let guild_text = guild_id.to_string();
+                let suggestion_config = serde_json::json!({
+                    "channel": setting_string(&self.store, &guild_text, "community.suggestions.channel_id").unwrap_or_default(),
+                    "anonymous": setting_bool(&self.store, &guild_text, "community.suggestions.anonymous", false),
+                    "voteMode": setting_string(&self.store, &guild_text, "community.suggestions.vote_mode").unwrap_or_else(|| "up_down".into()),
+                    "staffChannel": setting_string(&self.store, &guild_text, "community.suggestions.staff_channel_id").unwrap_or_default(),
+                });
+                let decision = evaluate_suggestion(
+                    &suggestion_config,
+                    text,
+                    &command.channel_id.to_string(),
+                );
+                if !decision.allowed {
+                    return respond(ctx, command, &decision.explanation).await;
+                }
+                let text = decision.text;
+                let anonymous = decision.anonymous;
+                let vote_mode = decision.vote_mode;
+                let target_channel_id = decision.channel_id;
+                let staff_channel_id = decision.staff_channel_id;
                 let cooldown_hours = setting_i64(
                     &self.store,
                     &guild_text,
@@ -7144,14 +7163,14 @@ impl Handler {
                         return respond(ctx, command, "You need the configured role to submit a suggestion.").await;
                     }
                 }
-                let id = self.store.create_suggestion(&guild_text, &command.user.id.to_string(), text)?;
-                let author = if setting_bool(&self.store, &guild_text, "community.suggestions.anonymous", false) {
+                let id = self.store.create_suggestion(&guild_text, &command.user.id.to_string(), &text)?;
+                let author = if anonymous {
                     "Anonymous".to_string()
                 } else {
                     format!("<@{}>", command.user.id)
                 };
-                let target_channel = setting_string(&self.store, &guild_text, "community.suggestions.channel_id")
-                    .and_then(|value| value.parse::<u64>().ok())
+                let target_channel = target_channel_id
+                    .parse::<u64>()
                     .map(ChannelId::new)
                     .unwrap_or(command.channel_id);
                 let message = target_channel.send_message(&ctx.http, serenity::all::CreateMessage::new()
@@ -7162,14 +7181,7 @@ impl Handler {
                                 .label("Support")
                                 .style(ButtonStyle::Success),
                         ];
-                        if setting_string(
-                            &self.store,
-                            &guild_text,
-                            "community.suggestions.vote_mode",
-                        )
-                        .as_deref()
-                            != Some("up_only")
-                        {
+                        if vote_mode != "up_only" {
                             buttons.push(
                                 CreateButton::new(format!("suggest:down:{id}"))
                                     .label("Against")
@@ -7179,12 +7191,7 @@ impl Handler {
                         buttons
                     })])).await?;
                 self.store.set_suggestion_message(id, &message.id.to_string())?;
-                if let Some(staff_channel) = setting_string(
-                    &self.store,
-                    &guild_text,
-                    "community.suggestions.staff_channel_id",
-                )
-                .and_then(|value| value.parse::<u64>().ok())
+                if let Some(staff_channel) = staff_channel_id.and_then(|value| value.parse::<u64>().ok())
                 {
                     let _ = ChannelId::new(staff_channel)
                         .send_message(
