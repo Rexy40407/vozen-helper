@@ -1090,21 +1090,13 @@ impl Store {
             bail!("welcome delivery claim is invalid");
         }
         let conn = self.conn.lock().expect("store mutex poisoned");
-        let previous: Option<i64> = conn
-            .query_row(
-                "SELECT claimed_at FROM welcome_delivery_claims WHERE guild_id=?1 AND user_id=?2 AND kind=?3",
-                params![guild_id, user_id, kind],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if previous.is_some_and(|claimed_at| now.saturating_sub(claimed_at) < cooldown_seconds) {
-            return Ok(false);
-        }
-        conn.execute(
-            "INSERT INTO welcome_delivery_claims(guild_id,user_id,kind,claimed_at) VALUES(?1,?2,?3,?4) ON CONFLICT(guild_id,user_id,kind) DO UPDATE SET claimed_at=excluded.claimed_at",
-            params![guild_id, user_id, kind, now],
+        let tx = conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "INSERT INTO welcome_delivery_claims(guild_id,user_id,kind,claimed_at) VALUES(?1,?2,?3,?4) ON CONFLICT(guild_id,user_id,kind) DO UPDATE SET claimed_at=excluded.claimed_at WHERE excluded.claimed_at - welcome_delivery_claims.claimed_at >= ?5",
+            params![guild_id, user_id, kind, now, cooldown_seconds],
         )?;
-        Ok(true)
+        tx.commit()?;
+        Ok(changed == 1)
     }
 
     pub fn recent_activity(&self, guild_id: &str, limit: u32) -> Result<Vec<ActivityLogRecord>> {
