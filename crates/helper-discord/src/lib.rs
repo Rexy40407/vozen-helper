@@ -10028,12 +10028,7 @@ async fn deliver_scheduled_action(
             && let Some(remaining) = value.get("remaining").and_then(serde_json::Value::as_u64)
             && remaining > 0
         {
-            let interval_ms = match repeat {
-                "daily" => 86_400_000_i64,
-                "weekly" => 604_800_000_i64,
-                _ => 0,
-            };
-            if interval_ms > 0 {
+            if let Some(interval_ms) = reminder_repeat_interval_ms(repeat) {
                 let mut next_payload = value.clone();
                 next_payload["remaining"] = serde_json::json!(remaining - 1);
                 let _ = store.schedule_typed(
@@ -10048,6 +10043,14 @@ async fn deliver_scheduled_action(
     }
     store.delete_scheduled_action(id)?;
     Ok(())
+}
+
+fn reminder_repeat_interval_ms(repeat: &str) -> Option<i64> {
+    match repeat {
+        "daily" => Some(86_400_000),
+        "weekly" => Some(604_800_000),
+        _ => None,
+    }
 }
 
 fn approved_wallet_contract(value: &str) -> bool {
@@ -10509,6 +10512,13 @@ mod tests {
             Some("management.moderation")
         );
         assert_eq!(scheduled_action_feature("reminder"), None);
+    }
+
+    #[test]
+    fn recurring_reminders_only_accept_bounded_intervals() {
+        assert_eq!(reminder_repeat_interval_ms("daily"), Some(86_400_000));
+        assert_eq!(reminder_repeat_interval_ms("weekly"), Some(604_800_000));
+        assert_eq!(reminder_repeat_interval_ms("hourly"), None);
     }
 
     #[test]
