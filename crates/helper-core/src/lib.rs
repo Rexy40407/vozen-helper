@@ -6611,6 +6611,79 @@ impl PrivacyAdapter {
     pub const SOURCE: &'static str = "privacy_adapter_v1";
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivacyDecision {
+    pub allowed: bool,
+    pub action: String,
+    pub max_export_bytes: usize,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+pub fn evaluate_privacy(config: &serde_json::Value, action: &str) -> PrivacyDecision {
+    let object = config.as_object();
+    let action = action.trim().to_ascii_lowercase();
+    let max_export_bytes = object
+        .and_then(|value| value.get("maxExportBytes"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1_000_000)
+        .clamp(65_536, 10_000_000) as usize;
+    let allowed = match action.as_str() {
+        "export" | "data" => object
+            .and_then(|value| value.get("allowMemberExport"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+        "erase" => object
+            .and_then(|value| value.get("allowMemberErase"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+        _ => false,
+    };
+    let normalized_action = if action == "data" {
+        "export".to_owned()
+    } else {
+        action.clone()
+    };
+    if !matches!(normalized_action.as_str(), "export" | "erase") {
+        return PrivacyDecision {
+            allowed: false,
+            action: normalized_action,
+            max_export_bytes,
+            reason_code: "unknown_action",
+            explanation: "Choose export or erase for the privacy preview.".into(),
+        };
+    }
+    if !allowed {
+        return PrivacyDecision {
+            allowed: false,
+            action: normalized_action.clone(),
+            max_export_bytes,
+            reason_code: "action_disabled",
+            explanation: format!(
+                "Member {} is disabled by this server's privacy policy.",
+                if normalized_action == "export" {
+                    "exports"
+                } else {
+                    "erasure"
+                }
+            ),
+        };
+    }
+    PrivacyDecision {
+        allowed: true,
+        action: normalized_action.clone(),
+        max_export_bytes,
+        reason_code: "allowed",
+        explanation: if normalized_action == "export" {
+            format!(
+                "Create a private JSON export up to {max_export_bytes} bytes; moderation evidence remains retained."
+            )
+        } else {
+            "Erase voluntary member data while retaining required moderation evidence.".into()
+        },
+    }
+}
+
 impl FeatureAdapter for PrivacyAdapter {
     fn descriptor(&self) -> FeatureAdapterDescriptor {
         FeatureAdapterDescriptor {
@@ -6703,6 +6776,25 @@ impl FeatureAdapter for PrivacyAdapter {
             ));
         }
         projection
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let action = fixture_string(fixture, "privacyAction", "privacy_action", "export");
+        let decision = evaluate_privacy(config, action);
+        let mut effects = vec![if decision.allowed {
+            decision.explanation
+        } else {
+            format!(
+                "Privacy request rejected ({}): {}",
+                decision.reason_code, decision.explanation
+            )
+        }];
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
@@ -7013,6 +7105,36 @@ impl HelpAdapter {
     pub const SOURCE: &'static str = "help_adapter_v1";
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelpDecision {
+    pub show_modules: bool,
+    pub show_dashboard: bool,
+    pub explanation: String,
+}
+
+pub fn evaluate_help(config: &serde_json::Value) -> HelpDecision {
+    let show_modules = config
+        .get("showModules")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let show_dashboard = config
+        .get("showDashboard")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let mut parts = vec!["Return the enabled Vozen Helper modules and commands.".to_owned()];
+    if show_modules {
+        parts.push("Include the module summary.".into());
+    }
+    if show_dashboard {
+        parts.push("Include the dashboard link.".into());
+    }
+    HelpDecision {
+        show_modules,
+        show_dashboard,
+        explanation: parts.join(" "),
+    }
+}
+
 impl FeatureAdapter for HelpAdapter {
     fn descriptor(&self) -> FeatureAdapterDescriptor {
         FeatureAdapterDescriptor {
@@ -7073,6 +7195,17 @@ impl FeatureAdapter for HelpAdapter {
                 .map(|value| (key.into(), value.to_string()))
         })
         .collect()
+    }
+
+    fn simulate(&self, config: &serde_json::Value, _fixture: &serde_json::Value) -> Vec<String> {
+        let decision = evaluate_help(config);
+        let mut effects = vec![decision.explanation];
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
@@ -12897,5 +13030,39 @@ mod tests {
             }),
         );
         assert!(effects[0].contains("invalid_color"));
+    }
+
+    #[test]
+    fn privacy_and_help_simulations_use_shared_decisions() {
+        let privacy = feature_adapter("management.privacy").expect("privacy adapter");
+        let privacy_config = serde_json::json!({
+            "allowMemberExport": false,
+            "allowMemberErase": true,
+            "maxExportBytes": 750000
+        });
+        let export = privacy.simulate(
+            &privacy_config,
+            &serde_json::json!({"privacyAction": "export"}),
+        );
+        assert!(export[0].contains("action_disabled"));
+        let erase = privacy.simulate(
+            &privacy_config,
+            &serde_json::json!({"privacyAction": "erase"}),
+        );
+        assert!(erase[0].contains("Erase voluntary member data"));
+        assert!(erase.iter().any(|effect| {
+            effect.contains("management.privacy.max_export_bytes") && effect.contains("750000")
+        }));
+
+        let help = feature_adapter("utility.help").expect("help adapter");
+        let help_effects = help.simulate(
+            &serde_json::json!({"showModules": false, "showDashboard": true}),
+            &serde_json::json!({}),
+        );
+        assert!(help_effects[0].contains("dashboard link"));
+        assert!(!help_effects[0].contains("module summary"));
+        assert!(help_effects.iter().any(|effect| {
+            effect.contains("utility.help.show_modules") && effect.contains("false")
+        }));
     }
 }

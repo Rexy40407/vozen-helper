@@ -9,13 +9,13 @@ use helper_core::{
     RolePanelObservation, StarboardObservation, WorkflowObservation, WorkflowPolicy,
     anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
     evaluate_audit, evaluate_birthday, evaluate_custom_command, evaluate_economy, evaluate_embed,
-    evaluate_event, evaluate_giveaway, evaluate_join_gate, evaluate_leaderboard, evaluate_levels,
-    evaluate_moderation, evaluate_nickname, evaluate_poll, evaluate_reminder, evaluate_role_panel,
-    evaluate_scam_with_roles, evaluate_starboard, evaluate_stats, evaluate_suggestion,
-    evaluate_temp_channel, evaluate_tickets, evaluate_welcome_channel, evaluate_workflow,
-    feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
-    parse_utc_offset_minutes, quota_limit, render_member_message, scam_policy_from_json,
-    starboard_policy_from_json,
+    evaluate_event, evaluate_giveaway, evaluate_help, evaluate_join_gate, evaluate_leaderboard,
+    evaluate_levels, evaluate_moderation, evaluate_nickname, evaluate_poll, evaluate_privacy,
+    evaluate_reminder, evaluate_role_panel, evaluate_scam_with_roles, evaluate_starboard,
+    evaluate_stats, evaluate_suggestion, evaluate_temp_channel, evaluate_tickets,
+    evaluate_welcome_channel, evaluate_workflow, feature_is_configurable, feature_maturity,
+    leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit, render_member_message,
+    scam_policy_from_json, starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -5863,17 +5863,20 @@ impl Handler {
                 {
                     return respond(ctx, command, "Help is disabled in this server.").await;
                 }
-                let show_modules = guild_text.as_deref().is_none_or(|guild_id| {
-                    setting_bool(&self.store, guild_id, "utility.help.show_modules", true)
+                let help_config = serde_json::json!({
+                    "showModules": guild_text.as_deref().is_none_or(|guild_id| {
+                        setting_bool(&self.store, guild_id, "utility.help.show_modules", true)
+                    }),
+                    "showDashboard": guild_text.as_deref().is_none_or(|guild_id| {
+                        setting_bool(&self.store, guild_id, "utility.help.show_dashboard", true)
+                    }),
                 });
-                let show_dashboard = guild_text.as_deref().is_none_or(|guild_id| {
-                    setting_bool(&self.store, guild_id, "utility.help.show_dashboard", true)
-                });
+                let decision = evaluate_help(&help_config);
                 let mut message = "Vozen Helper: Core, Studio, Security, Support, Events, Community, Automate and Insights.".to_string();
-                if show_modules {
+                if decision.show_modules {
                     message.push_str(" Use /modules to see what is enabled.");
                 }
-                if show_dashboard {
+                if decision.show_dashboard {
                     message.push_str(" Use /dashboard to configure your server.");
                 }
                 message
@@ -5987,17 +5990,24 @@ impl Handler {
                 )
                 .clamp(65_536, 10_000_000) as usize;
                 let subcommand = command.data.options.first().map(|option| option.name.as_str());
+                let privacy_config = serde_json::json!({
+                    "allowMemberExport": allow_export,
+                    "allowMemberErase": allow_erase,
+                    "maxExportBytes": max_export_bytes,
+                });
                 match subcommand {
                     Some("erase") => {
-                        if !allow_erase {
-                            return respond(ctx, command, "Member erasure is disabled in this server.").await;
+                        let decision = evaluate_privacy(&privacy_config, "erase");
+                        if !decision.allowed {
+                            return respond(ctx, command, &decision.explanation).await;
                         }
                         let result = self.store.purge_user(&guild_text, &command.user.id.to_string())?;
                         format!("Voluntary data deleted. Moderation records, infractions and quarantine were retained for audit. Result: {result}")
                     }
                     _ => {
-                        if !allow_export {
-                            return respond(ctx, command, "Member data exports are disabled in this server.").await;
+                        let decision = evaluate_privacy(&privacy_config, "export");
+                        if !decision.allowed {
+                            return respond(ctx, command, &decision.explanation).await;
                         }
                         let export = self.store.export_user(&guild_text, &command.user.id.to_string())?;
                         let bytes = serde_json::to_vec_pretty(&export)?;
