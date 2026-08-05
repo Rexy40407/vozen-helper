@@ -7677,6 +7677,29 @@ impl Handler {
                         );
                     }
                 }
+                if role_ids.is_empty() {
+                    let configured_roles = setting_string(
+                        &self.store,
+                        &guild_text,
+                        "community.role_panels.role_ids",
+                    )
+                    .unwrap_or_default();
+                    for role_id in configured_roles
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .take(max_roles)
+                    {
+                        if let Ok(role_id) = role_id.parse::<u64>() {
+                            role_ids.push(role_id);
+                            buttons.push(
+                                CreateButton::new(format!("role:toggle:{role_id}"))
+                                    .label(format!("Role {}", buttons.len() + 1))
+                                    .style(ButtonStyle::Secondary),
+                            );
+                        }
+                    }
+                }
                 if buttons.is_empty() {
                     return respond(ctx, command, "Indica pelo menos um cargo válido.").await;
                 }
@@ -7698,7 +7721,7 @@ impl Handler {
                     &guild_text,
                     &format!("community.role_panel.{}", message.id),
                     &serde_json::json!({
-                        "channel_id": command.channel_id,
+                        "channel_id": panel_channel,
                         "message_id": message.id,
                         "title": title,
                         "role_ids": role_ids,

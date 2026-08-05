@@ -1033,6 +1033,17 @@ fn project_role_panels(config: &serde_json::Value) -> Vec<(String, String)> {
             value.to_string(),
         ));
     }
+    if let Some(values) = object.get("roleIds").and_then(serde_json::Value::as_array) {
+        let ids = values
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|value| value.parse::<u64>().is_ok())
+            .take(5)
+            .collect::<Vec<_>>();
+        if !ids.is_empty() {
+            pairs.push(("community.role_panels.role_ids".into(), ids.join(",")));
+        }
+    }
     pairs
 }
 
@@ -1109,6 +1120,23 @@ fn validate_interaction_config(config: &serde_json::Value, key: &str) -> Vec<Val
                     path: field.into(),
                     code: "invalid_text".into(),
                     message: format!("Text must be at most {max} characters."),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if let Some(values) = object.get("roleIds") {
+            let valid = values.as_array().is_some_and(|items| {
+                !items.is_empty()
+                    && items.len() <= 5
+                    && items
+                        .iter()
+                        .all(|value| value.as_str().is_some_and(|id| id.parse::<u64>().is_ok()))
+            });
+            if !valid {
+                issues.push(ValidationIssue {
+                    path: "roleIds".into(),
+                    code: "invalid_role_ids".into(),
+                    message: "Choose between one and five valid Discord roles.".into(),
                     severity: "error".into(),
                 });
             }
@@ -6151,7 +6179,7 @@ static ROLE_PANELS_ADAPTER: CommunityInteractionAdapter = CommunityInteractionAd
     source: "role_panels_adapter_v2",
     title: "Role panel workflow",
     description: "Set safe defaults for role panels and enforce a bounded number of roles.",
-    schema: r#"{"version":1,"source":"role_panels_adapter_v2","sections":[{"title":"Panel defaults","description":"The role panel command applies these values to newly published panels.","fields":[{"key":"channel","label":"Panel channel (optional)","kind":"channel"},{"key":"panelTitle","label":"Panel title","kind":"text","min":1,"max":80},{"key":"panelDescription","label":"Panel description","kind":"textarea","max":1000},{"key":"maxRoles","label":"Maximum roles","kind":"number","min":1,"max":5},{"key":"removeOnUnselect","label":"Remove the role when toggled off","kind":"toggle"}]}]}"#,
+    schema: r#"{"version":1,"source":"role_panels_adapter_v2","sections":[{"title":"Panel defaults","description":"The role panel command applies these values to newly published panels.","fields":[{"key":"channel","label":"Panel channel (optional)","kind":"channel"},{"key":"roleIds","label":"Panel roles","kind":"roles","max":5},{"key":"panelTitle","label":"Panel title","kind":"text","min":1,"max":80},{"key":"panelDescription","label":"Panel description","kind":"textarea","max":1000},{"key":"maxRoles","label":"Maximum roles","kind":"number","min":1,"max":5},{"key":"removeOnUnselect","label":"Remove the role when toggled off","kind":"toggle"}]}]}"#,
     defaults: r#"{"channel":"","panelTitle":"Choose your roles","panelDescription":"Select the roles that fit you.","maxRoles":5,"removeOnUnselect":true}"#,
     dependencies: &["manage_roles", "interactions"],
     projection: project_role_panels,
@@ -8233,5 +8261,29 @@ mod tests {
         );
         assert!(image.ignored);
         assert!(image.reason.contains("attachments"));
+    }
+
+    #[test]
+    fn role_panel_adapter_projects_web_selected_roles() {
+        let adapter = feature_adapter("community.role_panels").expect("role panel adapter");
+        let config = serde_json::json!({
+            "channel": "123456789012345678",
+            "roleIds": ["111111111111111111", "222222222222222222"],
+            "panelTitle": "Pick your alerts",
+            "panelDescription": "Choose what you want to receive.",
+            "maxRoles": 2,
+            "removeOnUnselect": true
+        });
+        assert!(adapter.validate(&config).is_empty());
+        assert!(adapter.runtime_projection(&config).contains(&(
+            "community.role_panels.role_ids".into(),
+            "111111111111111111,222222222222222222".into()
+        )));
+        assert!(
+            adapter
+                .validate(&serde_json::json!({"roleIds": ["not-a-discord-id"]}))
+                .iter()
+                .any(|issue| issue.code == "invalid_role_ids")
+        );
     }
 }

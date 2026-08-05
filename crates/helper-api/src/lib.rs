@@ -5341,6 +5341,154 @@ async fn discord_create_role(
     Ok((id.to_string(), safe_name))
 }
 
+/// Publishes the role panel created by Quick Setup directly in Discord.  The
+/// old flow only created roles and left the administrator with a slash command
+/// to finish the panel, which made the web setting look applied while no
+/// usable panel existed.  Keep this operation idempotent by reusing the first
+/// panel already stored for the guild.
+async fn discord_publish_role_panel(
+    state: &ApiState,
+    guild_id: &str,
+    config: &serde_json::Value,
+) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
+    let channel_id = config
+        .get("channel")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| value.parse::<u64>().is_ok())
+        .unwrap_or_default();
+    let role_ids = config
+        .get("roleIds")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|value| value.parse::<u64>().is_ok())
+                .take(5)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if channel_id.is_empty() || role_ids.is_empty() {
+        return Ok(None);
+    }
+    if state
+        .store
+        .count_settings_prefix(guild_id, "community.role_panel.")
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        > 0
+    {
+        return Ok(None);
+    }
+    if state.discord_token.len() < 20 {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "discord_adapter_unavailable",
+        ));
+    }
+    let title = config
+        .get("panelTitle")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("Choose your roles");
+    let description = config
+        .get("panelDescription")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let content = description
+        .map(|value| format!("{title}\n{value}"))
+        .unwrap_or_else(|| title.to_owned());
+    let components = serde_json::json!([{
+        "type": 1,
+        "components": role_ids.iter().enumerate().map(|(index, role_id)| serde_json::json!({
+            "type": 2,
+            "style": 2,
+            "label": format!("Role {}", index + 1),
+            "custom_id": format!("role:toggle:{role_id}")
+        })).collect::<Vec<_>>()
+    }]);
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| Client::new());
+    let response = client
+        .post(format!(
+            "https://discord.com/api/v10/channels/{channel_id}/messages"
+        ))
+        .header(
+            header::AUTHORIZATION,
+            format!("Bot {}", state.discord_token),
+        )
+        .json(&serde_json::json!({
+            "content": content,
+            "components": components,
+            "allowed_mentions": {"parse": []},
+            "reason": "Vozen Quick Setup role panel"
+        }))
+        .send()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_unreachable"))?;
+    if !response.status().is_success() {
+        return Err(client_error(
+            StatusCode::BAD_GATEWAY,
+            "discord_role_panel_publish_failed",
+        ));
+    }
+    let value = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_invalid_response"))?;
+    let message_id = value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| client_error(StatusCode::BAD_GATEWAY, "discord_invalid_response"))?;
+    state
+        .store
+        .set_setting(
+            guild_id,
+            &format!("community.role_panel.{message_id}"),
+            &serde_json::json!({
+                "channel_id": channel_id,
+                "message_id": message_id,
+                "title": title,
+                "role_ids": role_ids,
+                "source": "quick_setup"
+            })
+            .to_string(),
+        )
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    Ok(Some(message_id.to_owned()))
+}
+
+fn publish_quick_setup_feature(
+    state: &ApiState,
+    guild_id: &str,
+    user_id: &str,
+    key: &str,
+    enabled: bool,
+    config: &serde_json::Value,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let enabled_value = if enabled { "true" } else { "false" };
+    let mut projections = vec![
+        (feature_key(key), enabled_value.to_owned()),
+        (feature_config_key(key), config.to_string()),
+    ];
+    projections.extend(runtime_projection_pairs(key, config));
+    state
+        .store
+        .publish_feature_setting(
+            guild_id,
+            key,
+            enabled,
+            &config.to_string(),
+            None,
+            user_id,
+            &projections,
+        )
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    Ok(())
+}
+
 async fn quick_setup(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -5455,6 +5603,38 @@ async fn quick_setup_step(
             created_resources.push(serde_json::json!({"type": "role", "name": name, "id": id, "state": resource_state}));
         }
         normalized_config["roleIds"] = serde_json::Value::Array(role_ids);
+    }
+    if update.status == "applied" {
+        match step.as_str() {
+            "welcome" => publish_quick_setup_feature(
+                &state,
+                &claims.guild_id,
+                &claims.user_id,
+                "support.welcome",
+                update.enabled,
+                &normalized_config,
+            )?,
+            "roles" => {
+                publish_quick_setup_feature(
+                    &state,
+                    &claims.guild_id,
+                    &claims.user_id,
+                    "community.role_panels",
+                    update.enabled,
+                    &normalized_config,
+                )?;
+                if update.enabled
+                    && let Some(message_id) =
+                        discord_publish_role_panel(&state, &claims.guild_id, &normalized_config)
+                            .await?
+                {
+                    created_resources.push(
+                        serde_json::json!({"type": "role_panel", "messageId": message_id, "state": "published"}),
+                    );
+                }
+            }
+            _ => {}
+        }
     }
     if let Some(steps) = value["steps"].as_array_mut()
         && let Some(item) = steps
