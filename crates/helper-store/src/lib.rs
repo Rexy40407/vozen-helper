@@ -799,6 +799,10 @@ impl Store {
         // would make an in-place Rust cutover fail on the live database.
         conn.execute_batch("CREATE TABLE IF NOT EXISTS tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, opener_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', claimed_by TEXT, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_tickets_owner ON tickets(guild_id,opener_id,status); CREATE TABLE IF NOT EXISTS suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, author_id TEXT NOT NULL, content TEXT NOT NULL, message_id TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS suggestion_votes (suggestion_id INTEGER NOT NULL, user_id TEXT NOT NULL, vote INTEGER NOT NULL, PRIMARY KEY(suggestion_id,user_id)); CREATE TABLE IF NOT EXISTS giveaways (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, prize TEXT NOT NULL, winners INTEGER NOT NULL DEFAULT 1, end_at INTEGER NOT NULL, ended INTEGER NOT NULL DEFAULT 0, required_role_id TEXT, host_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS giveaway_entries (giveaway_id INTEGER NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY(giveaway_id,user_id)); CREATE TABLE IF NOT EXISTS polls (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, question TEXT NOT NULL, options TEXT NOT NULL, end_at INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS poll_votes (poll_id INTEGER NOT NULL, user_id TEXT NOT NULL, choice INTEGER NOT NULL, PRIMARY KEY(poll_id,user_id)); CREATE TABLE IF NOT EXISTS workflows (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, name TEXT NOT NULL, trigger TEXT NOT NULL, condition TEXT NOT NULL DEFAULT '', action TEXT NOT NULL, payload TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS workflow_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id INTEGER NOT NULL, guild_id TEXT NOT NULL, source_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_workflows_trigger ON workflows(guild_id,trigger,enabled); CREATE TABLE IF NOT EXISTS quarantine (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, role_ids TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE TABLE IF NOT EXISTS starboard (guild_id TEXT NOT NULL, original_message_id TEXT NOT NULL, starboard_message_id TEXT NOT NULL, star_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,original_message_id));")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, correlation_id TEXT NOT NULL UNIQUE, guild_id TEXT NOT NULL, actor_id TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', before_json TEXT NOT NULL DEFAULT '{}', after_json TEXT NOT NULL DEFAULT '{}', outcome TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_audit_events_guild_time ON audit_events(guild_id, created_at DESC); CREATE TABLE IF NOT EXISTS feature_settings (guild_id TEXT NOT NULL, key TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, config_json TEXT NOT NULL DEFAULT '{}', revision INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL DEFAULT '', PRIMARY KEY(guild_id,key)); CREATE TABLE IF NOT EXISTS feature_revisions (guild_id TEXT NOT NULL, key TEXT NOT NULL, revision INTEGER NOT NULL, enabled INTEGER NOT NULL, config_json TEXT NOT NULL, updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL, PRIMARY KEY(guild_id,key,revision)); CREATE INDEX IF NOT EXISTS idx_feature_revisions_lookup ON feature_revisions(guild_id,key,revision DESC);")?;
+        // Member-add events can be delivered more than once. Keep a short
+        // guild/user claim so welcome messages remain idempotent without
+        // permanently suppressing a genuine re-join.
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS welcome_delivery_claims (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, kind TEXT NOT NULL, claimed_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id,kind)); CREATE INDEX IF NOT EXISTS idx_welcome_delivery_claims_time ON welcome_delivery_claims(guild_id,claimed_at);")?;
         for (column, definition) in [
             ("category", "TEXT NOT NULL DEFAULT 'general'"),
             ("priority", "TEXT NOT NULL DEFAULT 'normal'"),
@@ -1064,6 +1068,43 @@ impl Store {
             ],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Claims a welcome delivery for a member. Discord may retry gateway
+    /// events, so the same kind is suppressed during a bounded cooldown. A
+    /// later genuine re-join can still receive the message.
+    pub fn claim_welcome_delivery(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        kind: &str,
+        now: i64,
+        cooldown_seconds: i64,
+    ) -> Result<bool> {
+        if guild_id.is_empty()
+            || user_id.is_empty()
+            || kind.is_empty()
+            || kind.len() > 64
+            || cooldown_seconds < 0
+        {
+            bail!("welcome delivery claim is invalid");
+        }
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let previous: Option<i64> = conn
+            .query_row(
+                "SELECT claimed_at FROM welcome_delivery_claims WHERE guild_id=?1 AND user_id=?2 AND kind=?3",
+                params![guild_id, user_id, kind],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if previous.is_some_and(|claimed_at| now.saturating_sub(claimed_at) < cooldown_seconds) {
+            return Ok(false);
+        }
+        conn.execute(
+            "INSERT INTO welcome_delivery_claims(guild_id,user_id,kind,claimed_at) VALUES(?1,?2,?3,?4) ON CONFLICT(guild_id,user_id,kind) DO UPDATE SET claimed_at=excluded.claimed_at",
+            params![guild_id, user_id, kind, now],
+        )?;
+        Ok(true)
     }
 
     pub fn recent_activity(&self, guild_id: &str, limit: u32) -> Result<Vec<ActivityLogRecord>> {
@@ -3897,6 +3938,7 @@ impl Store {
             "DELETE FROM tags WHERE guild_id=?1",
             "DELETE FROM levels WHERE guild_id=?1",
             "DELETE FROM achievements WHERE guild_id=?1",
+            "DELETE FROM welcome_delivery_claims WHERE guild_id=?1",
             "DELETE FROM voice_sessions WHERE guild_id=?1",
             "DELETE FROM birthdays WHERE guild_id=?1",
             "DELETE FROM economy_accounts WHERE guild_id=?1",
@@ -5163,6 +5205,26 @@ mod tests {
                 .achievements_for("other-guild", "u")
                 .unwrap()
                 .is_empty()
+        );
+        assert!(
+            store
+                .claim_welcome_delivery("g", "u", "guided_channel", 100, 600)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .claim_welcome_delivery("g", "u", "guided_channel", 101, 600)
+                .unwrap()
+        );
+        assert!(
+            store
+                .claim_welcome_delivery("g", "u", "guided_channel", 701, 600)
+                .unwrap()
+        );
+        assert!(
+            store
+                .claim_welcome_delivery("other-guild", "u", "guided_channel", 101, 600)
+                .unwrap()
         );
         let id = store
             .schedule("g", "u", 1, r#"{"channel_id":"2","text":"hello"}"#)

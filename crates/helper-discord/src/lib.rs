@@ -2263,7 +2263,18 @@ impl EventHandler for Handler {
                 let _ = new_member.add_role(&ctx.http, RoleId::new(role_id)).await;
             }
         }
-        if feature_enabled(&self.store, &guild_text, "support.welcome", None) {
+        let welcome_claimed = feature_enabled(&self.store, &guild_text, "support.welcome", None)
+            && self
+                .store
+                .claim_welcome_delivery(
+                    &guild_text,
+                    &new_member.user.id.to_string(),
+                    "welcome",
+                    chrono::Utc::now().timestamp(),
+                    600,
+                )
+                .unwrap_or(false);
+        if welcome_claimed {
             let member_mention = format!("<@{}>", new_member.user.id);
             let delay_seconds =
                 setting_u64(&self.store, &guild_text, "support.welcome.delay_seconds", 0).min(300);
@@ -2338,7 +2349,19 @@ impl EventHandler for Handler {
                     .await;
             }
         }
-        if feature_enabled(&self.store, &guild_text, "support.welcome_channel", None)
+        let guided_welcome_claimed =
+            feature_enabled(&self.store, &guild_text, "support.welcome_channel", None)
+                && self
+                    .store
+                    .claim_welcome_delivery(
+                        &guild_text,
+                        &new_member.user.id.to_string(),
+                        "guided_channel",
+                        chrono::Utc::now().timestamp(),
+                        600,
+                    )
+                    .unwrap_or(false);
+        if guided_welcome_claimed
             && let Some(channel_id) = setting_u64_optional(
                 &self.store,
                 &guild_text,
