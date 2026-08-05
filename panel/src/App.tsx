@@ -1450,7 +1450,6 @@ const spec = (key: string): SectionSpec[] => {
             options: [
               ['up_down', 'Apoiar / não apoiar'],
               ['up_only', 'Apenas apoiar'],
-              ['poll', 'Enquete'],
             ],
           },
           { key: 'anonymous', label: 'Permitir sugestões anónimas', kind: 'toggle' },

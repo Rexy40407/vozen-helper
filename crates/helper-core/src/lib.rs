@@ -1173,8 +1173,26 @@ fn simulate_feature_effect(
             "Publish bounded role-panel components after checking every role's manageability and hierarchy.".into(),
         "community.events" =>
             "Create or update the scheduled event, persist registrations and enqueue the configured reminders.".into(),
-        "community.suggestions" =>
-            "Create the suggestion, apply the voting policy and keep every state transition auditable.".into(),
+        "community.suggestions" => {
+            let mode = object
+                .and_then(|values| values.get("voteMode"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("up_down");
+            let cooldown = object
+                .and_then(|values| values.get("cooldownHours"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(24)
+                .clamp(0, 720);
+            let staff = object
+                .and_then(|values| values.get("staffChannel"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| format!(" and notify staff in <#{value}>"))
+                .unwrap_or_default();
+            format!(
+                "Create the suggestion with {mode} voting, enforce a {cooldown}-hour member cooldown{staff}, and keep every state transition auditable."
+            )
+        }
         "community.giveaways" =>
             "Create an idempotent giveaway job with bounded winners, role requirements and a replay-safe draw.".into(),
         "management.polls" =>
@@ -8922,6 +8940,17 @@ mod tests {
         assert!(starboard_effects[0].contains("below the board threshold (3/5"));
 
         let suggestions = feature_adapter("community.suggestions").unwrap();
+        let suggestion_preview = suggestions.simulate(
+            &serde_json::json!({
+                "voteMode": "up_only",
+                "cooldownHours": 12,
+                "staffChannel": "456"
+            }),
+            &serde_json::json!({}),
+        );
+        assert!(suggestion_preview[0].contains("up_only voting"));
+        assert!(suggestion_preview[0].contains("12-hour member cooldown"));
+        assert!(suggestion_preview[0].contains("<@456>"));
         assert!(
             suggestions.descriptor().schema["sections"][1]["fields"]
                 .as_array()
