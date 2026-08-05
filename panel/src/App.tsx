@@ -2342,15 +2342,18 @@ function App() {
         detailConfig.roleIds.length > 0
       ) {
         const existingPanels = await api.rolePanels();
-        if (existingPanels.panels.length === 0) {
-          await api.createRolePanel({
-            channel: detailConfig.channel,
-            title: String(detailConfig.panelTitle ?? 'Choose your roles'),
-            description: String(detailConfig.panelDescription ?? ''),
-            roleIds: detailConfig.roleIds.map(String),
-            selectionMode: detailConfig.selectionMode === 'unique' ? 'unique' : 'multiple',
-            removeOnUnselect: detailConfig.removeOnUnselect !== false,
-          });
+        const panelPayload = {
+          channel: detailConfig.channel,
+          title: String(detailConfig.panelTitle ?? 'Choose your roles'),
+          description: String(detailConfig.panelDescription ?? ''),
+          roleIds: detailConfig.roleIds.map(String),
+          selectionMode: detailConfig.selectionMode === 'unique' ? ('unique' as const) : ('multiple' as const),
+          removeOnUnselect: detailConfig.removeOnUnselect !== false,
+        };
+        if (existingPanels.panels[0]) {
+          await api.updateRolePanel(existingPanels.panels[0].message_id, panelPayload);
+        } else {
+          await api.createRolePanel(panelPayload);
         }
       }
       setFeatures((items) =>

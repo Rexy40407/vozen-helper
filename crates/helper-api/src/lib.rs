@@ -275,7 +275,10 @@ pub fn router(state: ApiState) -> Router {
             put(update_custom_command).delete(delete_custom_command),
         )
         .route("/api/role-panels", get(role_panels).post(create_role_panel))
-        .route("/api/role-panels/{message_id}", delete(delete_role_panel))
+        .route(
+            "/api/role-panels/{message_id}",
+            put(update_role_panel).delete(delete_role_panel),
+        )
         .route(
             "/api/role-panels/{message_id}/repair",
             post(repair_role_panel),
@@ -5412,7 +5415,9 @@ async fn discord_publish_role_panel(
     let description = config
         .get("panelDescription")
         .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty());
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_default()
+        .to_owned();
     let selection_mode = config
         .get("selectionMode")
         .and_then(serde_json::Value::as_str)
@@ -5422,9 +5427,11 @@ async fn discord_publish_role_panel(
         .get("removeOnUnselect")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
-    let content = description
-        .map(|value| format!("{title}\n{value}"))
-        .unwrap_or_else(|| title.to_owned());
+    let content = if description.is_empty() {
+        title.to_owned()
+    } else {
+        format!("{title}\n{description}")
+    };
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
@@ -5495,6 +5502,7 @@ async fn discord_publish_role_panel(
                 "channel_id": channel_id,
                 "message_id": message_id,
                 "title": title,
+                "description": description,
                 "role_ids": role_ids,
                 "selection_mode": selection_mode,
                 "remove_on_unselect": remove_on_unselect,
@@ -5730,6 +5738,104 @@ async fn create_role_panel(
     ))
 }
 
+async fn update_role_panel(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(message_id): Path<String>,
+    Json(request): Json<RolePanelRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    if !feature_enabled(&state, &claims.guild_id, "community.role_panels") {
+        return Err(client_error(StatusCode::CONFLICT, "feature_disabled"));
+    }
+    if message_id.parse::<u64>().is_err() {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "role_panel_message_invalid",
+        ));
+    }
+    let old_key = format!("community.role_panel.{message_id}");
+    let old_value = state
+        .store
+        .get_setting(&claims.guild_id, &old_key)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "role_panel_not_found"))?;
+    let old_panel = stored_role_panel_value(&old_key, &old_value)
+        .ok_or_else(|| client_error(StatusCode::INTERNAL_SERVER_ERROR, "role_panel_invalid"))?;
+    let old_channel_id = old_panel
+        .get("channel_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let config = normalize_role_panel_request(request)?;
+    let preflight = generic_feature_preflight(
+        State(state.clone()),
+        headers.clone(),
+        "community.role_panels".into(),
+        FeaturePreflightRequest {
+            config: config.clone(),
+            enabled: true,
+        },
+    )
+    .await?;
+    if !preflight
+        .0
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(client_error(
+            StatusCode::PRECONDITION_FAILED,
+            "feature_preflight_failed",
+        ));
+    }
+    let new_id = discord_publish_role_panel(&state, &claims.guild_id, &config, false, "update")
+        .await?
+        .ok_or_else(|| {
+            client_error(StatusCode::BAD_GATEWAY, "discord_role_panel_publish_failed")
+        })?;
+    if !old_channel_id.is_empty() {
+        let _ = discord_delete_role_panel(&state, &old_channel_id, &message_id).await;
+    }
+    state
+        .store
+        .delete_setting(&claims.guild_id, &old_key)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let enabled_value = "true".to_owned();
+    let mut projections = vec![
+        (feature_key("community.role_panels"), enabled_value),
+        (
+            feature_config_key("community.role_panels"),
+            config.to_string(),
+        ),
+    ];
+    projections.extend(runtime_projection_pairs("community.role_panels", &config));
+    state
+        .store
+        .publish_feature_setting(
+            &claims.guild_id,
+            "community.role_panels",
+            true,
+            &config.to_string(),
+            None,
+            &claims.user_id,
+            &projections,
+        )
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let _ = state.store.record_activity(
+        &claims.guild_id,
+        "role_panel_config",
+        &claims.user_id,
+        None,
+        Some(&claims.user_id),
+        &serde_json::json!({"operation":"update","oldMessageId":message_id,"messageId":new_id})
+            .to_string(),
+    );
+    Ok(Json(
+        serde_json::json!({"ok": true, "messageId": new_id, "config": config}),
+    ))
+}
+
 async fn delete_role_panel(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -5800,7 +5906,7 @@ async fn repair_role_panel(
         "channel": channel_id,
         "roleIds": panel.get("role_ids").cloned().unwrap_or_else(|| serde_json::json!([])),
         "panelTitle": panel.get("title").and_then(serde_json::Value::as_str).unwrap_or("Choose your roles"),
-        "panelDescription": "",
+        "panelDescription": panel.get("description").and_then(serde_json::Value::as_str).unwrap_or_default(),
         "selectionMode": panel.get("selection_mode").and_then(serde_json::Value::as_str).unwrap_or("multiple"),
         "removeOnUnselect": panel.get("remove_on_unselect").and_then(serde_json::Value::as_bool).unwrap_or(true),
     });

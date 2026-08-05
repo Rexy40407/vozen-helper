@@ -382,6 +382,22 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
+  updateRolePanel: (messageId: string, payload: {
+    channel: string;
+    title: string;
+    description: string;
+    roleIds: string[];
+    selectionMode: 'multiple' | 'unique';
+    removeOnUnselect: boolean;
+  }) =>
+    request<{ ok: boolean; messageId: string; config: FeatureConfig }>(
+      `/api/role-panels/${encodeURIComponent(messageId)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+    ),
   deleteRolePanel: (messageId: string) =>
     request<{ ok: boolean; messageId: string }>(`/api/role-panels/${encodeURIComponent(messageId)}`, {
       method: 'DELETE',
