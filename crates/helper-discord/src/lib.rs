@@ -4,9 +4,10 @@ use anyhow::Result;
 use chrono::{Datelike, Utc};
 use helper_contracts::{AntiSpamObservation, AntiSpamPolicy, Plan};
 use helper_core::{
-    AntiRaidPolicy, Config, JoinGateObservation, JoinGatePolicy, StarboardObservation,
-    anti_spam_policy_from_json, evaluate_anti_raid, evaluate_anti_spam, evaluate_join_gate,
-    evaluate_scam, evaluate_starboard, feature_is_configurable, feature_maturity, quota_limit,
+    AntiRaidPolicy, Config, JoinGateObservation, JoinGatePolicy, LeaderboardEntry,
+    StarboardObservation, anti_spam_policy_from_json, evaluate_anti_raid, evaluate_anti_spam,
+    evaluate_join_gate, evaluate_leaderboard, evaluate_scam, evaluate_starboard,
+    feature_is_configurable, feature_maturity, leaderboard_policy_from_json, quota_limit,
     scam_policy_from_json, starboard_policy_from_json,
 };
 use helper_modules::{
@@ -871,6 +872,16 @@ impl EventHandler for Handler {
                     .required(false),
                 ),
             CreateCommand::new("leaderboard").description("Show the XP leaderboard"),
+            CreateCommand::new("leaderboard-privacy")
+                .description("Choose whether your XP appears on the leaderboard")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Boolean,
+                        "opt_out",
+                        "Hide your XP from this server's leaderboard",
+                    )
+                    .required(true),
+                ),
             CreateCommand::new("achievements").description("Show your community achievements"),
             CreateCommand::new("serverstats").description("Show basic server statistics"),
             CreateCommand::new("crypto")
@@ -6046,6 +6057,31 @@ impl Handler {
                 if self.store.delete_tag(&guild_text, &name)? { format!("Tag `{name}` eliminada.") } else { "Tag não encontrada.".to_string() }
             }
             "rank" => return self.send_rank_card(ctx, command).await,
+            "leaderboard-privacy" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_text = guild_id.to_string();
+                if !feature_enabled(&self.store, &guild_text, "community.leaderboard", None) {
+                    return respond(
+                        ctx,
+                        command,
+                        "The XP leaderboard is disabled in this server. Enable it in the dashboard.",
+                    )
+                    .await;
+                }
+                let opt_out = option_bool(command, "opt_out").unwrap_or(false);
+                self.store.set_setting(
+                    &guild_text,
+                    &format!("community.leaderboard.optout.{}", command.user.id),
+                    if opt_out { "true" } else { "false" },
+                )?;
+                if opt_out {
+                    "Your XP is now hidden from this server's leaderboard.".to_string()
+                } else {
+                    "Your XP is now visible on this server's leaderboard.".to_string()
+                }
+            }
             "leaderboard" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
@@ -6066,8 +6102,46 @@ impl Handler {
                     10,
                 )
                 .clamp(1, 100) as u32;
-                let rows = self.store.top_levels(&guild_text, max_entries)?;
-                if rows.is_empty() { "Ainda não existem dados de XP.".to_string() } else { rows.into_iter().enumerate().map(|(index, row)| format!("{}. <@{}> — {} XP", index + 1, row.user_id, row.xp)).collect::<Vec<_>>().join("\n") }
+                // Read a bounded superset before applying member opt-outs so
+                // hidden rows do not make the configured limit appear empty.
+                let rows = self.store.top_levels(&guild_text, 100)?;
+                let public = setting_bool(
+                    &self.store,
+                    &guild_text,
+                    "community.leaderboard.public",
+                    true,
+                );
+                let policy = leaderboard_policy_from_json(&serde_json::json!({
+                    "maxEntries": max_entries,
+                    "public": public,
+                }));
+                let entries = rows.into_iter().map(|row| {
+                    let opted_out = setting_bool(
+                        &self.store,
+                        &guild_text,
+                        &format!("community.leaderboard.optout.{}", row.user_id),
+                        false,
+                    );
+                    LeaderboardEntry {
+                        user_id: row.user_id,
+                        xp: row.xp,
+                        opted_out,
+                    }
+                });
+                let decision = evaluate_leaderboard(&policy, entries);
+                if decision.entries.is_empty() {
+                    "No eligible XP data yet.".to_string()
+                } else {
+                    decision
+                        .entries
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, row)| {
+                            format!("{}. <@{}> — {} XP", index + 1, row.user_id, row.xp)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
             }
             "achievements" => {
                 let Some(guild_id) = command.guild_id else {
@@ -9948,7 +10022,7 @@ fn command_feature_key(name: &str) -> Option<&'static str> {
         "afk" | "remind" => "utility.reminders",
         "tag" | "tags" | "tag-set" | "tag-delete" => "management.custom_commands",
         "rank" => "studio.rank_card",
-        "leaderboard" => "community.leaderboard",
+        "leaderboard" | "leaderboard-privacy" => "community.leaderboard",
         "achievements" => "community.achievements",
         "serverstats" => "insights.stats",
         "crypto" => "web3.crypto_queries",

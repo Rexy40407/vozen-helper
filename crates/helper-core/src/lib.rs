@@ -541,6 +541,114 @@ pub fn evaluate_join_gate(
     }
 }
 
+/// Configuration and bounded input for the XP leaderboard.  Keeping this
+/// evaluator in core means the API preview and the Discord command cannot
+/// disagree about visibility, opt-outs or ordering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaderboardPolicy {
+    pub max_entries: u32,
+    pub public: bool,
+}
+
+impl Default for LeaderboardPolicy {
+    fn default() -> Self {
+        Self {
+            max_entries: 10,
+            public: true,
+        }
+    }
+}
+
+pub fn leaderboard_policy_from_json(value: &serde_json::Value) -> LeaderboardPolicy {
+    let mut policy = LeaderboardPolicy::default();
+    let Some(object) = value.as_object() else {
+        return policy;
+    };
+    if let Some(value) = object.get("maxEntries").and_then(serde_json::Value::as_u64) {
+        policy.max_entries = value.clamp(1, 100) as u32;
+    }
+    if let Some(value) = object.get("public").and_then(serde_json::Value::as_bool) {
+        policy.public = value;
+    }
+    policy
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LeaderboardEntry {
+    #[serde(rename = "userId", alias = "user_id")]
+    pub user_id: String,
+    pub xp: i64,
+    #[serde(default, rename = "optedOut", alias = "opted_out")]
+    pub opted_out: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaderboardDecision {
+    pub public: bool,
+    pub entries: Vec<LeaderboardEntry>,
+    pub excluded_opt_outs: u32,
+    pub truncated: bool,
+}
+
+/// Sort and bound leaderboard rows while excluding members who opted out.
+/// IDs and XP are clamped so a malformed preview or legacy row cannot create
+/// an unbounded response.  The same function is used by the gateway and API.
+pub fn evaluate_leaderboard(
+    policy: &LeaderboardPolicy,
+    entries: impl IntoIterator<Item = LeaderboardEntry>,
+) -> LeaderboardDecision {
+    let mut excluded_opt_outs = 0;
+    let mut entries: Vec<_> = entries
+        .into_iter()
+        .filter_map(|mut entry| {
+            entry.user_id = entry.user_id.trim().chars().take(64).collect();
+            if entry.user_id.is_empty() {
+                return None;
+            }
+            entry.xp = entry.xp.clamp(0, i64::MAX);
+            if entry.opted_out {
+                excluded_opt_outs += 1;
+                None
+            } else {
+                Some(entry)
+            }
+        })
+        .take(1_000)
+        .collect();
+    entries.sort_by(|left, right| {
+        right
+            .xp
+            .cmp(&left.xp)
+            .then_with(|| left.user_id.cmp(&right.user_id))
+    });
+    let max_entries = policy.max_entries.clamp(1, 100) as usize;
+    let truncated = entries.len() > max_entries;
+    entries.truncate(max_entries);
+    LeaderboardDecision {
+        public: policy.public,
+        entries,
+        excluded_opt_outs,
+        truncated,
+    }
+}
+
+/// Parse the bounded `leaderboardEntries` fixture accepted by the simulation
+/// endpoint. Invalid rows are ignored just like rows without a Discord user
+/// in the runtime store.
+pub fn leaderboard_entries_from_json(value: &serde_json::Value) -> Vec<LeaderboardEntry> {
+    value
+        .get("leaderboardEntries")
+        .or_else(|| value.get("leaderboard_entries"))
+        .and_then(serde_json::Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| serde_json::from_value::<LeaderboardEntry>(row.clone()).ok())
+                .take(1_000)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Every configurable feature will eventually implement this contract. The
 /// first adapter is intentionally small: it proves that the API and gateway
 /// can consume one canonical schema/defaults/validator without pulling UI
@@ -3670,6 +3778,44 @@ impl FeatureAdapter for LeaderboardAdapter {
             projection.push(("community.leaderboard.public".into(), value.to_string()));
         }
         projection
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let policy = leaderboard_policy_from_json(config);
+        let entries = leaderboard_entries_from_json(fixture);
+        let decision = evaluate_leaderboard(&policy, entries);
+        let visibility = if decision.public { "public" } else { "private" };
+        let listed = decision
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| format!("{}. {} — {} XP", index + 1, entry.user_id, entry.xp))
+            .collect::<Vec<_>>();
+        let mut effect = format!(
+            "Render a {visibility} XP leaderboard with up to {} members.",
+            policy.max_entries
+        );
+        if !listed.is_empty() {
+            effect.push_str(&format!(" Preview: {}.", listed.join("; ")));
+        } else {
+            effect.push_str(" Preview contains no eligible members.");
+        }
+        if decision.excluded_opt_outs > 0 {
+            effect.push_str(&format!(
+                " Excluded {} member(s) who opted out.",
+                decision.excluded_opt_outs
+            ));
+        }
+        if decision.truncated {
+            effect.push_str(" Additional eligible members are hidden by the configured limit.");
+        }
+        let mut effects = vec![effect];
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
@@ -7005,6 +7151,70 @@ mod tests {
         assert_eq!(keys.len(), 52);
         assert!(is_known_feature("community.leaderboard"));
         assert!(!is_known_feature("community.not_a_real_feature"));
+    }
+
+    #[test]
+    fn leaderboard_evaluator_sorts_bounds_and_respects_opt_outs() {
+        let policy = LeaderboardPolicy {
+            max_entries: 2,
+            public: false,
+        };
+        let decision = evaluate_leaderboard(
+            &policy,
+            vec![
+                LeaderboardEntry {
+                    user_id: "low".into(),
+                    xp: 10,
+                    opted_out: false,
+                },
+                LeaderboardEntry {
+                    user_id: "private".into(),
+                    xp: 999,
+                    opted_out: true,
+                },
+                LeaderboardEntry {
+                    user_id: "top".into(),
+                    xp: 100,
+                    opted_out: false,
+                },
+                LeaderboardEntry {
+                    user_id: "middle".into(),
+                    xp: 50,
+                    opted_out: false,
+                },
+            ],
+        );
+        assert!(!decision.public);
+        assert_eq!(decision.excluded_opt_outs, 1);
+        assert!(decision.truncated);
+        assert_eq!(
+            decision
+                .entries
+                .iter()
+                .map(|entry| entry.user_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["top", "middle"]
+        );
+    }
+
+    #[test]
+    fn leaderboard_adapter_simulation_uses_the_same_decision_contract() {
+        let adapter = feature_adapter("community.leaderboard").expect("leaderboard adapter");
+        let effects = adapter.simulate(
+            &serde_json::json!({"maxEntries": 1, "public": true}),
+            &serde_json::json!({
+                "leaderboardEntries": [
+                    {"userId": "opted-out", "xp": 999, "optedOut": true},
+                    {"userId": "alice", "xp": 42}
+                ]
+            }),
+        );
+        assert!(effects[0].contains("public XP leaderboard"));
+        assert!(effects[0].contains("alice"));
+        assert!(effects[0].contains("Excluded 1 member"));
+        assert!(effects.iter().any(|effect| {
+            effect.contains("community.leaderboard.max_entries") && effect.contains("1")
+        }));
     }
 
     #[test]

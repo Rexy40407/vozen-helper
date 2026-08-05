@@ -17,8 +17,8 @@ use helper_contracts::{
     RankCardConfig, SessionClaims, SimulationResult, ValidationIssue,
 };
 use helper_core::{
-    Capability, FEATURE_SCHEMA_VERSION, anti_spam_policy_from_json, evaluate_anti_spam,
-    feature_adapter, feature_maturity, is_known_feature, quota_limit,
+    Capability, FEATURE_SCHEMA_VERSION, LeaderboardEntry, anti_spam_policy_from_json,
+    evaluate_anti_spam, feature_adapter, feature_maturity, is_known_feature, quota_limit,
 };
 use helper_modules::{
     BlueskyClient, CoinGeckoClient, EntitlementClient, EthereumRpcClient, GasClient,
@@ -7537,6 +7537,11 @@ struct FeatureTestRequest {
     has_avatar: Option<bool>,
     #[serde(default)]
     display_name: Option<String>,
+    /// Optional bounded rows for the leaderboard simulator. Keeping this in
+    /// the shared test request lets the API exercise the same ordering and
+    /// opt-out evaluator used by the Discord command.
+    #[serde(default, rename = "leaderboardEntries")]
+    leaderboard_entries: Vec<LeaderboardEntry>,
 }
 
 fn generic_feature_effect(key: &str) -> Vec<String> {
@@ -7692,6 +7697,7 @@ async fn test_feature(
         "accountAgeDays": test.account_age_days,
         "hasAvatar": test.has_avatar,
         "displayName": test.display_name.clone(),
+        "leaderboardEntries": test.leaderboard_entries.clone(),
     });
     let adapter_effects = if maturity == FeatureMaturity::Blocked {
         // A blocked provider must never claim that a JSON draft would be
@@ -9707,6 +9713,44 @@ mod tests {
                 .unwrap()
                 .contains("timeout")
         );
+    }
+
+    #[tokio::test]
+    async fn leaderboard_simulation_uses_runtime_ordering_and_opt_outs() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        let body = serde_json::json!({
+            "config": {"maxEntries": 1, "public": false},
+            "leaderboardEntries": [
+                {"userId": "private", "xp": 999, "optedOut": true},
+                {"userId": "alice", "xp": 42},
+                {"userId": "bob", "xp": 10}
+            ]
+        });
+        let response = router(state(store))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/config/features/community.leaderboard/simulate")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let response: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                .unwrap();
+        assert_eq!(response["result"]["would_apply"], true);
+        let effects = response["adapterEffects"].as_array().unwrap();
+        let preview = effects[0].as_str().unwrap();
+        assert!(preview.contains("private XP leaderboard"));
+        assert!(preview.contains("alice"));
+        assert!(!preview.contains("999"));
+        assert!(preview.contains("Excluded 1 member"));
     }
 
     #[tokio::test]
