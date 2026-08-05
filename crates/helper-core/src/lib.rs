@@ -9375,6 +9375,56 @@ impl InviteTrackerAdapter {
     pub const SOURCE: &'static str = "invite_tracker_adapter_v2";
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InviteTrackerDecision {
+    pub allowed: bool,
+    pub max_entries: usize,
+    pub include_inviter: bool,
+    pub shown_count: usize,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+pub fn evaluate_invite_tracker(
+    config: &serde_json::Value,
+    available_count: u64,
+) -> InviteTrackerDecision {
+    let max_entries = config
+        .get("maxEntries")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(10)
+        .clamp(1, 50) as usize;
+    let include_inviter = config
+        .get("includeInviter")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let shown_count = (available_count.min(max_entries as u64)) as usize;
+    InviteTrackerDecision {
+        allowed: true,
+        max_entries,
+        include_inviter,
+        shown_count,
+        reason_code: if available_count == 0 {
+            "empty"
+        } else {
+            "bounded"
+        },
+        explanation: if available_count == 0 {
+            "No active invites are available to display; Manage Server is required for a live list."
+                .into()
+        } else {
+            format!(
+                "Display {shown_count} of {available_count} active invite(s){}.",
+                if include_inviter {
+                    " with inviter names"
+                } else {
+                    " without inviter names"
+                }
+            )
+        },
+    }
+}
+
 impl FeatureAdapter for InviteTrackerAdapter {
     fn descriptor(&self) -> FeatureAdapterDescriptor {
         FeatureAdapterDescriptor {
@@ -9444,6 +9494,18 @@ impl FeatureAdapter for InviteTrackerAdapter {
         }
         pairs
     }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let available = fixture_u64(fixture, "inviteCount", "invite_count", 0);
+        let decision = evaluate_invite_tracker(config, available);
+        let mut effects = vec![decision.explanation];
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -9452,6 +9514,63 @@ pub struct EmojisAdapter;
 impl EmojisAdapter {
     pub const KEY: &'static str = "utility.emojis";
     pub const SOURCE: &'static str = "emojis_adapter_v2";
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmojisDecision {
+    pub allowed: bool,
+    pub max_entries: usize,
+    pub animated_only: bool,
+    pub matching_count: usize,
+    pub shown_count: usize,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+pub fn evaluate_emojis(
+    config: &serde_json::Value,
+    total_count: u64,
+    animated_count: u64,
+) -> EmojisDecision {
+    let max_entries = config
+        .get("maxEntries")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(50)
+        .clamp(1, 100) as usize;
+    let animated_only = config
+        .get("animatedOnly")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let matching_count = if animated_only {
+        animated_count.min(total_count)
+    } else {
+        total_count
+    } as usize;
+    let shown_count = matching_count.min(max_entries);
+    EmojisDecision {
+        allowed: true,
+        max_entries,
+        animated_only,
+        matching_count,
+        shown_count,
+        reason_code: if matching_count == 0 {
+            "empty"
+        } else {
+            "bounded"
+        },
+        explanation: if matching_count == 0 {
+            "No custom emojis match the current inventory filter.".into()
+        } else {
+            format!(
+                "Display {shown_count} of {matching_count} matching custom emoji(ies){}.",
+                if animated_only {
+                    " (animated only)"
+                } else {
+                    ""
+                }
+            )
+        },
+    }
 }
 
 impl FeatureAdapter for EmojisAdapter {
@@ -9512,6 +9631,19 @@ impl FeatureAdapter for EmojisAdapter {
             pairs.push(("utility.emojis.animated_only".into(), value.to_string()));
         }
         pairs
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let total = fixture_u64(fixture, "emojiCount", "emoji_count", 0);
+        let animated = fixture_u64(fixture, "animatedEmojiCount", "animated_emoji_count", 0);
+        let decision = evaluate_emojis(config, total, animated);
+        let mut effects = vec![decision.explanation];
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
@@ -13063,6 +13195,30 @@ mod tests {
         assert!(!help_effects[0].contains("module summary"));
         assert!(help_effects.iter().any(|effect| {
             effect.contains("utility.help.show_modules") && effect.contains("false")
+        }));
+    }
+
+    #[test]
+    fn invite_and_emoji_simulations_use_bounded_inventory_decisions() {
+        let invites = feature_adapter("management.invite_tracker").expect("invite adapter");
+        let invite_effects = invites.simulate(
+            &serde_json::json!({"maxEntries": 2, "includeInviter": false}),
+            &serde_json::json!({"inviteCount": 5}),
+        );
+        assert!(invite_effects[0].contains("Display 2 of 5"));
+        assert!(invite_effects.iter().any(|effect| {
+            effect.contains("management.invite_tracker.max_entries") && effect.contains("2")
+        }));
+
+        let emojis = feature_adapter("utility.emojis").expect("emoji adapter");
+        let emoji_effects = emojis.simulate(
+            &serde_json::json!({"maxEntries": 3, "animatedOnly": true}),
+            &serde_json::json!({"emojiCount": 8, "animatedEmojiCount": 4}),
+        );
+        assert!(emoji_effects[0].contains("Display 3 of 4"));
+        assert!(emoji_effects[0].contains("animated only"));
+        assert!(emoji_effects.iter().any(|effect| {
+            effect.contains("utility.emojis.animated_only") && effect.contains("true")
         }));
     }
 }

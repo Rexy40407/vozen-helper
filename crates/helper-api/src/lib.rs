@@ -8736,6 +8736,12 @@ struct FeatureTestRequest {
     stats_leaves: Option<i64>,
     #[serde(default, rename = "privacyAction")]
     privacy_action: Option<String>,
+    #[serde(default, rename = "inviteCount")]
+    invite_count: Option<u64>,
+    #[serde(default, rename = "emojiCount")]
+    emoji_count: Option<u64>,
+    #[serde(default, rename = "animatedEmojiCount")]
+    animated_emoji_count: Option<u64>,
 }
 
 fn generic_feature_effect(key: &str) -> Vec<String> {
@@ -8942,6 +8948,9 @@ async fn test_feature(
         "statsJoins": test.stats_joins,
         "statsLeaves": test.stats_leaves,
         "privacyAction": test.privacy_action.clone(),
+        "inviteCount": test.invite_count,
+        "emojiCount": test.emoji_count,
+        "animatedEmojiCount": test.animated_emoji_count,
     });
     let adapter_effects = if maturity == FeatureMaturity::Blocked {
         // A blocked provider must never claim that a JSON draft would be

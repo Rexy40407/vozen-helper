@@ -9,13 +9,14 @@ use helper_core::{
     RolePanelObservation, StarboardObservation, WorkflowObservation, WorkflowPolicy,
     anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
     evaluate_audit, evaluate_birthday, evaluate_custom_command, evaluate_economy, evaluate_embed,
-    evaluate_event, evaluate_giveaway, evaluate_help, evaluate_join_gate, evaluate_leaderboard,
-    evaluate_levels, evaluate_moderation, evaluate_nickname, evaluate_poll, evaluate_privacy,
-    evaluate_reminder, evaluate_role_panel, evaluate_scam_with_roles, evaluate_starboard,
-    evaluate_stats, evaluate_suggestion, evaluate_temp_channel, evaluate_tickets,
-    evaluate_welcome_channel, evaluate_workflow, feature_is_configurable, feature_maturity,
-    leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit, render_member_message,
-    scam_policy_from_json, starboard_policy_from_json,
+    evaluate_emojis, evaluate_event, evaluate_giveaway, evaluate_help, evaluate_invite_tracker,
+    evaluate_join_gate, evaluate_leaderboard, evaluate_levels, evaluate_moderation,
+    evaluate_nickname, evaluate_poll, evaluate_privacy, evaluate_reminder, evaluate_role_panel,
+    evaluate_scam_with_roles, evaluate_starboard, evaluate_stats, evaluate_suggestion,
+    evaluate_temp_channel, evaluate_tickets, evaluate_welcome_channel, evaluate_workflow,
+    feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
+    parse_utc_offset_minutes, quota_limit, render_member_message, scam_policy_from_json,
+    starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -6958,6 +6959,15 @@ impl Handler {
                 let max_entries = setting_u64(&self.store, &guild_text, "utility.emojis.max_entries", 50).clamp(1, 100) as usize;
                 let animated_only = setting_bool(&self.store, &guild_text, "utility.emojis.animated_only", false);
                 let emojis = guild_id.emojis(&ctx.http).await?;
+                let total_count = emojis.len() as u64;
+                let animated_count = emojis.iter().filter(|emoji| emoji.animated).count() as u64;
+                let emoji_config = serde_json::json!({
+                    "maxEntries": max_entries,
+                    "animatedOnly": animated_only,
+                });
+                let decision = evaluate_emojis(&emoji_config, total_count, animated_count);
+                let max_entries = decision.max_entries;
+                let animated_only = decision.animated_only;
                 if emojis.is_empty() { "No custom emojis are configured in this server.".to_string() } else {
                     let rows = emojis.into_iter().filter(|emoji| !animated_only || emoji.animated).take(max_entries).map(|emoji| format!("{} `<:{}:{}>`", if emoji.animated { "🎞️" } else { "😀" }, emoji.name, emoji.id)).collect::<Vec<_>>();
                     if rows.is_empty() { "No emojis match the current inventory filters.".to_string() } else { rows.join("\n") }
@@ -6975,6 +6985,13 @@ impl Handler {
                 let include_inviter = setting_bool(&self.store, &guild_text, "management.invite_tracker.include_inviter", true);
                 let mut invites = guild_id.invites(&ctx.http).await?;
                 invites.sort_by_key(|invite| std::cmp::Reverse(invite.uses));
+                let invite_config = serde_json::json!({
+                    "maxEntries": max_entries,
+                    "includeInviter": include_inviter,
+                });
+                let decision = evaluate_invite_tracker(&invite_config, invites.len() as u64);
+                let max_entries = decision.max_entries;
+                let include_inviter = decision.include_inviter;
                 let invite_text = if invites.is_empty() { "No active invites were found. The bot needs Manage Server to read them.".to_string() } else {
                     invites
                         .into_iter()
