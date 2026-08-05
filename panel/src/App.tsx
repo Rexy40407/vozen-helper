@@ -2490,7 +2490,11 @@ function App() {
         writes.push({ key: 'protection.antispam', config: selected.antispam, enabled });
         writes.push({ key: 'protection.anti_raid', config: selected.antiRaid, enabled });
       }
-      if (!localPreviewMode)
+      // Welcome and role-panel publication is handled atomically by the
+      // Quick Setup endpoint. Protection/moderation still use the regular
+      // feature endpoint because their profile expands into multiple policies
+      // and must preserve the existing projections.
+      if (!localPreviewMode && (step === 'protection' || step === 'moderation'))
         for (const write of writes) await api.saveFeature(write.key, write.enabled, write.config);
       const previous = quickSetup ?? defaultQuickSetupState(me?.guildId ?? 'demo');
       const next = localPreviewMode
@@ -2508,11 +2512,6 @@ function App() {
             enabled,
             expectedRevision: previous.revision,
           });
-      if (!localPreviewMode && next.draft && (step === 'welcome' || step === 'roles')) {
-        const normalizedConfig = next.draft as FeatureConfig;
-        const normalizedKey = step === 'welcome' ? 'support.welcome' : 'community.role_panels';
-        await api.saveFeature(normalizedKey, enabled, { ...config, ...normalizedConfig });
-      }
       if (!localPreviewMode && next.draft && step === 'protection') {
         const normalizedConfig = next.draft as FeatureConfig;
         const channelId = String(normalizedConfig.logChannel ?? '').trim();
