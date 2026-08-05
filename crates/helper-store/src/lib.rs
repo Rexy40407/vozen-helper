@@ -1391,6 +1391,23 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
     }
 
+    pub fn list_tag_records(&self, guild_id: &str, limit: u32) -> Result<Vec<TagRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT guild_id,name,content,author_id,created_at FROM tags WHERE guild_id=?1 ORDER BY name LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![guild_id, i64::from(limit.min(100))], |row| {
+            Ok(TagRecord {
+                guild_id: row.get(0)?,
+                name: row.get(1)?,
+                content: row.get(2)?,
+                author_id: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn delete_tag(&self, guild_id: &str, name: &str) -> Result<bool> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         Ok(conn.execute(
@@ -5204,6 +5221,10 @@ mod tests {
             store.get_tag("g", "rules").unwrap().unwrap().content,
             "be kind"
         );
+        let records = store.list_tag_records("g", 10).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].name, "rules");
+        assert_eq!(records[0].author_id, "u");
         assert_eq!(store.add_xp("g", "u", 5).unwrap(), 5);
         assert_eq!(store.level_for("g", "u").unwrap(), 5);
         store.add_xp("g", "other", 25).unwrap();

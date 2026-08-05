@@ -44,6 +44,13 @@ export type StudioTemplate = {
   created_at: string;
   updated_at: string;
 };
+export type CustomCommand = {
+  guild_id?: string;
+  name: string;
+  content: string;
+  author_id?: string;
+  created_at?: number;
+};
 export type YouTubeSubscription = {
   id: number;
   sourceChannelId: string;
@@ -327,6 +334,30 @@ export const api = {
       '/api/quotas',
     ),
   modules: () => request<{ modules: string[] }>('/api/modules'),
+  customCommands: () =>
+    request<{
+      guildId: string;
+      enabled: boolean;
+      limit: number;
+      maxResponseLength: number;
+      commands: CustomCommand[];
+    }>('/api/custom-commands'),
+  createCustomCommand: (name: string, content: string) =>
+    request<{ command: CustomCommand }>('/api/custom-commands', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, content }),
+    }),
+  updateCustomCommand: (name: string, content: string) =>
+    request<{ command: CustomCommand }>(`/api/custom-commands/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, content }),
+    }),
+  deleteCustomCommand: (name: string) =>
+    request<{ ok: boolean; name: string }>(`/api/custom-commands/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    }),
   features: () => request<{ guildId: string; features: Feature[] }>('/api/config/features'),
   updateFeature: (key: string, enabled: boolean) =>
     request<{ ok: boolean; enabled: boolean }>('/api/config/features', {

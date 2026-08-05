@@ -4,6 +4,7 @@ import {
   type ActivityRecord,
   type AuditRecord,
   type CaseRecord,
+  type CustomCommand,
   type Feature,
   type FeatureConfig,
   type FeatureSchema,
@@ -3834,6 +3835,9 @@ function FeatureDetail({
               localPreviewMode={localPreviewMode}
             />
           )}
+          {feature?.key === 'management.custom_commands' && (
+            <CustomCommandManager localPreviewMode={localPreviewMode} />
+          )}
           {sections.map((section) => (
             <ConfigSection
               key={section.title}
@@ -3997,6 +4001,155 @@ function TemplateManager({
               >
                 Delete
               </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function CustomCommandManager({ localPreviewMode }: { localPreviewMode: boolean }) {
+  const [commands, setCommands] = useState<CustomCommand[]>([]);
+  const [name, setName] = useState('');
+  const [content, setContent] = useState('');
+  const [editingName, setEditingName] = useState<string | null>(null);
+  const [limit, setLimit] = useState(100);
+  const [maxResponseLength, setMaxResponseLength] = useState(1000);
+  const [enabled, setEnabled] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(!localPreviewMode);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (localPreviewMode) return;
+    let cancelled = false;
+    void api.customCommands()
+      .then((result) => {
+        if (cancelled) return;
+        setCommands(result.commands);
+        setLimit(result.limit);
+        setMaxResponseLength(result.maxResponseLength);
+        setEnabled(result.enabled);
+      })
+      .catch((cause) => {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Could not load custom commands.');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [localPreviewMode]);
+
+  function resetForm() {
+    setName('');
+    setContent('');
+    setEditingName(null);
+  }
+
+  function beginEdit(command: CustomCommand) {
+    setEditingName(command.name);
+    setName(command.name);
+    setContent(command.content);
+    setError('');
+  }
+
+  async function saveCommand() {
+    const normalizedName = name.trim().toLowerCase();
+    if (localPreviewMode || busy || !normalizedName || !content.trim()) return;
+    setBusy(true);
+    setError('');
+    try {
+      const result = editingName
+        ? await api.updateCustomCommand(editingName, content.trim())
+        : await api.createCustomCommand(normalizedName, content.trim());
+      setCommands((current) => editingName
+        ? current.map((command) => command.name === editingName ? result.command : command)
+        : [...current, result.command].sort((a, b) => a.name.localeCompare(b.name)));
+      resetForm();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not save the custom command.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeCommand(commandName: string) {
+    if (localPreviewMode || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api.deleteCustomCommand(commandName);
+      setCommands((current) => current.filter((command) => command.name !== commandName));
+      if (editingName === commandName) resetForm();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not delete the custom command.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="config-section card">
+      <div className="section-heading">
+        <div>
+          <small className="eyebrow">RESPOSTAS DO SERVIDOR</small>
+          <h3>Comandos personalizados</h3>
+          <p>
+            Cria respostas simples para o teu servidor. O prefixo e os limites ficam nas opções acima;
+            aqui geres o conteúdo que o Helper publica de verdade.
+          </p>
+        </div>
+      </div>
+      <div className="tip">
+        <b>Variáveis disponíveis</b>
+        <span>{'{user}'}, {'{channel}'}, {'{server}'} e {'{args}'}. Menções globais são neutralizadas pelo Helper.</span>
+      </div>
+      {!localPreviewMode && !loading && !enabled && (
+        <p className="tip" role="status">Ativa esta funcionalidade e guarda as alterações acima para gerir comandos.</p>
+      )}
+      {loading && <p className="tip" role="status">A carregar comandos deste servidor…</p>}
+      <div className="field-grid">
+        <label className="field">
+          <span><b>{editingName ? 'Nome do comando' : 'Novo comando'}</b><small>Usa apenas letras, números, hífen ou underscore. Máximo 32 caracteres.</small></span>
+          <input
+            value={name}
+            maxLength={32}
+            disabled={Boolean(editingName) || localPreviewMode || busy || !enabled}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="regras"
+          />
+        </label>
+        <label className="field">
+          <span><b>Resposta</b><small>Até {maxResponseLength} caracteres. O prefixo configurado será usado no Discord.</small></span>
+          <textarea
+            value={content}
+            maxLength={maxResponseLength}
+            rows={3}
+            disabled={localPreviewMode || busy || !enabled}
+            onChange={(event) => setContent(event.target.value)}
+            placeholder="Consulta #regras para conhecer as regras do servidor."
+          />
+        </label>
+      </div>
+      <div className="inline-actions">
+        <button className="secondary" onClick={() => void saveCommand()} disabled={localPreviewMode || busy || !enabled || !name.trim() || !content.trim()}>
+          {busy ? 'A guardar…' : editingName ? 'Guardar comando' : 'Adicionar comando'}
+        </button>
+        {editingName && <button className="ghost" onClick={resetForm} disabled={busy}>Cancelar edição</button>}
+        <small>{commands.length}/{limit} comandos usados</small>
+      </div>
+      {error && <p className="tip" role="alert">{error}</p>}
+      {!localPreviewMode && !loading && commands.length === 0 && <p className="tip">Ainda não existem comandos. Adiciona o primeiro acima.</p>}
+      {commands.length > 0 && (
+        <div className="template-list" aria-label="Comandos personalizados">
+          {commands.map((command) => (
+            <div className="template-row" key={command.name}>
+              <div><b>{command.name}</b><small>{command.content}</small></div>
+              <div className="inline-actions">
+                <button className="ghost" onClick={() => beginEdit(command)} disabled={busy}>Editar</button>
+                <button className="ghost" onClick={() => void removeCommand(command.name)} disabled={busy}>Apagar</button>
+              </div>
             </div>
           ))}
         </div>

@@ -265,7 +265,15 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/privacy/delete", post(privacy_delete))
         .route("/api/config/import", post(import_config))
         .route("/api/workflows", get(workflows).post(create_workflow))
-        .route("/api/workflows/{id}", delete(delete_workflow));
+        .route("/api/workflows/{id}", delete(delete_workflow))
+        .route(
+            "/api/custom-commands",
+            get(custom_commands).post(create_custom_command),
+        )
+        .route(
+            "/api/custom-commands/{name}",
+            put(update_custom_command).delete(delete_custom_command),
+        );
     let router = if let Some(origins) = allowed_origin {
         let values = origins
             .split(',')
@@ -9158,6 +9166,187 @@ struct WorkflowRequest {
     condition: Option<String>,
     action: String,
     payload: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CustomCommandRequest {
+    name: String,
+    content: String,
+}
+
+fn normalize_custom_command_name(raw: &str) -> Option<String> {
+    let name = raw.trim().to_ascii_lowercase();
+    if !(1..=32).contains(&name.len())
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return None;
+    }
+    Some(name)
+}
+
+fn custom_command_limits(state: &ApiState, guild_id: &str) -> (u32, usize) {
+    let read_u64 = |key: &str, fallback: u64| {
+        state
+            .store
+            .get_setting(guild_id, key)
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(fallback)
+    };
+    (
+        read_u64("management.custom_commands.max_tags", 100).clamp(1, 100) as u32,
+        read_u64("management.custom_commands.max_response_length", 1_000).clamp(1, 2_000) as usize,
+    )
+}
+
+fn custom_command_error(code: &'static str) -> (StatusCode, Json<ApiError>) {
+    client_error(StatusCode::BAD_REQUEST, code)
+}
+
+async fn custom_commands(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let (limit, max_response_length) = custom_command_limits(&state, &claims.guild_id);
+    let commands = state
+        .store
+        .list_tag_records(&claims.guild_id, limit)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "enabled": feature_enabled(&state, &claims.guild_id, "management.custom_commands"),
+        "limit": limit,
+        "maxResponseLength": max_response_length,
+        "commands": commands,
+    })))
+}
+
+async fn save_custom_command(
+    state: &ApiState,
+    claims: &SessionClaims,
+    request: CustomCommandRequest,
+    expected_name: Option<&str>,
+) -> Result<helper_store::TagRecord, (StatusCode, Json<ApiError>)> {
+    if !feature_enabled(state, &claims.guild_id, "management.custom_commands") {
+        return Err(client_error(StatusCode::CONFLICT, "feature_disabled"));
+    }
+    let name = normalize_custom_command_name(&request.name)
+        .ok_or_else(|| custom_command_error("invalid_custom_command_name"))?;
+    if expected_name.is_some_and(|expected| expected != name) {
+        return Err(custom_command_error("custom_command_name_mismatch"));
+    }
+    let (limit, max_response_length) = custom_command_limits(state, &claims.guild_id);
+    let content = request.content.trim().to_string();
+    if content.is_empty() || content.chars().count() > max_response_length {
+        return Err(custom_command_error("invalid_custom_command_content"));
+    }
+    let existing = state
+        .store
+        .get_tag(&claims.guild_id, &name)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    if existing.is_none()
+        && state
+            .store
+            .list_tags(&claims.guild_id, limit.saturating_add(1))
+            .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+            .len()
+            >= limit as usize
+    {
+        return Err(client_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "custom_command_limit_reached",
+        ));
+    }
+    state
+        .store
+        .upsert_tag(&claims.guild_id, &name, &content, &claims.user_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let _ = state.store.record_activity(
+        &claims.guild_id,
+        "custom_command_config",
+        &claims.user_id,
+        None,
+        Some(&claims.user_id),
+        &serde_json::json!({"operation":"upsert","name":name}).to_string(),
+    );
+    state
+        .store
+        .get_tag(&claims.guild_id, &name)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .ok_or_else(|| client_error(StatusCode::INTERNAL_SERVER_ERROR, "custom_command_missing"))
+}
+
+async fn create_custom_command(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(request): Json<CustomCommandRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let command = save_custom_command(&state, &claims, request, None).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({"command": command})),
+    ))
+}
+
+async fn update_custom_command(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(request): Json<CustomCommandRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let expected_name = normalize_custom_command_name(&name)
+        .ok_or_else(|| custom_command_error("invalid_custom_command_name"))?;
+    if state
+        .store
+        .get_tag(&claims.guild_id, &expected_name)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .is_none()
+    {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "custom_command_not_found",
+        ));
+    }
+    let command = save_custom_command(&state, &claims, request, Some(&expected_name)).await?;
+    Ok(Json(serde_json::json!({"command": command})))
+}
+
+async fn delete_custom_command(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    if !feature_enabled(&state, &claims.guild_id, "management.custom_commands") {
+        return Err(client_error(StatusCode::CONFLICT, "feature_disabled"));
+    }
+    let name = normalize_custom_command_name(&name)
+        .ok_or_else(|| custom_command_error("invalid_custom_command_name"))?;
+    let deleted = state
+        .store
+        .delete_tag(&claims.guild_id, &name)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    if !deleted {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "custom_command_not_found",
+        ));
+    }
+    let _ = state.store.record_activity(
+        &claims.guild_id,
+        "custom_command_config",
+        &claims.user_id,
+        None,
+        Some(&claims.user_id),
+        &serde_json::json!({"operation":"delete","name":name}).to_string(),
+    );
+    Ok(Json(serde_json::json!({"ok": true, "name": name})))
 }
 
 async fn workflows(
