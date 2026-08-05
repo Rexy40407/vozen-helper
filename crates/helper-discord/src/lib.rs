@@ -9049,6 +9049,162 @@ fn english_bot_text(input: &str) -> String {
         // still present in older handlers; the mojibake variants below keep
         // responses from legacy persisted/configured paths readable too.
         (
+            "Este comando só pode ser usado num servidor.",
+            "This command can only be used in a server.",
+        ),
+        ("Indica um membro.", "Specify a member."),
+        ("Indica um utilizador.", "Specify a user."),
+        ("Indica um ID de utilizador.", "Specify a user ID."),
+        ("ID de utilizador inválido.", "Invalid user ID."),
+        ("Indica um canal válido.", "Specify a valid channel."),
+        (
+            "Indica pelo menos um cargo válido.",
+            "Specify at least one valid role.",
+        ),
+        (
+            "Indica uma pergunta e pelo menos duas opções.",
+            "Specify a question and at least two options.",
+        ),
+        (
+            "O conteúdo não pode exceder 500 caracteres.",
+            "Content cannot exceed 500 characters.",
+        ),
+        (
+            "Duração inválida. Usa 10m, 2h ou 1d.",
+            "Invalid duration. Use 10m, 2h or 1d.",
+        ),
+        ("Nome ou conteúdo inválido.", "Invalid name or content."),
+        (
+            "Nome, condição ou resposta inválidos.",
+            "Invalid name, condition or response.",
+        ),
+        (
+            "Nome, local ou descrição inválidos.",
+            "Invalid name, location or description.",
+        ),
+        (
+            "Indica prioridade, categoria ou nota.",
+            "Specify a priority, category or note.",
+        ),
+        ("Prioridade inválida.", "Invalid priority."),
+        (
+            "As sugestões estão desativadas neste servidor. Ativa-as no painel.",
+            "Suggestions are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "A sugestão deve ter entre 3 e 1000 caracteres.",
+            "The suggestion must be between 3 and 1,000 characters.",
+        ),
+        (
+            "Os giveaways estão desativados neste servidor. Ativa-os no painel.",
+            "Giveaways are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "O prémio deve ter entre 1 e 200 caracteres.",
+            "The prize must be between 1 and 200 characters.",
+        ),
+        (
+            "As enquetes estão desativadas neste servidor. Ativa-as no painel.",
+            "Polls are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "Indica uma pergunta e pelo menos duas opções.",
+            "Specify a question and at least two options.",
+        ),
+        (
+            "Esse membro não está em quarantine.",
+            "That member is not quarantined.",
+        ),
+        (
+            "Configura primeiro `/join-gate` com um cargo de verificação.",
+            "Configure `/join-gate` first with a verification role.",
+        ),
+        (
+            "Ativa primeiro o `/join-gate`; o painel não deve ficar exposto enquanto o gate está desligado.",
+            "Enable `/join-gate` first; do not expose the panel while the gate is disabled.",
+        ),
+        (
+            "Os eventos estão desativados neste servidor. Ativa-os no painel.",
+            "Events are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "A lotação deve estar entre 1 e 100000.",
+            "Capacity must be between 1 and 100,000.",
+        ),
+        (
+            "Nome, local ou descrição inválidos.",
+            "Invalid name, location or description.",
+        ),
+        (
+            "Indica um ID de evento válido.",
+            "Specify a valid event ID.",
+        ),
+        (
+            "Não encontrei esse evento neste servidor.",
+            "That event was not found in this server.",
+        ),
+        (
+            "Este evento já terminou ou foi cancelado.",
+            "This event has already ended or was cancelled.",
+        ),
+        (
+            "Não tens uma inscrição neste evento.",
+            "You are not registered for this event.",
+        ),
+        (
+            "O teu check-in já está registado.",
+            "Your check-in is already recorded.",
+        ),
+        (
+            "Workflow não encontrado neste servidor.",
+            "Workflow not found in this server.",
+        ),
+        (
+            "Este canal não é um ticket do Helper.",
+            "This channel is not a Helper ticket.",
+        ),
+        (
+            "Só o autor do ticket pode avaliá-lo.",
+            "Only the ticket author can rate it.",
+        ),
+        (
+            "A avaliação tem de ser entre 1 e 5.",
+            "The rating must be between 1 and 5.",
+        ),
+        (
+            "Só podes avaliar um ticket fechado.",
+            "You can only rate a closed ticket.",
+        ),
+        (
+            "Não foi possível guardar a avaliação.",
+            "Unable to save the rating.",
+        ),
+        (
+            "Os painéis de cargos estão desativados neste servidor. Ativa-os no painel.",
+            "Role panels are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "Indica pelo menos um cargo válido.",
+            "Specify at least one valid role.",
+        ),
+        ("Sugestão não encontrada.", "Suggestion not found."),
+        ("Voto registado.", "Vote recorded."),
+        ("Giveaway não encontrado.", "Giveaway not found."),
+        (
+            "Este giveaway já terminou.",
+            "This giveaway has already ended.",
+        ),
+        ("Saíste do giveaway.", "You left the giveaway."),
+        ("Poll não encontrada.", "Poll not found."),
+        ("Cargo atribuído.", "Role assigned."),
+        ("Cargo removido.", "Role removed."),
+        (
+            "Painel de verificação inválido.",
+            "Invalid verification panel.",
+        ),
+        ("Já estás verificado.", "You are already verified."),
+        ("Botão desconhecido.", "Unknown button."),
+        (
             "Setup guiado: escolhe pelo menos um m\u{00f3}dulo (Security, Support, Events, Community, Automate ou Insights) e executa novamente. Depois confirma as permiss\u{00f5}es com `/permissions`.",
             "Guided setup: choose at least one module (Security, Support, Events, Community, Automate or Insights), then run it again. Confirm permissions with `/permissions`.",
         ),
