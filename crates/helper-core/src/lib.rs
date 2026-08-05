@@ -1236,6 +1236,13 @@ fn project_role_panels(config: &serde_json::Value) -> Vec<(String, String)> {
             value.to_string(),
         ));
     }
+    if let Some(value) = object
+        .get("selectionMode")
+        .and_then(serde_json::Value::as_str)
+        .filter(|mode| *mode == "multiple" || *mode == "unique")
+    {
+        pairs.push(("community.role_panels.selection_mode".into(), value.into()));
+    }
     if let Some(values) = object.get("roleIds").and_then(serde_json::Value::as_array) {
         let ids = values
             .iter()
@@ -1340,6 +1347,19 @@ fn validate_interaction_config(config: &serde_json::Value, key: &str) -> Vec<Val
                     path: "roleIds".into(),
                     code: "invalid_role_ids".into(),
                     message: "Choose between one and five valid Discord roles.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if let Some(value) = object.get("selectionMode") {
+            let valid = value
+                .as_str()
+                .is_some_and(|mode| mode == "multiple" || mode == "unique");
+            if !valid {
+                issues.push(ValidationIssue {
+                    path: "selectionMode".into(),
+                    code: "invalid_selection_mode".into(),
+                    message: "Choose multiple roles or one role at a time.".into(),
                     severity: "error".into(),
                 });
             }
@@ -6529,8 +6549,8 @@ static ROLE_PANELS_ADAPTER: CommunityInteractionAdapter = CommunityInteractionAd
     source: "role_panels_adapter_v2",
     title: "Role panel workflow",
     description: "Set safe defaults for role panels and enforce a bounded number of roles.",
-    schema: r#"{"version":1,"source":"role_panels_adapter_v2","sections":[{"title":"Panel defaults","description":"The role panel command applies these values to newly published panels.","fields":[{"key":"channel","label":"Panel channel (optional)","kind":"channel"},{"key":"roleIds","label":"Panel roles","kind":"roles","max":5},{"key":"panelTitle","label":"Panel title","kind":"text","min":1,"max":80},{"key":"panelDescription","label":"Panel description","kind":"textarea","max":1000},{"key":"maxRoles","label":"Maximum roles","kind":"number","min":1,"max":5},{"key":"removeOnUnselect","label":"Remove the role when toggled off","kind":"toggle"}]}]}"#,
-    defaults: r#"{"channel":"","panelTitle":"Choose your roles","panelDescription":"Select the roles that fit you.","maxRoles":5,"removeOnUnselect":true}"#,
+    schema: r#"{"version":1,"source":"role_panels_adapter_v2","sections":[{"title":"Panel defaults","description":"The role panel command applies these values to newly published panels.","fields":[{"key":"channel","label":"Panel channel (optional)","kind":"channel"},{"key":"roleIds","label":"Panel roles","kind":"roles","max":5},{"key":"panelTitle","label":"Panel title","kind":"text","min":1,"max":80},{"key":"panelDescription","label":"Panel description","kind":"textarea","max":1000},{"key":"maxRoles","label":"Maximum roles","kind":"number","min":1,"max":5},{"key":"selectionMode","label":"Selection mode","kind":"select","options":[["multiple","Members can choose several roles"],["unique","Members can choose one role"]]},{"key":"removeOnUnselect","label":"Remove the role when toggled off","kind":"toggle"}]}]}"#,
+    defaults: r#"{"channel":"","panelTitle":"Choose your roles","panelDescription":"Select the roles that fit you.","maxRoles":5,"selectionMode":"multiple","removeOnUnselect":true}"#,
     dependencies: &["manage_roles", "interactions"],
     projection: project_role_panels,
 };
@@ -8739,6 +8759,7 @@ mod tests {
             "panelTitle": "Pick your alerts",
             "panelDescription": "Choose what you want to receive.",
             "maxRoles": 2,
+            "selectionMode": "unique",
             "removeOnUnselect": true
         });
         assert!(adapter.validate(&config).is_empty());
@@ -8746,11 +8767,21 @@ mod tests {
             "community.role_panels.role_ids".into(),
             "111111111111111111,222222222222222222".into()
         )));
+        assert!(adapter.runtime_projection(&config).contains(&(
+            "community.role_panels.selection_mode".into(),
+            "unique".into()
+        )));
         assert!(
             adapter
                 .validate(&serde_json::json!({"roleIds": ["not-a-discord-id"]}))
                 .iter()
                 .any(|issue| issue.code == "invalid_role_ids")
+        );
+        assert!(
+            adapter
+                .validate(&serde_json::json!({"selectionMode": "unbounded"}))
+                .iter()
+                .any(|issue| issue.code == "invalid_selection_mode")
         );
     }
 }

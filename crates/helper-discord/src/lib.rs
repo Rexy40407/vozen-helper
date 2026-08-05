@@ -7794,6 +7794,14 @@ impl Handler {
                     .map(str::to_owned)
                     .or_else(|| setting_string(&self.store, &guild_text, "community.role_panels.title"))
                     .unwrap_or_else(|| "Choose your roles".to_string());
+                let selection_mode = setting_string(
+                    &self.store,
+                    &guild_text,
+                    "community.role_panels.selection_mode",
+                )
+                .filter(|mode| mode == "unique")
+                .unwrap_or_else(|| "multiple".to_string());
+                let guild_roles = guild_id.roles(&ctx.http).await?;
                 let mut buttons = Vec::new();
                 let mut role_ids = Vec::new();
                 let max_roles = setting_u64(&self.store, &guild_text, "community.role_panels.max_roles", 5).clamp(1, 5) as usize;
@@ -7805,10 +7813,15 @@ impl Handler {
                             _ => return None,
                         })
                     }) {
+                        let role_name = guild_roles
+                            .get(&role_id)
+                            .map(|role| role.name.trim().chars().take(80).collect::<String>())
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or_else(|| format!("Role {}", buttons.len() + 1));
                         role_ids.push(role_id.get());
                         buttons.push(
                             CreateButton::new(format!("role:toggle:{}", role_id.get()))
-                                .label(format!("Role {}", buttons.len() + 1))
+                                .label(role_name)
                                 .style(ButtonStyle::Secondary),
                         );
                     }
@@ -7827,10 +7840,15 @@ impl Handler {
                         .take(max_roles)
                     {
                         if let Ok(role_id) = role_id.parse::<u64>() {
+                            let role_name = guild_roles
+                                .get(&RoleId::new(role_id))
+                                .map(|role| role.name.trim().chars().take(80).collect::<String>())
+                                .filter(|name| !name.is_empty())
+                                .unwrap_or_else(|| format!("Role {}", buttons.len() + 1));
                             role_ids.push(role_id);
                             buttons.push(
                                 CreateButton::new(format!("role:toggle:{role_id}"))
-                                    .label(format!("Role {}", buttons.len() + 1))
+                                    .label(role_name)
                                     .style(ButtonStyle::Secondary),
                             );
                         }
@@ -7861,6 +7879,13 @@ impl Handler {
                         "message_id": message.id,
                         "title": title,
                         "role_ids": role_ids,
+                        "selection_mode": selection_mode,
+                        "remove_on_unselect": setting_bool(
+                            &self.store,
+                            &guild_text,
+                            "community.role_panels.remove_on_unselect",
+                            true,
+                        ),
                     })
                     .to_string(),
                 )?;
@@ -8073,19 +8098,46 @@ impl Handler {
                 .store
                 .get_setting(&guild_id.to_string(), &panel_key)?
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-            let configured = panel
+            let panel_roles = panel
                 .as_ref()
                 .and_then(|value| value.get("role_ids"))
                 .and_then(serde_json::Value::as_array)
-                .is_some_and(|roles| {
+                .map(|roles| {
                     roles
                         .iter()
-                        .any(|value| value.as_u64().is_some_and(|id| id == role_id.get()))
-                });
-            if !configured {
+                        .filter_map(serde_json::Value::as_u64)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if !panel_roles.contains(&role_id.get()) {
                 return respond_component(ctx, component, "This role panel is no longer valid.")
                     .await;
             }
+            let selection_mode = panel
+                .as_ref()
+                .and_then(|value| value.get("selection_mode"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| {
+                    setting_string(
+                        &self.store,
+                        &guild_id.to_string(),
+                        "community.role_panels.selection_mode",
+                    )
+                })
+                .unwrap_or_else(|| "multiple".to_string());
+            let remove_on_unselect = panel
+                .as_ref()
+                .and_then(|value| value.get("remove_on_unselect"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or_else(|| {
+                    setting_bool(
+                        &self.store,
+                        &guild_id.to_string(),
+                        "community.role_panels.remove_on_unselect",
+                        true,
+                    )
+                });
             let roles = guild_id.roles(&ctx.http).await?;
             let Some(role) = roles.get(&role_id) else {
                 return respond_component(ctx, component, "That role no longer exists.").await;
@@ -8116,12 +8168,7 @@ impl Handler {
             }
             let member = guild_id.member(&ctx.http, component.user.id).await?;
             if member.roles.contains(&role_id) {
-                if !setting_bool(
-                    &self.store,
-                    &guild_id.to_string(),
-                    "community.role_panels.remove_on_unselect",
-                    true,
-                ) {
+                if !remove_on_unselect {
                     return respond_component(
                         ctx,
                         component,
@@ -8131,6 +8178,16 @@ impl Handler {
                 }
                 member.remove_role(&ctx.http, role_id).await?;
                 return respond_component(ctx, component, "Cargo removido.").await;
+            }
+            if selection_mode == "unique" {
+                for other_id in panel_roles
+                    .into_iter()
+                    .filter(|other_id| *other_id != role_id.get())
+                    .map(RoleId::new)
+                    .filter(|other_id| member.roles.contains(other_id))
+                {
+                    member.remove_role(&ctx.http, other_id).await?;
+                }
             }
             member.add_role(&ctx.http, role_id).await?;
             return respond_component(ctx, component, "Cargo atribuído.").await;

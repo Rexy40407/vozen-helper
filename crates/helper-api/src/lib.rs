@@ -5395,22 +5395,48 @@ async fn discord_publish_role_panel(
         .get("panelDescription")
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty());
+    let selection_mode = config
+        .get("selectionMode")
+        .and_then(serde_json::Value::as_str)
+        .filter(|mode| *mode == "unique")
+        .unwrap_or("multiple");
+    let remove_on_unselect = config
+        .get("removeOnUnselect")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
     let content = description
         .map(|value| format!("{title}\n{value}"))
         .unwrap_or_else(|| title.to_owned());
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| Client::new());
+    let role_values = match client
+        .get(format!(
+            "https://discord.com/api/v10/guilds/{guild_id}/roles"
+        ))
+        .header(
+            header::AUTHORIZATION,
+            format!("Bot {}", state.discord_token),
+        )
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => response
+            .json::<Vec<serde_json::Value>>()
+            .await
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
     let components = serde_json::json!([{
         "type": 1,
         "components": role_ids.iter().enumerate().map(|(index, role_id)| serde_json::json!({
             "type": 2,
             "style": 2,
-            "label": format!("Role {}", index + 1),
+            "label": role_values.iter().find(|role| role.get("id").and_then(serde_json::Value::as_str) == Some(role_id.as_str())).and_then(|role| role.get("name")).and_then(serde_json::Value::as_str).filter(|name| !name.trim().is_empty()).map(|name| name.chars().take(80).collect::<String>()).unwrap_or_else(|| format!("Role {}", index + 1)),
             "custom_id": format!("role:toggle:{role_id}")
         })).collect::<Vec<_>>()
     }]);
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .unwrap_or_else(|_| Client::new());
     let response = client
         .post(format!(
             "https://discord.com/api/v10/channels/{channel_id}/messages"
@@ -5452,6 +5478,8 @@ async fn discord_publish_role_panel(
                 "message_id": message_id,
                 "title": title,
                 "role_ids": role_ids,
+                "selection_mode": selection_mode,
+                "remove_on_unselect": remove_on_unselect,
                 "source": "quick_setup"
             })
             .to_string(),
