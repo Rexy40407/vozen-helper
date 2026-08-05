@@ -847,6 +847,62 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AchievementPolicy {
+    pub first_threshold: i64,
+    pub regular_threshold: i64,
+    pub pillar_threshold: i64,
+}
+
+impl Default for AchievementPolicy {
+    fn default() -> Self {
+        Self {
+            first_threshold: 100,
+            regular_threshold: 1_000,
+            pillar_threshold: 10_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AchievementUnlock {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub threshold: i64,
+}
+
+/// Return the milestones reached by the supplied XP balance.  The runtime
+/// persists each returned key idempotently; the API uses the same pure result
+/// for its preview.
+pub fn evaluate_achievements(policy: &AchievementPolicy, xp: i64) -> Vec<AchievementUnlock> {
+    let xp = xp.max(0);
+    [
+        (
+            "first_steps",
+            "First steps",
+            policy.first_threshold.clamp(1, 1_000_000),
+        ),
+        (
+            "regular",
+            "Regular",
+            policy.regular_threshold.clamp(1, 1_000_000),
+        ),
+        (
+            "community_pillar",
+            "Community pillar",
+            policy.pillar_threshold.clamp(1, 1_000_000),
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, _, threshold)| xp >= *threshold)
+    .map(|(key, label, threshold)| AchievementUnlock {
+        key,
+        label,
+        threshold,
+    })
+    .collect()
+}
+
 /// Every configurable feature will eventually implement this contract. The
 /// first adapter is intentionally small: it proves that the API and gateway
 /// can consume one canonical schema/defaults/validator without pulling UI
@@ -6507,6 +6563,47 @@ impl FeatureAdapter for AchievementsAdapter {
         })
         .collect()
     }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let policy = AchievementPolicy {
+            first_threshold: config
+                .get("firstThreshold")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(100),
+            regular_threshold: config
+                .get("regularThreshold")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(1_000),
+            pillar_threshold: config
+                .get("pillarThreshold")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(10_000),
+        };
+        let xp = fixture
+            .get("xp")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(1_250);
+        let unlocked = evaluate_achievements(&policy, xp);
+        let mut effects = if unlocked.is_empty() {
+            vec![format!("No achievement is unlocked at {xp} XP.")]
+        } else {
+            vec![format!(
+                "Unlock {} at {xp} XP: {}.",
+                unlocked.len(),
+                unlocked
+                    .iter()
+                    .map(|item| format!("{} ({} XP)", item.label, item.threshold))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )]
+        };
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -7631,6 +7728,38 @@ mod tests {
         assert!(effects.iter().any(|effect| {
             effect.contains("management.workflows.max_reply_length") && effect.contains("20")
         }));
+    }
+
+    #[test]
+    fn achievements_evaluator_returns_ordered_milestones() {
+        let unlocked = evaluate_achievements(
+            &AchievementPolicy {
+                first_threshold: 100,
+                regular_threshold: 500,
+                pillar_threshold: 1_000,
+            },
+            600,
+        );
+        assert_eq!(
+            unlocked.iter().map(|item| item.key).collect::<Vec<_>>(),
+            vec!["first_steps", "regular"]
+        );
+    }
+
+    #[test]
+    fn achievements_adapter_simulation_uses_the_same_milestone_evaluator() {
+        let adapter = feature_adapter("community.achievements").expect("achievements adapter");
+        let effects = adapter.simulate(
+            &serde_json::json!({
+                "firstThreshold": 100,
+                "regularThreshold": 500,
+                "pillarThreshold": 1000
+            }),
+            &serde_json::json!({"xp": 600}),
+        );
+        assert!(effects[0].contains("First steps"));
+        assert!(effects[0].contains("Regular"));
+        assert!(!effects[0].contains("Community pillar"));
     }
 
     #[test]

@@ -4,12 +4,12 @@ use anyhow::Result;
 use chrono::{Datelike, Duration as ChronoDuration, TimeZone, Utc};
 use helper_contracts::{AntiSpamObservation, AntiSpamPolicy, Plan};
 use helper_core::{
-    AntiRaidPolicy, Config, JoinGateObservation, JoinGatePolicy, LeaderboardEntry,
-    StarboardObservation, WorkflowObservation, WorkflowPolicy, anti_spam_policy_from_json,
-    evaluate_anti_raid, evaluate_anti_spam, evaluate_join_gate, evaluate_leaderboard,
-    evaluate_scam_with_roles, evaluate_starboard, evaluate_workflow, feature_is_configurable,
-    feature_maturity, leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit,
-    scam_policy_from_json, starboard_policy_from_json,
+    AchievementPolicy, AntiRaidPolicy, Config, JoinGateObservation, JoinGatePolicy,
+    LeaderboardEntry, StarboardObservation, WorkflowObservation, WorkflowPolicy,
+    anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
+    evaluate_join_gate, evaluate_leaderboard, evaluate_scam_with_roles, evaluate_starboard,
+    evaluate_workflow, feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
+    parse_utc_offset_minutes, quota_limit, scam_policy_from_json, starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -5215,6 +5215,15 @@ fn configured_achievement_milestones(
     ]
 }
 
+fn achievement_policy_for_store(store: &Store, guild_id: &str) -> AchievementPolicy {
+    let milestones = configured_achievement_milestones(store, guild_id);
+    AchievementPolicy {
+        first_threshold: milestones[0].2,
+        regular_threshold: milestones[1].2,
+        pillar_threshold: milestones[2].2,
+    }
+}
+
 impl Handler {
     /// Persist milestone unlocks before announcing them.  This keeps the
     /// message and voice XP paths idempotent across gateway retries and makes
@@ -5237,20 +5246,21 @@ impl Handler {
         }
         let guild_text = guild_id.to_string();
         let mut newly_unlocked = Vec::new();
-        for (key, label, threshold) in configured_achievement_milestones(&self.store, &guild_text) {
-            if xp >= threshold
-                && self
-                    .store
-                    .unlock_achievement(
-                        &guild_text,
-                        user_id,
-                        key,
-                        threshold,
-                        Utc::now().timestamp_millis(),
-                    )
-                    .unwrap_or(false)
+        for milestone in
+            evaluate_achievements(&achievement_policy_for_store(&self.store, &guild_text), xp)
+        {
+            if self
+                .store
+                .unlock_achievement(
+                    &guild_text,
+                    user_id,
+                    milestone.key,
+                    milestone.threshold,
+                    Utc::now().timestamp_millis(),
+                )
+                .unwrap_or(false)
             {
-                newly_unlocked.push(format!("{label} ({threshold} XP)"));
+                newly_unlocked.push(format!("{} ({} XP)", milestone.label, milestone.threshold));
             }
         }
         if newly_unlocked.is_empty() {
@@ -6213,18 +6223,17 @@ impl Handler {
                     return respond(ctx, command, "Achievements are disabled in this server. Enable them in the dashboard.").await;
                 }
                 let xp = self.store.level_for(&guild_text, &command.user.id.to_string())?;
-                for (key, _label, threshold) in
-                    configured_achievement_milestones(&self.store, &guild_text)
-                {
-                    if xp >= threshold {
-                        let _ = self.store.unlock_achievement(
-                            &guild_text,
-                            &command.user.id.to_string(),
-                            key,
-                            threshold,
-                            Utc::now().timestamp_millis(),
-                        );
-                    }
+                for milestone in evaluate_achievements(
+                    &achievement_policy_for_store(&self.store, &guild_text),
+                    xp,
+                ) {
+                    let _ = self.store.unlock_achievement(
+                        &guild_text,
+                        &command.user.id.to_string(),
+                        milestone.key,
+                        milestone.threshold,
+                        Utc::now().timestamp_millis(),
+                    );
                 }
                 let unlocked = self
                     .store
