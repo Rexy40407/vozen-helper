@@ -1604,18 +1604,18 @@ impl EventHandler for Handler {
                 .add_option(
                     CreateCommandOption::new(
                         serenity::all::CommandOptionType::String,
-                        "end",
-                        "RFC3339 end",
-                    )
-                    .required(false),
-                )
-                .add_option(
-                    CreateCommandOption::new(
-                        serenity::all::CommandOptionType::String,
                         "location",
                         "External event location",
                     )
                     .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "end",
+                        "RFC3339 end",
+                    )
+                    .required(false),
                 )
                 .add_option(
                     CreateCommandOption::new(
