@@ -11374,6 +11374,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rss_publish_returns_provider_precondition_before_touching_store() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        store
+            .replace_session_guilds(
+                session.session_id,
+                &[("guild-a".into(), "Alpha".into(), Some("0".into()))],
+            )
+            .unwrap();
+
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config/features/social.rss")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "enabled": true,
+                            "config": {
+                                "feedUrl": "https://example.com/feed.xml",
+                                "targetChannelId": "123456789012345678",
+                                "intervalSeconds": 300,
+                                "messageTemplate": "{title}"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+        assert!(
+            store
+                .get_feature_setting("guild-a", "social.rss")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn anti_spam_detail_exposes_runtime_schema_and_defaults() {
         let store = Store::open(":memory:").unwrap();
         let session = claims("guild-a");
