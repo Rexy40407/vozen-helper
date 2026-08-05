@@ -5578,9 +5578,9 @@ impl Handler {
                 if let Some(client) = &self.entitlements {
                     match client.resolve(&command.user.id.to_string(), command.guild_id.map(|id| id.to_string()).as_deref()).await {
                         Ok(snapshot) => { let label = match &snapshot.plan { helper_contracts::Plan::Free => "Free", helper_contracts::Plan::Plus => "Plus", helper_contracts::Plan::Premium { .. } => "Premium" }; format!("Plano {label} · {} guild(s) · entitlements v{}.", snapshot.plan.guild_limit(), snapshot.version) },
-                        Err(error) => { tracing::warn!(%error, "central entitlement lookup failed"); "Não foi possível consultar o plano agora; o Helper mantém o último snapshot seguro.".to_string() }
+                        Err(error) => { tracing::warn!(%error, "central entitlement lookup failed"); "Unable to check the plan right now; Helper is keeping the last safe snapshot.".to_string() }
                     }
-                } else { "Entitlements central ainda não estão configurados nesta instalação.".to_string() }
+                } else { "Central entitlements are not configured in this installation yet.".to_string() }
             }
             "privacy" => {
                 let Some(guild_id) = command.guild_id else {
@@ -5616,7 +5616,7 @@ impl Handler {
                             return respond(ctx, command, "Member erasure is disabled in this server.").await;
                         }
                         let result = self.store.purge_user(&guild_text, &command.user.id.to_string())?;
-                        format!("Dados voluntários apagados. Registos de moderação, infrações e quarantine foram mantidos por auditoria. Resultado: {result}")
+                        format!("Voluntary data deleted. Moderation records, infractions and quarantine were retained for audit. Result: {result}")
                     }
                     _ => {
                         if !allow_export {
@@ -5638,7 +5638,7 @@ impl Handler {
                                 ).await?;
                                 "Enviei os teus dados por mensagem privada.".to_string()
                             }
-                            Err(_) => "Não consegui enviar mensagem privada. Ativa as DMs e tenta novamente.".to_string(),
+                            Err(_) => "I could not send a direct message. Enable DMs and try again.".to_string(),
                         }
                     }
                 }
@@ -5647,7 +5647,7 @@ impl Handler {
             "cases" => {
                 if let Some(guild_id) = command.guild_id {
                     let cases = self.store.recent_cases(&guild_id.to_string(), 10)?;
-                    if cases.is_empty() { "Ainda não existem casos neste servidor.".to_string() } else { cases.into_iter().map(|case_record| format!("#{} {} <@{}>: {}", case_record.id, case_record.kind, case_record.target_id, case_record.reason)).collect::<Vec<_>>().join("\n") }
+                    if cases.is_empty() { "There are no cases in this server yet.".to_string() } else { cases.into_iter().map(|case_record| format!("#{} {} <@{}>: {}", case_record.id, case_record.kind, case_record.target_id, case_record.reason)).collect::<Vec<_>>().join("\n") }
                 } else { "Este comando só pode ser usado num servidor.".to_string() }
             }
             "modlogs" => {
@@ -5662,7 +5662,7 @@ impl Handler {
                 };
                 let cases = self.store.cases_for_target(&guild_id.to_string(), &target.to_string(), 50)?;
                 if cases.is_empty() {
-                    format!("Não existem casos para <@{}>.", target)
+                    format!("There are no cases for <@{}>.", target)
                 } else {
                     cases.into_iter().map(|case_record| format!("#{} {}: {}", case_record.id, case_record.kind, case_record.reason)).collect::<Vec<_>>().join("\n")
                 }
@@ -5691,7 +5691,7 @@ impl Handler {
                     .channel_id
                     .edit(&ctx.http, EditChannel::new().rate_limit_per_user(seconds))
                     .await?;
-                format!("Slowmode definido para {} segundos.", seconds)
+                format!("Slowmode set to {} seconds.", seconds)
             }
             "userinfo" => {
                 let Some(user_id) = command.data.options.iter().find_map(|option| match option.value {
@@ -5724,7 +5724,7 @@ impl Handler {
                     return respond(ctx, command, "O conteúdo não pode exceder 500 caracteres.").await;
                 }
                 let case_id = self.store.record_case(&guild_id.to_string(), &command.data.name, &target.to_string(), &command.user.id.to_string(), &reason, None)?;
-                format!("Registo #{case_id} criado para <@{}>.", target)
+                format!("Record #{case_id} created for <@{}>.", target)
             }
             "reason" => {
                 let Some(guild_id) = command.guild_id else {
@@ -5736,9 +5736,9 @@ impl Handler {
                 }).unwrap_or(0);
                 let reason = option_string(command, "reason").unwrap_or("Sem motivo");
                 if self.store.update_case_reason(&guild_id.to_string(), case_id, reason)? {
-                    format!("Motivo do caso #{case_id} atualizado.")
+                    format!("Reason for case #{case_id} updated.")
                 } else {
-                    "Caso não encontrado neste servidor.".to_string()
+                    "Case not found in this server.".to_string()
                 }
             }
             "untimeout" => {
@@ -5758,7 +5758,7 @@ impl Handler {
                     Ok(_) => format!("Timeout removido para <@{}>.", target),
                     Err(error) => {
                         tracing::warn!(%error, "untimeout failed");
-                        "Não foi possível remover o timeout; confirma as permissões.".to_string()
+                        "Unable to remove the timeout; check permissions.".to_string()
                     }
                 }
             }
@@ -5773,10 +5773,10 @@ impl Handler {
                     return respond(ctx, command, "ID de utilizador inválido.").await;
                 };
                 match guild_id.unban(&ctx.http, serenity::all::UserId::new(user_id)).await {
-                    Ok(()) => "Utilizador desbanido.".to_string(),
+                    Ok(()) => "User unbanned.".to_string(),
                     Err(error) => {
                         tracing::warn!(%error, "unban failed");
-                        "Não foi possível remover o ban.".to_string()
+                        "Unable to remove the ban.".to_string()
                     }
                 }
             }
@@ -5789,7 +5789,7 @@ impl Handler {
                 let count = raw_count.clamp(1, max_purge as i64) as u8;
                 let messages = command.channel_id.messages(&ctx.http, serenity::all::GetMessages::new().limit(count)).await?;
                 if messages.is_empty() {
-                    "Não encontrei mensagens para apagar.".to_string()
+                    "No messages found to delete.".to_string()
                 } else {
                     let ids: Vec<_> = messages.iter().map(|message| message.id).collect();
                     command.channel_id.delete_messages(&ctx.http, ids).await?;
@@ -5863,11 +5863,11 @@ impl Handler {
                 match action {
                     Ok(()) => {
                         let case_id = self.store.record_case(&guild_id.to_string(), &command.data.name, &target.to_string(), &command.user.id.to_string(), reason, None)?;
-                        format!("Ação {} concluída como caso #{case_id} para <@{}>.", command.data.name, target)
+                        format!("Action {} completed as case #{case_id} for <@{}>.", command.data.name, target)
                     }
                     Err(error) => {
                         tracing::warn!(%error, action = %command.data.name, "discord moderation action failed");
-                        "Não foi possível executar a ação; confirma as permissões e a hierarquia de cargos.".to_string()
+                        "Unable to perform the action; check permissions and role hierarchy.".to_string()
                     }
                 }
             }
@@ -5881,11 +5881,11 @@ impl Handler {
                 });
                 if let Some(reason) = reason.filter(|value| !value.trim().is_empty()) {
                     self.store.set_afk(&guild_id.to_string(), &command.user.id.to_string(), reason)?;
-                    format!("AFK definido: {reason}")
+                    format!("AFK status set: {reason}")
                 } else if self.store.clear_afk(&guild_id.to_string(), &command.user.id.to_string())? {
-                    "AFK removido.".to_string()
+                    "AFK status removed.".to_string()
                 } else {
-                    "Não tinhas AFK definido.".to_string()
+                    "You did not have an AFK status set.".to_string()
                 }
             }
             "remind" => {
@@ -6018,7 +6018,7 @@ impl Handler {
                 let name = option_string(command, "name").unwrap_or_default().to_lowercase();
                 match self.store.get_tag(&guild_id.to_string(), &name)? {
                     Some(tag) => tag.content.replace("{user}", &format!("<@{}>", command.user.id)),
-                    None => "Tag não encontrada.".to_string(),
+                    None => "Tag not found.".to_string(),
                 }
             }
             "tags" => {
@@ -6030,7 +6030,7 @@ impl Handler {
                 }
                 let max_tags = setting_u64(&self.store, &guild_id.to_string(), "management.custom_commands.max_tags", 100).clamp(1, 100) as u32;
                 let names = self.store.list_tags(&guild_id.to_string(), max_tags)?;
-                if names.is_empty() { "Ainda não existem tags.".to_string() } else { names.join(", ") }
+                if names.is_empty() { "There are no tags yet.".to_string() } else { names.join(", ") }
             }
             "tag-set" => {
                 let Some(guild_id) = command.guild_id else {
@@ -6063,7 +6063,7 @@ impl Handler {
                     return respond(ctx, command, "Custom commands are disabled in this server. Enable them in the dashboard.").await;
                 }
                 let name = option_string(command, "name").unwrap_or_default().trim().to_lowercase();
-                if self.store.delete_tag(&guild_text, &name)? { format!("Tag `{name}` eliminada.") } else { "Tag não encontrada.".to_string() }
+                if self.store.delete_tag(&guild_text, &name)? { format!("Tag `{name}` deleted.") } else { "Tag not found.".to_string() }
             }
             "rank" => return self.send_rank_card(ctx, command).await,
             "leaderboard-privacy" => {
@@ -6353,7 +6353,7 @@ impl Handler {
                 .clamp(1, 30) as u32;
                 let rows = self.store.stats_for(&guild_text, window_days)?;
                 let messages: i64 = rows.iter().map(|(_, messages, _, _)| messages).sum();
-                format!("Mensagens registadas nos últimos {} dias: {}.", rows.len(), messages)
+                format!("Messages recorded in the last {} days: {}.", rows.len(), messages)
             }
             "crypto" => {
                 let Some(guild_id) = command.guild_id else {
@@ -6775,9 +6775,9 @@ impl Handler {
                     return respond(ctx, command, "Estado inválido: pending, approved, denied ou considered.").await;
                 }
                 if self.store.set_suggestion_status(&guild_id.to_string(), id, &status)? {
-                    format!("Sugestão #{id} marcada como {status}.")
+                    format!("Suggestion #{id} marked as {status}.")
                 } else {
-                    "Sugestão não encontrada neste servidor.".to_string()
+                    "Suggestion not found in this server.".to_string()
                 }
             }
             "giveaway-start" | "gstart" => {
@@ -6819,7 +6819,7 @@ impl Handler {
                 if finish_giveaway(&ctx.http, &self.store, id).await? {
                     format!("Giveaway #{id} terminado.")
                 } else {
-                    "Giveaway não encontrado ou já terminado.".to_string()
+                    "Giveaway not found or already ended.".to_string()
                 }
             }
             "giveaway-list" | "glist" => {
@@ -6830,15 +6830,15 @@ impl Handler {
                     return respond(ctx, command, "Os giveaways estão desativados neste servidor. Ativa-os no painel.").await;
                 }
                 let rows = self.store.active_giveaways(&guild_id.to_string(), 20)?;
-                if rows.is_empty() { "Não existem giveaways ativos.".to_string() } else {
-                    rows.into_iter().map(|row| format!("#{} — {} — termina <t:{}:R>", row.id, row.prize, row.end_at / 1_000)).collect::<Vec<_>>().join("\n")
+                if rows.is_empty() { "There are no active giveaways.".to_string() } else {
+                    rows.into_iter().map(|row| format!("#{} — {} — ends <t:{}:R>", row.id, row.prize, row.end_at / 1_000)).collect::<Vec<_>>().join("\n")
                 }
             }
             "greroll" => {
                 let id = option_i64(command, "id").unwrap_or(0);
                 match reroll_giveaway(&ctx.http, &self.store, id).await? {
                     Some(winner) => format!("Giveaway #{id} rerolled: <@{winner}>."),
-                    None => "Giveaway não encontrado, ainda ativo ou sem participantes.".to_string(),
+                    None => "Giveaway not found, still active or without participants.".to_string(),
                 }
             }
             "poll" => {
@@ -6954,13 +6954,13 @@ impl Handler {
                 }
                 if enabled {
                     let role_note = if option_role(command, "role").is_some() {
-                        "; cargo de verificação atualizado"
+                        "; verification role updated"
                     } else {
-                        "; configura um cargo para restringir canais"
+                        "; configure a role to restrict channels"
                     };
-                    format!("Join gate ativado para contas com menos de {minimum_age} dia(s){role_note}.")
+                    format!("Join gate enabled for accounts younger than {minimum_age} day(s){role_note}.")
                 } else {
-                    "Join gate desativado; as definições guardadas podem ser reativadas.".to_string()
+                    "Join gate disabled; saved settings can be re-enabled.".to_string()
                 }
             }
             "verify-panel" => {
@@ -6986,7 +6986,7 @@ impl Handler {
                                 .style(ButtonStyle::Success),
                         ])]),
                 ).await?;
-                "Painel de verificação publicado neste canal.".to_string()
+                "Verification panel posted in this channel.".to_string()
             }
             "lockdown" => {
                 let Some(guild_id) = command.guild_id else {
@@ -7015,9 +7015,9 @@ impl Handler {
                     if shadow { "true" } else { "false" },
                 )?;
                 if shadow {
-                    "Shadow mode ativado: respostas anti-raid/anti-nuke ficam em observação, com casos e alertas, sem contenção automática.".to_string()
+                    "Shadow mode enabled: anti-raid/anti-nuke responses are monitored with cases and alerts, without automatic containment.".to_string()
                 } else {
-                    "Shadow mode desativado: as respostas de segurança configuradas podem aplicar contenção limitada.".to_string()
+                    "Shadow mode disabled: configured security responses may apply limited containment.".to_string()
                 }
             }
             "anti-raid" => {
@@ -7044,9 +7044,9 @@ impl Handler {
                     &window_seconds.to_string(),
                 )?;
                 if enabled {
-                    format!("Anti-raid ativado: {joins} entradas em {window_seconds}s ativam o join gate.")
+                    format!("Anti-raid enabled: {joins} joins in {window_seconds}s enable the join gate.")
                 } else {
-                    "Anti-raid desativado; nenhuma resposta automática a bursts de joins será aplicada.".to_string()
+                    "Anti-raid disabled; no automatic response to join bursts will be applied.".to_string()
                 }
             }
             "anti-nuke" => {
@@ -7078,9 +7078,9 @@ impl Handler {
                     if enabled { "true" } else { "false" },
                 )?;
                 if enabled {
-                    format!("Anti-nuke ativado: {actions} ações destrutivas em {window_seconds}s ativam contenção e alerta.")
+                    format!("Anti-nuke enabled: {actions} destructive actions in {window_seconds}s trigger containment and an alert.")
                 } else {
-                    "Anti-nuke desativado; os eventos de Audit Log não ativam contenção automática.".to_string()
+                    "Anti-nuke disabled; Audit Log events do not trigger automatic containment.".to_string()
                 }
             }
             "event-create" => {
@@ -7116,12 +7116,12 @@ impl Handler {
                     Ok(window) => window,
                     Err(reason) => {
                         let message = match reason {
-                            "invalid_start" => "A data de início não é RFC3339 válida.",
-                            "invalid_end" => "A data de fim não é RFC3339 válida.",
-                            "start_must_be_in_future" => "O início tem de estar no futuro.",
-                            "end_must_follow_start" => "O fim tem de ser depois do início.",
-                            "event_too_long" => "O evento não pode durar mais de 365 dias.",
-                            _ => "A janela do evento é inválida.",
+                            "invalid_start" => "The start date is not valid RFC3339.",
+                            "invalid_end" => "The end date is not valid RFC3339.",
+                            "start_must_be_in_future" => "The start must be in the future.",
+                            "end_must_follow_start" => "The end must be after the start.",
+                            "event_too_long" => "The event cannot last longer than 365 days.",
+                            _ => "The event window is invalid.",
                         };
                         return respond(ctx, command, message).await;
                     }
@@ -7154,7 +7154,7 @@ impl Handler {
                     ).await;
                 }
                 format!(
-                    "Evento nativo #{} criado: **{}** (<t:{}:F>–<t:{}:F>).",
+                    "Native event #{} created: **{}** (<t:{}:F>–<t:{}:F>).",
                     event.id,
                     event.name,
                     start.unix_timestamp(),
@@ -7167,7 +7167,7 @@ impl Handler {
                 };
                 let events = guild_id.scheduled_events(&ctx.http, false).await?;
                 if events.is_empty() {
-                    "Não existem eventos agendados neste servidor.".to_string()
+                    "There are no scheduled events in this server.".to_string()
                 } else {
                     events
                         .into_iter()
@@ -7206,7 +7206,7 @@ impl Handler {
                     serenity::all::ScheduledEventStatus::Completed
                         | serenity::all::ScheduledEventStatus::Canceled
                 ) {
-                    return respond(ctx, command, "Eventos concluídos ou cancelados não podem ser editados.").await;
+                    return respond(ctx, command, "Completed or cancelled events cannot be edited.").await;
                 }
 
                 let name = option_string(command, "name").map(str::trim);
@@ -7221,14 +7221,14 @@ impl Handler {
                     && (existing.kind != serenity::all::ScheduledEventType::External
                         || !(1..=100).contains(&location.len()))
                 {
-                    return respond(ctx, command, "A localização só pode ser alterada em eventos externos e deve ter 1–100 caracteres.").await;
+                    return respond(ctx, command, "Location can only be changed for external events and must be 1–100 characters.").await;
                 }
 
                 let description = option_string(command, "description").map(str::trim);
                 if let Some(description) = description
                     && description.len() > 1_000
                 {
-                    return respond(ctx, command, "A descrição não pode exceder 1000 caracteres.").await;
+                    return respond(ctx, command, "The description cannot exceed 1,000 characters.").await;
                 }
 
                 let start_raw = option_string(command, "start").map(str::trim);
@@ -7236,27 +7236,27 @@ impl Handler {
                 let (start, end) = if start_raw.is_some() || end_raw.is_some() {
                     let start = match start_raw {
                         Some(raw) => serenity::all::Timestamp::parse(raw)
-                            .map_err(|_| anyhow::anyhow!("A nova data de início não é RFC3339 válida."))?,
+                            .map_err(|_| anyhow::anyhow!("The new start date is not valid RFC3339."))?,
                         None => existing.start_time,
                     };
                     let end = match end_raw {
                         Some(raw) => serenity::all::Timestamp::parse(raw)
-                            .map_err(|_| anyhow::anyhow!("A nova data de fim não é RFC3339 válida."))?,
+                            .map_err(|_| anyhow::anyhow!("The new end date is not valid RFC3339."))?,
                         None => existing.end_time.ok_or_else(|| {
-                            anyhow::anyhow!("Este evento não tem data de fim; indica `end` para o editar.")
+                            anyhow::anyhow!("This event has no end date; provide `end` to edit it.")
                         })?,
                     };
                     if start_raw.is_some()
                         && start.unix_timestamp()
                             <= serenity::all::Timestamp::now().unix_timestamp()
                     {
-                        return respond(ctx, command, "A nova data de início tem de estar no futuro.").await;
+                        return respond(ctx, command, "The new start date must be in the future.").await;
                     }
                     if end.unix_timestamp() <= start.unix_timestamp() {
-                        return respond(ctx, command, "O fim tem de ser depois do início.").await;
+                        return respond(ctx, command, "The end must be after the start.").await;
                     }
                     if end.unix_timestamp() - start.unix_timestamp() > 365 * 86_400 {
-                        return respond(ctx, command, "O evento não pode durar mais de 365 dias.").await;
+                        return respond(ctx, command, "The event cannot last longer than 365 days.").await;
                     }
                     (Some(start), Some(end))
                 } else {
@@ -7290,7 +7290,7 @@ impl Handler {
                     builder = builder.description(description.to_string());
                 }
                 let edited = guild_id.edit_scheduled_event(&ctx.http, event_id, builder).await?;
-                format!("Evento nativo #{} atualizado: **{}**.", edited.id, edited.name)
+                format!("Native event #{} updated: **{}**.", edited.id, edited.name)
             }
             "event-register" => {
                 let Some(guild_id) = command.guild_id else {
@@ -7337,14 +7337,14 @@ impl Handler {
                         .is_some_and(|registration| registration.status == "waitlisted");
                     if waitlisted {
                         format!(
-                            "O evento **{}** está cheio; ficaste na lista de espera.",
+                            "Event **{}** is full; you were added to the waitlist.",
                             event.name
                         )
                     } else {
-                        format!("Inscrição confirmada para **{}**.", event.name)
+                        format!("Registration confirmed for **{}**.", event.name)
                     }
                 } else {
-                    "Já estás inscrito neste evento.".to_string()
+                    "You are already registered for this event.".to_string()
                 }
             }
             "event-unregister" => {
@@ -7365,10 +7365,10 @@ impl Handler {
                 }
                 match promoted {
                     Some(user_id) => format!(
-                        "Inscrição removida; <@{}> foi promovido da lista de espera.",
+                        "Registration removed; <@{}> was promoted from the waitlist.",
                         user_id
                     ),
-                    None => "Inscrição removida do evento.".to_string(),
+                    None => "Registration removed from the event.".to_string(),
                 }
             }
             "event-checkin" => {
@@ -7427,7 +7427,7 @@ impl Handler {
                     100,
                 )?;
                 if registrations.is_empty() {
-                    format!("**{}** ainda não tem inscrições.", event.name)
+                    format!("**{}** has no registrations yet.", event.name)
                 } else {
                     let lines = registrations
                         .into_iter()
@@ -7439,12 +7439,12 @@ impl Handler {
                                 if registration.status == "checked_in" {
                                     "check-in"
                                 } else {
-                                    "inscrito"
+                                    "registered"
                                 }
                             )
                         })
                         .collect::<Vec<_>>();
-                    format!("**{}** — {} inscrição(ões)\n{}", event.name, lines.len(), lines.join("\n"))
+                    format!("**{}** — {} registration(s)\n{}", event.name, lines.len(), lines.join("\n"))
                 }
             }
             "event-cancel" => {
@@ -7464,7 +7464,7 @@ impl Handler {
                         serenity::all::ScheduledEventId::new(event_id as u64),
                     )
                     .await?;
-                format!("Evento nativo #{} cancelado.", event_id)
+                format!("Native event #{} cancelled.", event_id)
             }
             "workflow-create" => {
                 let guild_text = match command.guild_id {
@@ -7524,15 +7524,15 @@ impl Handler {
                     )
                     .await;
                 };
-                format!("Workflow #{id} criado. É executado quando uma mensagem corresponde à condição.")
+                format!("Workflow #{id} created. It runs when a message matches the condition.")
             }
             "workflow-list" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
                 let workflows = self.store.workflows(&guild_id.to_string(), 25)?;
-                if workflows.is_empty() { "Não existem workflows configurados.".to_string() } else {
-                    workflows.into_iter().map(|workflow| format!("#{} **{}** · {} · {}", workflow.id, workflow.name, workflow.trigger, if workflow.enabled { "ativo" } else { "desligado" })).collect::<Vec<_>>().join("\n")
+                if workflows.is_empty() { "There are no workflows configured.".to_string() } else {
+                    workflows.into_iter().map(|workflow| format!("#{} **{}** · {} · {}", workflow.id, workflow.name, workflow.trigger, if workflow.enabled { "enabled" } else { "disabled" })).collect::<Vec<_>>().join("\n")
                 }
             }
             "workflow-dry-run" => {
@@ -7553,15 +7553,15 @@ impl Handler {
                             .to_lowercase()
                             .contains(&workflow.condition.to_lowercase()));
                 if !matches {
-                    format!("Dry-run: workflow **{}** não seria executado.", workflow.name)
+                    format!("Dry run: workflow **{}** would not run.", workflow.name)
                 } else if workflow.action == "reply" {
                     let preview = workflow
                         .payload
                         .replace("{user}", &format!("<@{}>", command.user.id))
                         .replace("{message}", &truncate(sample, 500));
-                    format!("Dry-run: workflow **{}** faria reply:\n> {}", workflow.name, truncate(&preview, 1_500))
+                    format!("Dry run: workflow **{}** would reply:\n> {}", workflow.name, truncate(&preview, 1_500))
                 } else {
-                    format!("Dry-run: workflow **{}** correspondeu, mas a action `{}` não é suportada.", workflow.name, workflow.action)
+                    format!("Dry run: workflow **{}** matched, but the action `{}` is not supported.", workflow.name, workflow.action)
                 }
             }
             "workflow-toggle" => {
@@ -7571,9 +7571,9 @@ impl Handler {
                 let id = option_i64(command, "id").unwrap_or(0);
                 let enabled = option_bool(command, "enabled").unwrap_or(false);
                 if self.store.set_workflow_enabled(&guild_id.to_string(), id, enabled)? {
-                    format!("Workflow #{id} {}.", if enabled { "ativado" } else { "desativado imediatamente" })
+                    format!("Workflow #{id} {}.", if enabled { "enabled" } else { "disabled immediately" })
                 } else {
-                    "Workflow não encontrado neste servidor.".to_string()
+                    "Workflow not found in this server.".to_string()
                 }
             }
             "workflow-delete" => {
@@ -7581,7 +7581,7 @@ impl Handler {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
                 let id = option_i64(command, "id").unwrap_or(0);
-                if self.store.delete_workflow(&guild_id.to_string(), id)? { format!("Workflow #{id} eliminado.") } else { "Workflow não encontrado neste servidor.".to_string() }
+                if self.store.delete_workflow(&guild_id.to_string(), id)? { format!("Workflow #{id} deleted.") } else { "Workflow not found in this server.".to_string() }
             }
             "ticket-config" => {
                 let Some(guild_id) = command.guild_id else {
@@ -7606,7 +7606,7 @@ impl Handler {
                     }
                     self.store.set_setting(&guild_text, "support.ticket.sla_ms", &(minutes * 60_000).to_string())?;
                 }
-                "Configuração de tickets guardada.".to_string()
+                "Ticket configuration saved.".to_string()
             }
             "ticket-panel" => {
                 let Some(guild_id) = command.guild_id else {
@@ -7673,12 +7673,12 @@ impl Handler {
                 if let Some(category) = category
                     && !(1..=50).contains(&category.len())
                 {
-                    return respond(ctx, command, "A categoria tem de ter entre 1 e 50 caracteres.").await;
+                    return respond(ctx, command, "The category must be between 1 and 50 characters.").await;
                 }
                 if let Some(note) = note
                     && note.len() > 2_000
                 {
-                    return respond(ctx, command, "A nota não pode exceder 2000 caracteres.").await;
+                    return respond(ctx, command, "The note cannot exceed 2,000 characters.").await;
                 }
                 if let Some(priority) = priority {
                     self.store.set_ticket_priority(&ticket.channel_id, priority)?;
@@ -7690,7 +7690,7 @@ impl Handler {
                     self.store.set_ticket_notes(&ticket.channel_id, note)?;
                 }
                 let updated = self.store.ticket_by_channel(&ticket.channel_id)?.ok_or_else(|| anyhow::anyhow!("ticket disappeared"))?;
-                format!("Ticket atualizado: categoria **{}**, prioridade **{}**{}.", updated.category, updated.priority, if updated.notes.is_empty() { String::new() } else { " · nota interna guardada".to_string() })
+                format!("Ticket updated: category **{}**, priority **{}**{}.", updated.category, updated.priority, if updated.notes.is_empty() { String::new() } else { " · internal note saved".to_string() })
             }
             "ticket-rate" => {
                 let Some(_guild_id) = command.guild_id else {
@@ -7712,7 +7712,7 @@ impl Handler {
                 if !self.store.set_ticket_csat(&ticket.channel_id, score)? {
                     return respond(ctx, command, "Não foi possível guardar a avaliação.").await;
                 }
-                format!("Obrigado pela avaliação: **{score}/5**.")
+                format!("Thanks for the rating: **{score}/5**.")
             }
             "rolepanel" => {
                 let Some(guild_id) = command.guild_id else {
@@ -8542,6 +8542,41 @@ fn english_bot_text(input: &str) -> String {
             "Indica pelo menos um campo para alterar.",
             "Specify at least one field to change.",
         ),
+        (
+            "A lotação deve estar entre 1 e 100000.",
+            "Capacity must be between 1 and 100,000.",
+        ),
+        (
+            "A avaliação tem de ser entre 1 e 5.",
+            "The rating must be between 1 and 5.",
+        ),
+        (
+            "Não foi possível registar o check-in.",
+            "Unable to record the check-in.",
+        ),
+        (
+            "Não tens o cargo necessário para participar.",
+            "You do not have the required role to participate.",
+        ),
+        (
+            "Esta poll já terminou ou a opção é inválida.",
+            "This poll has ended or the option is invalid.",
+        ),
+        (
+            "Os tickets estão desativados neste servidor.",
+            "Tickets are disabled in this server.",
+        ),
+        (
+            "Este ticket já está aberto ou não existe.",
+            "This ticket is already open or does not exist.",
+        ),
+        ("Ticket atualizado: categoria ", "Ticket updated: category "),
+        (
+            "Ticket atualizado: prioridade ",
+            "Ticket updated: priority ",
+        ),
+        ("Ticket updated: categoria ", "Ticket updated: category "),
+        ("Ticket updated: prioridade ", "Ticket updated: priority "),
         (
             "O conteúdo não pode exceder 500 caracteres.",
             "Content cannot exceed 500 characters.",
@@ -10658,10 +10693,22 @@ mod tests {
             ("Evento nativo #12 criado:", "Native event #12 created:"),
             (
                 "Ticket atualizado: categoria **support**.",
-                "Ticket updated: categoria **support**.",
+                "Ticket updated: category **support**.",
             ),
             ("AFK definido: away", "AFK status set: away"),
             ("Cargo atribuído.", "Role assigned."),
+            (
+                "Não tens o cargo necessário para participar.",
+                "You do not have the required role to participate.",
+            ),
+            (
+                "Este ticket já está aberto ou não existe.",
+                "This ticket is already open or does not exist.",
+            ),
+            (
+                "Esta poll já terminou ou a opção é inválida.",
+                "This poll has ended or the option is invalid.",
+            ),
         ] {
             assert_eq!(english_bot_text(source), expected);
         }
