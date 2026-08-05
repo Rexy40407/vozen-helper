@@ -471,6 +471,38 @@ impl EventHandler for Handler {
             }
         }
 
+        // Prime invite usage snapshots once the gateway is ready.  The member
+        // join event does not include the invite code, so attribution is only
+        // safe when a baseline was captured before the join.  This is bounded
+        // and uses Discord's official guild-invites endpoint; failures are
+        // isolated to the affected guild and never stop the gateway.
+        let invite_guilds = ready
+            .guilds
+            .iter()
+            .filter_map(|guild| {
+                let guild_id = guild.id;
+                feature_enabled(
+                    &self.store,
+                    &guild_id.to_string(),
+                    "management.invite_tracker",
+                    None,
+                )
+                .then_some(guild_id)
+            })
+            .collect::<Vec<_>>();
+        if !invite_guilds.is_empty() {
+            let store = self.store.clone();
+            let http = ctx.http.clone();
+            tokio::spawn(async move {
+                for guild_id in invite_guilds {
+                    refresh_invite_snapshots(&http, &store, guild_id).await;
+                    // Keep a reconnect with many guilds below Discord's
+                    // burst limits without delaying the ready event.
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            });
+        }
+
         let commands = vec![
             CreateCommand::new("ping").description("Check Helper latency"),
             CreateCommand::new("help").description("Show Helper modules"),
@@ -1957,7 +1989,10 @@ impl EventHandler for Handler {
                     continue;
                 };
                 let delta = invite.uses as i64 - previous;
-                if delta > 0 {
+                // A single observed use is attributable to this join. If a
+                // reconnect missed multiple joins, the delta is ambiguous and
+                // must not be guessed.
+                if delta == 1 {
                     if candidate.is_some() {
                         candidate = None;
                         break;
@@ -10425,6 +10460,46 @@ fn format_duration(milliseconds: i64) -> String {
 
 fn shadow_mode_enabled(raw: Option<&str>) -> bool {
     raw.is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+/// Capture a bounded baseline for invite attribution before member events are
+/// processed. Discord does not include an invite code in
+/// `guild_member_addition`, therefore a missing baseline would make the first
+/// join after a restart impossible to attribute safely.
+async fn refresh_invite_snapshots(
+    http: &Arc<serenity::http::Http>,
+    store: &Store,
+    guild_id: serenity::all::GuildId,
+) {
+    let guild_text = guild_id.to_string();
+    if !feature_enabled(store, &guild_text, "management.invite_tracker", None) {
+        return;
+    }
+
+    let invites = match guild_id.invites(http).await {
+        Ok(invites) => invites,
+        Err(error) => {
+            warn!(%guild_text, %error, "failed to prime invite tracker snapshots");
+            return;
+        }
+    };
+
+    let mut observed = 0usize;
+    for invite in invites.into_iter().take(200) {
+        let inviter_id = invite.inviter.as_ref().map(|user| user.id.to_string());
+        if store
+            .observe_invite(
+                &guild_text,
+                &invite.code,
+                invite.uses.min(9_999_999) as i64,
+                inviter_id.as_deref(),
+            )
+            .is_ok()
+        {
+            observed += 1;
+        }
+    }
+    info!(%guild_text, observed, "invite tracker snapshots primed");
 }
 
 fn feature_enabled(store: &Store, guild_id: &str, key: &str, legacy_key: Option<&str>) -> bool {
