@@ -11,10 +11,10 @@ use helper_core::{
     evaluate_audit, evaluate_birthday, evaluate_custom_command, evaluate_embed, evaluate_event,
     evaluate_giveaway, evaluate_join_gate, evaluate_leaderboard, evaluate_moderation,
     evaluate_poll, evaluate_reminder, evaluate_role_panel, evaluate_scam_with_roles,
-    evaluate_starboard, evaluate_suggestion, evaluate_temp_channel, evaluate_welcome_channel,
-    evaluate_workflow, feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
-    parse_utc_offset_minutes, quota_limit, render_member_message, scam_policy_from_json,
-    starboard_policy_from_json,
+    evaluate_starboard, evaluate_suggestion, evaluate_temp_channel, evaluate_tickets,
+    evaluate_welcome_channel, evaluate_workflow, feature_is_configurable, feature_maturity,
+    leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit, render_member_message,
+    scam_policy_from_json, starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -8890,13 +8890,10 @@ impl Handler {
                     &guild_id.to_string(),
                     &component.user.id.to_string(),
                 )?;
-                if open_count >= max_open as u32 {
-                    return respond_component(
-                        ctx,
-                        component,
-                        &format!("You already have the maximum of {max_open} open ticket(s)."),
-                    )
-                    .await;
+                let ticket_decision =
+                    evaluate_tickets(&serde_json::json!({"maxOpen": max_open}), open_count);
+                if !ticket_decision.allowed {
+                    return respond_component(ctx, component, &ticket_decision.explanation).await;
                 }
                 let bot_id = ctx.http.get_current_user().await?.id;
                 let visible = Permissions::VIEW_CHANNEL

@@ -1093,6 +1093,46 @@ fn fixture_strings(fixture: &serde_json::Value, camel: &str, snake: &str) -> Vec
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TicketDecision {
+    pub allowed: bool,
+    pub max_open: u32,
+    pub open_tickets: u32,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+/// Keep the per-member ticket limit in one pure evaluator so the dashboard
+/// simulation and the Discord component cannot disagree about whether a new
+/// private channel may be opened.
+pub fn evaluate_tickets(config: &serde_json::Value, open_tickets: u32) -> TicketDecision {
+    let max_open = config
+        .get("maxOpen")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1)
+        .clamp(1, 10) as u32;
+    if open_tickets >= max_open {
+        return TicketDecision {
+            allowed: false,
+            max_open,
+            open_tickets,
+            reason_code: "max_open_reached",
+            explanation: format!(
+                "This member already has {open_tickets}/{max_open} open ticket(s)."
+            ),
+        };
+    }
+    TicketDecision {
+        allowed: true,
+        max_open,
+        open_tickets,
+        reason_code: "ticket_slot_available",
+        explanation: format!(
+            "A new private ticket may be opened ({open_tickets}/{max_open} currently open)."
+        ),
+    }
+}
+
 /// Describe the observable operation represented by a feature publication.
 /// This is intentionally pure and bounded: it never calls Discord or an
 /// external provider.  The Discord handlers consume the same projected
@@ -5300,6 +5340,28 @@ impl FeatureAdapter for TicketsAdapter {
             }
         }
         pairs
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let open_tickets = fixture_u64(fixture, "openTickets", "open_tickets", 0) as u32;
+        let decision = evaluate_tickets(config, open_tickets);
+        let mut effects = if decision.allowed {
+            vec![format!(
+                "Create a private ticket channel ({}/{} open slots used).",
+                decision.open_tickets, decision.max_open
+            )]
+        } else {
+            vec![format!(
+                "Ticket opening rejected ({}): {}",
+                decision.reason_code, decision.explanation
+            )]
+        };
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
@@ -10767,6 +10829,23 @@ mod tests {
             }),
         );
         assert!(rejected[0].contains("invalid_announcement_channel"));
+
+        let tickets = feature_adapter("support.tickets").expect("tickets adapter");
+        let available = tickets.simulate(
+            &serde_json::json!({"maxOpen": 2, "categoryId": "123"}),
+            &serde_json::json!({"openTickets": 1}),
+        );
+        assert!(available[0].contains("Create a private ticket channel"));
+        assert!(
+            available
+                .iter()
+                .any(|effect| effect.contains("support.ticket.max_open"))
+        );
+        let full = tickets.simulate(
+            &serde_json::json!({"maxOpen": 2}),
+            &serde_json::json!({"openTickets": 2}),
+        );
+        assert!(full[0].contains("max_open_reached"));
     }
 
     #[test]
