@@ -5,10 +5,11 @@ use chrono::{Datelike, Duration as ChronoDuration, TimeZone, Utc};
 use helper_contracts::{AntiSpamObservation, AntiSpamPolicy, Plan};
 use helper_core::{
     AntiRaidPolicy, Config, JoinGateObservation, JoinGatePolicy, LeaderboardEntry,
-    StarboardObservation, anti_spam_policy_from_json, evaluate_anti_raid, evaluate_anti_spam,
-    evaluate_join_gate, evaluate_leaderboard, evaluate_scam_with_roles, evaluate_starboard,
-    feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
-    parse_utc_offset_minutes, quota_limit, scam_policy_from_json, starboard_policy_from_json,
+    StarboardObservation, WorkflowObservation, WorkflowPolicy, anti_spam_policy_from_json,
+    evaluate_anti_raid, evaluate_anti_spam, evaluate_join_gate, evaluate_leaderboard,
+    evaluate_scam_with_roles, evaluate_starboard, evaluate_workflow, feature_is_configurable,
+    feature_maturity, leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit,
+    scam_policy_from_json, starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -3422,27 +3423,35 @@ impl EventHandler for Handler {
         if feature_enabled(&self.store, &guild_text, "management.workflows", None)
             && let Ok(workflows) = self.store.active_workflows(&guild_text, "message")
         {
-            let lower = message.content.to_lowercase();
-            let max_reply_length = setting_u64(
-                &self.store,
-                &guild_text,
-                "management.workflows.max_reply_length",
-                1_000,
-            )
-            .clamp(1, 1_500) as usize;
-            let allow_mentions = setting_bool(
-                &self.store,
-                &guild_text,
-                "management.workflows.allow_mentions",
-                false,
-            );
+            let policy = WorkflowPolicy {
+                max_reply_length: setting_u64(
+                    &self.store,
+                    &guild_text,
+                    "management.workflows.max_reply_length",
+                    1_000,
+                )
+                .clamp(1, 1_500) as usize,
+                allow_mentions: setting_bool(
+                    &self.store,
+                    &guild_text,
+                    "management.workflows.allow_mentions",
+                    false,
+                ),
+            };
             for workflow in workflows {
-                if !workflow.condition.is_empty()
-                    && !lower.contains(&workflow.condition.to_lowercase())
-                {
-                    continue;
-                }
-                if workflow.action != "reply" {
+                let decision = evaluate_workflow(
+                    &policy,
+                    &WorkflowObservation {
+                        enabled: workflow.enabled,
+                        trigger: workflow.trigger.clone(),
+                        condition: workflow.condition.clone(),
+                        action: workflow.action.clone(),
+                        payload: workflow.payload.clone(),
+                        message_content: message.content.clone(),
+                        user_mention: format!("<@{}>", message.author.id),
+                    },
+                );
+                if !decision.should_run {
                     continue;
                 }
                 let Ok(true) = self.store.record_workflow_run(
@@ -3452,19 +3461,9 @@ impl EventHandler for Handler {
                 ) else {
                     continue;
                 };
-                let mut reply = workflow
-                    .payload
-                    .replace("{user}", &format!("<@{}>", message.author.id))
-                    .replace("{message}", &truncate(&message.content, 500));
-                if !allow_mentions {
-                    reply = reply
-                        .replace("@everyone", "@\u{200b}everyone")
-                        .replace("@here", "@\u{200b}here");
+                if let Some(reply) = decision.reply {
+                    let _ = message.channel_id.say(&ctx.http, reply).await;
                 }
-                let _ = message
-                    .channel_id
-                    .say(&ctx.http, truncate(&reply, max_reply_length))
-                    .await;
             }
         }
     }

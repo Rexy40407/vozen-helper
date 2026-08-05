@@ -744,6 +744,109 @@ pub fn leaderboard_entries_from_json(value: &serde_json::Value) -> Vec<Leaderboa
         .unwrap_or_default()
 }
 
+/// Bounded policy shared by workflow simulation and the Discord message
+/// handler.  Keeping this in the pure core crate prevents the panel from
+/// previewing a different reply than the bot actually sends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowPolicy {
+    pub max_reply_length: usize,
+    pub allow_mentions: bool,
+}
+
+impl Default for WorkflowPolicy {
+    fn default() -> Self {
+        Self {
+            max_reply_length: 1_000,
+            allow_mentions: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowObservation {
+    pub enabled: bool,
+    pub trigger: String,
+    pub condition: String,
+    pub action: String,
+    pub payload: String,
+    pub message_content: String,
+    pub user_mention: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowDecision {
+    pub matched: bool,
+    pub should_run: bool,
+    pub reply: Option<String>,
+    pub reason: String,
+}
+
+/// Evaluate one bounded message workflow.  Only the existing allow-listed
+/// `message` + `reply` path is executable; unsupported actions are reported
+/// as a non-match rather than silently being treated as successful.
+pub fn evaluate_workflow(
+    policy: &WorkflowPolicy,
+    observation: &WorkflowObservation,
+) -> WorkflowDecision {
+    let content = observation.message_content.trim();
+    if !observation.enabled {
+        return WorkflowDecision {
+            matched: false,
+            should_run: false,
+            reply: None,
+            reason: "disabled".into(),
+        };
+    }
+    if observation.trigger != "message" {
+        return WorkflowDecision {
+            matched: false,
+            should_run: false,
+            reply: None,
+            reason: "unsupported_trigger".into(),
+        };
+    }
+    if !observation.condition.trim().is_empty()
+        && !content
+            .to_lowercase()
+            .contains(&observation.condition.to_lowercase())
+    {
+        return WorkflowDecision {
+            matched: false,
+            should_run: false,
+            reply: None,
+            reason: "condition_not_met".into(),
+        };
+    }
+    if observation.action != "reply" {
+        return WorkflowDecision {
+            matched: true,
+            should_run: false,
+            reply: None,
+            reason: "unsupported_action".into(),
+        };
+    }
+    let mut reply = observation
+        .payload
+        .replace("{user}", &observation.user_mention)
+        .replace("{message}", &truncate_chars(content, 500));
+    if !policy.allow_mentions {
+        reply = reply
+            .replace("@everyone", "@\u{200b}everyone")
+            .replace("@here", "@\u{200b}here");
+    }
+    let reply = truncate_chars(&reply, policy.max_reply_length.clamp(1, 1_500));
+    WorkflowDecision {
+        matched: true,
+        should_run: true,
+        reply: Some(reply),
+        reason: "matched".into(),
+    }
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
 /// Every configurable feature will eventually implement this contract. The
 /// first adapter is intentionally small: it proves that the API and gateway
 /// can consume one canonical schema/defaults/validator without pulling UI
@@ -4106,6 +4209,62 @@ impl FeatureAdapter for WorkflowAdapter {
         }
         projection
     }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let policy = WorkflowPolicy {
+            max_reply_length: config
+                .get("maxReplyLength")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(1_000)
+                .clamp(1, 1_500) as usize,
+            allow_mentions: config
+                .get("allowMentions")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        };
+        let workflow = fixture.get("workflow").unwrap_or(fixture);
+        let decision = evaluate_workflow(
+            &policy,
+            &WorkflowObservation {
+                enabled: fixture_bool(workflow, "enabled", "enabled", true),
+                trigger: fixture_string(workflow, "trigger", "trigger", "message").into(),
+                condition: fixture_string(workflow, "condition", "condition", "").into(),
+                action: fixture_string(workflow, "action", "action", "reply").into(),
+                payload: fixture_string(workflow, "payload", "payload", "Thanks {user}: {message}")
+                    .into(),
+                message_content: fixture_string(
+                    fixture,
+                    "messageContent",
+                    "message_content",
+                    "hello preview",
+                )
+                .into(),
+                user_mention: fixture_string(
+                    fixture,
+                    "userMention",
+                    "user_mention",
+                    "<@preview-user>",
+                )
+                .into(),
+            },
+        );
+        let mut effects = if let Some(reply) = decision.reply {
+            vec![format!(
+                "Workflow matched and would send this bounded reply: {reply}"
+            )]
+        } else {
+            vec![format!(
+                "Workflow would not send a reply ({}).",
+                decision.reason
+            )]
+        };
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -7430,6 +7589,48 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["top", "middle"]
         );
+    }
+
+    #[test]
+    fn workflow_evaluator_matches_condition_and_sanitizes_mentions() {
+        let decision = evaluate_workflow(
+            &WorkflowPolicy {
+                max_reply_length: 80,
+                allow_mentions: false,
+            },
+            &WorkflowObservation {
+                enabled: true,
+                trigger: "message".into(),
+                condition: "hello".into(),
+                action: "reply".into(),
+                payload: "Hi {user}: {message} @everyone".into(),
+                message_content: "HELLO from the community".into(),
+                user_mention: "<@42>".into(),
+            },
+        );
+        assert!(decision.matched);
+        assert!(decision.should_run);
+        let reply = decision.reply.expect("matched workflow reply");
+        assert!(reply.contains("<@42>"));
+        assert!(reply.contains("@\u{200b}everyone"));
+        assert!(!reply.contains("@everyone"));
+    }
+
+    #[test]
+    fn workflow_adapter_simulation_uses_the_runtime_evaluator() {
+        let adapter = feature_adapter("management.workflows").expect("workflow adapter");
+        let effects = adapter.simulate(
+            &serde_json::json!({"maxReplyLength": 20, "allowMentions": false}),
+            &serde_json::json!({
+                "workflow": {"condition":"ping", "action":"reply", "payload":"{user} ping @here"},
+                "messageContent":"please PING",
+                "userMention":"<@99>"
+            }),
+        );
+        assert!(effects[0].contains("<@99> ping @\u{200b}here"));
+        assert!(effects.iter().any(|effect| {
+            effect.contains("management.workflows.max_reply_length") && effect.contains("20")
+        }));
     }
 
     #[test]
