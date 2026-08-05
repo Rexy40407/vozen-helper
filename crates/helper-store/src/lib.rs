@@ -5899,6 +5899,295 @@ mod tests {
     }
 
     #[test]
+    fn remaining_provider_rollbacks_restore_settings_and_subscriptions_atomically() {
+        let store = Store::open(":memory:").unwrap();
+
+        macro_rules! round_trip {
+            (
+                $guild:literal,
+                $key:literal,
+                $publish:ident,
+                $list:ident,
+                $initial:expr,
+                $changed:expr,
+                $initial_json:literal,
+                $changed_json:literal
+            ) => {{
+                let initial = $initial;
+                let changed = $changed;
+                assert_eq!(
+                    store
+                        .$publish(
+                            $guild,
+                            $key,
+                            true,
+                            $initial_json,
+                            None,
+                            "owner-a",
+                            &[],
+                            Some(&initial),
+                        )
+                        .unwrap()
+                        .revision,
+                    1
+                );
+                assert_eq!(
+                    store
+                        .$publish(
+                            $guild,
+                            $key,
+                            true,
+                            $changed_json,
+                            Some(1),
+                            "owner-b",
+                            &[],
+                            Some(&changed),
+                        )
+                        .unwrap()
+                        .revision,
+                    2
+                );
+                assert_eq!(
+                    store
+                        .$publish(
+                            $guild,
+                            $key,
+                            true,
+                            $initial_json,
+                            Some(2),
+                            "owner-c",
+                            &[],
+                            Some(&initial),
+                        )
+                        .unwrap()
+                        .revision,
+                    3
+                );
+                let settings = store.feature_settings($key).unwrap();
+                assert_eq!(settings.len(), 1);
+                assert_eq!(settings[0].guild_id, $guild);
+                assert_eq!(settings[0].config_json, $initial_json);
+                let rows = store.$list($guild).unwrap();
+                assert_eq!(rows.len(), 1);
+                rows
+            }};
+        }
+
+        let rss = round_trip!(
+            "guild-rss-rollback",
+            "social.rss",
+            publish_rss_feature_setting,
+            rss_subscriptions,
+            RssSubscriptionWrite {
+                feed_url: "https://example.com/old.xml".into(),
+                target_channel_id: "123456789012345678".into(),
+                message_template: "Old {url}".into(),
+                mention: "".into(),
+                enabled: true,
+                interval_seconds: 300,
+                created_by: "owner-a".into(),
+            },
+            RssSubscriptionWrite {
+                feed_url: "https://example.com/new.xml".into(),
+                target_channel_id: "987654321098765432".into(),
+                message_template: "New {url}".into(),
+                mention: "@here".into(),
+                enabled: true,
+                interval_seconds: 600,
+                created_by: "owner-b".into(),
+            },
+            r#"{"feedUrl":"https://example.com/old.xml"}"#,
+            r#"{"feedUrl":"https://example.com/new.xml"}"#
+        );
+        assert_eq!(rss[0].feed_url, "https://example.com/old.xml");
+        assert_eq!(rss[0].target_channel_id, "123456789012345678");
+        assert_eq!(rss[0].message_template, "Old {url}");
+        assert_eq!(rss[0].mention, "");
+        assert_eq!(rss[0].interval_seconds, 300);
+
+        let bluesky = round_trip!(
+            "guild-bluesky-rollback",
+            "social.bluesky",
+            publish_bluesky_feature_setting,
+            bluesky_subscriptions,
+            BlueskySubscriptionWrite {
+                source_handle: "old.example".into(),
+                target_channel_id: "123456789012345678".into(),
+                message_template: "Old {url}".into(),
+                mention: "".into(),
+                enabled: true,
+                interval_seconds: 300,
+                created_by: "owner-a".into(),
+            },
+            BlueskySubscriptionWrite {
+                source_handle: "new.example".into(),
+                target_channel_id: "987654321098765432".into(),
+                message_template: "New {url}".into(),
+                mention: "@here".into(),
+                enabled: true,
+                interval_seconds: 600,
+                created_by: "owner-b".into(),
+            },
+            r#"{"sourceHandle":"old.example"}"#,
+            r#"{"sourceHandle":"new.example"}"#
+        );
+        assert_eq!(bluesky[0].source_handle, "old.example");
+        assert_eq!(bluesky[0].target_channel_id, "123456789012345678");
+        assert_eq!(bluesky[0].message_template, "Old {url}");
+
+        let x = round_trip!(
+            "guild-x-rollback",
+            "social.x",
+            publish_x_feature_setting,
+            x_subscriptions,
+            XSubscriptionWrite {
+                source_handle: "old_handle".into(),
+                target_channel_id: "123456789012345678".into(),
+                message_template: "Old {url}".into(),
+                mention: "".into(),
+                enabled: true,
+                interval_seconds: 900,
+                created_by: "owner-a".into(),
+            },
+            XSubscriptionWrite {
+                source_handle: "new_handle".into(),
+                target_channel_id: "987654321098765432".into(),
+                message_template: "New {url}".into(),
+                mention: "@here".into(),
+                enabled: true,
+                interval_seconds: 1_200,
+                created_by: "owner-b".into(),
+            },
+            r#"{"sourceHandle":"old_handle"}"#,
+            r#"{"sourceHandle":"new_handle"}"#
+        );
+        assert_eq!(x[0].source_handle, "old_handle");
+        assert_eq!(x[0].target_channel_id, "123456789012345678");
+        assert_eq!(x[0].message_template, "Old {url}");
+
+        let tiktok = round_trip!(
+            "guild-tiktok-rollback",
+            "social.tiktok",
+            publish_tiktok_feature_setting,
+            tiktok_subscriptions,
+            TikTokSubscriptionWrite {
+                source_label: "old_creator".into(),
+                target_channel_id: "123456789012345678".into(),
+                message_template: "Old {url}".into(),
+                mention: "".into(),
+                enabled: true,
+                interval_seconds: 900,
+                created_by: "owner-a".into(),
+            },
+            TikTokSubscriptionWrite {
+                source_label: "new_creator".into(),
+                target_channel_id: "987654321098765432".into(),
+                message_template: "New {url}".into(),
+                mention: "@here".into(),
+                enabled: true,
+                interval_seconds: 1_200,
+                created_by: "owner-b".into(),
+            },
+            r#"{"sourceLabel":"old_creator"}"#,
+            r#"{"sourceLabel":"new_creator"}"#
+        );
+        assert_eq!(tiktok[0].source_label, "old_creator");
+        assert_eq!(tiktok[0].target_channel_id, "123456789012345678");
+        assert_eq!(tiktok[0].message_template, "Old {url}");
+
+        let instagram = round_trip!(
+            "guild-instagram-rollback",
+            "social.instagram",
+            publish_instagram_feature_setting,
+            instagram_subscriptions,
+            InstagramSubscriptionWrite {
+                source_label: "old_account".into(),
+                target_channel_id: "123456789012345678".into(),
+                message_template: "Old {url}".into(),
+                mention: "".into(),
+                enabled: true,
+                interval_seconds: 900,
+                created_by: "owner-a".into(),
+            },
+            InstagramSubscriptionWrite {
+                source_label: "new_account".into(),
+                target_channel_id: "987654321098765432".into(),
+                message_template: "New {url}".into(),
+                mention: "@here".into(),
+                enabled: true,
+                interval_seconds: 1_200,
+                created_by: "owner-b".into(),
+            },
+            r#"{"sourceLabel":"old_account"}"#,
+            r#"{"sourceLabel":"new_account"}"#
+        );
+        assert_eq!(instagram[0].source_label, "old_account");
+        assert_eq!(instagram[0].target_channel_id, "123456789012345678");
+        assert_eq!(instagram[0].message_template, "Old {url}");
+
+        let kick = round_trip!(
+            "guild-kick-rollback",
+            "social.kick",
+            publish_kick_feature_setting,
+            kick_subscriptions,
+            KickSubscriptionWrite {
+                source_handle: "old_channel".into(),
+                target_channel_id: "123456789012345678".into(),
+                message_template: "Old {url}".into(),
+                mention: "".into(),
+                enabled: true,
+                interval_seconds: 300,
+                created_by: "owner-a".into(),
+            },
+            KickSubscriptionWrite {
+                source_handle: "new_channel".into(),
+                target_channel_id: "987654321098765432".into(),
+                message_template: "New {url}".into(),
+                mention: "@here".into(),
+                enabled: true,
+                interval_seconds: 600,
+                created_by: "owner-b".into(),
+            },
+            r#"{"sourceHandle":"old_channel"}"#,
+            r#"{"sourceHandle":"new_channel"}"#
+        );
+        assert_eq!(kick[0].source_handle, "old_channel");
+        assert_eq!(kick[0].target_channel_id, "123456789012345678");
+        assert_eq!(kick[0].message_template, "Old {url}");
+
+        let twitch = round_trip!(
+            "guild-twitch-rollback",
+            "social.twitch",
+            publish_twitch_feature_setting,
+            twitch_subscriptions,
+            TwitchSubscriptionWrite {
+                source_login: "old_streamer".into(),
+                source_user_id: "111111111".into(),
+                target_channel_id: "123456789012345678".into(),
+                message_template: "Old {url}".into(),
+                mention: "".into(),
+                enabled: true,
+                created_by: "owner-a".into(),
+            },
+            TwitchSubscriptionWrite {
+                source_login: "new_streamer".into(),
+                source_user_id: "222222222".into(),
+                target_channel_id: "987654321098765432".into(),
+                message_template: "New {url}".into(),
+                mention: "@here".into(),
+                enabled: true,
+                created_by: "owner-b".into(),
+            },
+            r#"{"sourceLogin":"old_streamer"}"#,
+            r#"{"sourceLogin":"new_streamer"}"#
+        );
+        assert_eq!(twitch[0].source_login, "old_streamer");
+        assert_eq!(twitch[0].source_user_id, "111111111");
+        assert_eq!(twitch[0].target_channel_id, "123456789012345678");
+        assert_eq!(twitch[0].message_template, "Old {url}");
+    }
+
+    #[test]
     fn bluesky_subscription_round_trip_and_poll_state_are_guild_scoped() {
         let store = Store::open(":memory:").unwrap();
         let first = store
