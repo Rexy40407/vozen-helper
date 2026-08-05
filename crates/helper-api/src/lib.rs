@@ -5796,9 +5796,6 @@ async fn repair_role_panel(
         .get("channel_id")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    if !channel_id.is_empty() {
-        discord_delete_role_panel(&state, channel_id, &message_id).await?;
-    }
     let config = serde_json::json!({
         "channel": channel_id,
         "roleIds": panel.get("role_ids").cloned().unwrap_or_else(|| serde_json::json!([])),
@@ -5807,15 +5804,20 @@ async fn repair_role_panel(
         "selectionMode": panel.get("selection_mode").and_then(serde_json::Value::as_str).unwrap_or("multiple"),
         "removeOnUnselect": panel.get("remove_on_unselect").and_then(serde_json::Value::as_bool).unwrap_or(true),
     });
-    state
-        .store
-        .delete_setting(&claims.guild_id, &key)
-        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     let new_id = discord_publish_role_panel(&state, &claims.guild_id, &config, false, "repair")
         .await?
         .ok_or_else(|| {
             client_error(StatusCode::BAD_GATEWAY, "discord_role_panel_publish_failed")
         })?;
+    // Publish first so a Discord failure never destroys the last known-good
+    // panel. Cleanup is best-effort after the replacement is stored.
+    if !channel_id.is_empty() {
+        let _ = discord_delete_role_panel(&state, channel_id, &message_id).await;
+    }
+    state
+        .store
+        .delete_setting(&claims.guild_id, &key)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     let _ = state.store.record_activity(
         &claims.guild_id,
         "role_panel_config",
