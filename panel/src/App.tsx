@@ -2477,8 +2477,25 @@ function App() {
           setMessage('A validação do canal Twitch aparece quando o painel estiver ligado à API.');
           return;
         }
-        const result = await api.twitchChannel(login);
-        setMessage(`Canal confirmado: ${result.channel.display_name} (@${result.channel.login}).`);
+        const subscription = twitchSubscriptions[0];
+        if (!subscription) {
+          setMessage('Guarda primeiro a subscrição para poderes enviar um teste para o Discord.');
+          return;
+        }
+        const result = await api.testTwitchDelivery(subscription.id, {
+          sourceLogin: login,
+          targetChannelId: String(detailConfig.targetChannelId ?? subscription.targetChannelId),
+          messageTemplate: String(
+            detailConfig.messageTemplate ?? subscription.messageTemplate,
+          ),
+          mention: String(detailConfig.mention ?? subscription.mention),
+          enabled: Boolean(detailEnabled),
+        });
+        setMessage(
+          result.delivered
+            ? 'Mensagem de teste enviada para o canal Discord configurado. Nenhum evento EventSub foi consumido.'
+            : 'O teste não foi entregue.',
+        );
         return;
       }
       const result = await api.testFeature(route.key, detailConfig);
@@ -3937,6 +3954,7 @@ function FeatureDetail({
           </div>
           <button className="secondary full" onClick={onTest}>
             {feature?.key === 'social.youtube' ||
+            feature?.key === 'social.twitch' ||
             feature?.key === 'social.rss' ||
             feature?.key === 'social.podcasts'
               ? 'Enviar teste para o Discord'

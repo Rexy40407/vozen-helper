@@ -25,7 +25,7 @@ use helper_modules::{
     BlueskyClient, CoinGeckoClient, EntitlementClient, EthereumRpcClient, GasClient,
     InstagramClient, KickClient, OpenSeaClient, RedditClient, RssClient, SiweVerifier,
     StripeConnectClient, TikTokClient, TwitchClient, XClient, YouTubeClient, format_rss_message,
-    format_youtube_message,
+    format_twitch_message, format_youtube_message,
 };
 use helper_store::{
     BlueskySubscriptionRecord, BlueskySubscriptionWrite, InstagramSubscriptionRecord,
@@ -209,6 +209,11 @@ pub fn router(state: ApiState) -> Router {
             "/api/config/twitch/{id}",
             put(update_twitch_subscription).delete(delete_twitch_subscription),
         )
+        .route(
+            "/api/config/twitch/{id}/health",
+            get(twitch_subscription_health),
+        )
+        .route("/api/config/twitch/{id}/test", post(test_twitch_delivery))
         .route("/api/guilds", get(guilds))
         .route("/api/guild-context", get(guild_context))
         .route("/api/preflight", post(preflight))
@@ -4048,6 +4053,182 @@ async fn delete_twitch_subscription(
         ));
     }
     Ok(Json(serde_json::json!({"deleted": true, "id": id})))
+}
+
+fn twitch_provider_error_code(error: &str) -> &'static str {
+    if error.starts_with("twitch_api_error:429") {
+        "twitch_rate_limited"
+    } else if error.starts_with("twitch_auth_error") {
+        "twitch_auth_failed"
+    } else if error == "invalid_twitch_login" {
+        "invalid_twitch_login"
+    } else {
+        "twitch_provider_unavailable"
+    }
+}
+
+/// Read-only health check for one EventSub-backed subscription. It verifies
+/// the broadcaster and confirms that an enabled stream.online subscription
+/// exists without creating or changing one.
+async fn twitch_subscription_health(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let record = state
+        .store
+        .twitch_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .find(|record| record.id == id)
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "twitch_subscription_not_found"))?;
+    let checked_at = Utc::now().timestamp_millis();
+    let Some(client) = state.twitch.as_ref() else {
+        return Ok(Json(serde_json::json!({
+            "provider": "twitch",
+            "subscriptionId": id,
+            "status": "dependency_down",
+            "checkedAt": checked_at,
+            "failureCount": record.failure_count,
+            "lastError": record.last_error,
+            "message": "Twitch is not configured on this server."
+        })));
+    };
+    let user = match client.user(&record.source_login).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            return Ok(Json(serde_json::json!({
+                "provider": "twitch", "subscriptionId": id, "status": "degraded",
+                "checkedAt": checked_at, "failureCount": record.failure_count,
+                "lastError": "twitch_channel_not_found",
+                "message": "The Twitch channel no longer exists or is unavailable."
+            })));
+        }
+        Err(error) => {
+            return Ok(Json(serde_json::json!({
+                "provider": "twitch", "subscriptionId": id, "status": "degraded",
+                "checkedAt": checked_at, "failureCount": record.failure_count,
+                "lastError": twitch_provider_error_code(&error.to_string()),
+                "message": "The Twitch channel could not be checked right now."
+            })));
+        }
+    };
+    match client.has_stream_online_subscription(&user.id).await {
+        Ok(true) => Ok(Json(serde_json::json!({
+            "provider": "twitch", "subscriptionId": id, "status": "ready",
+            "checkedAt": checked_at, "failureCount": record.failure_count,
+            "lastError": record.last_error,
+            "channel": {"id": user.id, "login": user.login, "displayName": user.display_name},
+            "eventSub": "enabled"
+        }))),
+        Ok(false) => Ok(Json(serde_json::json!({
+            "provider": "twitch", "subscriptionId": id, "status": "degraded",
+            "checkedAt": checked_at, "failureCount": record.failure_count,
+            "lastError": "twitch_eventsub_missing",
+            "channel": {"id": user.id, "login": user.login, "displayName": user.display_name},
+            "eventSub": "missing",
+            "message": "The EventSub subscription is not enabled; save the feature to repair it."
+        }))),
+        Err(error) => Ok(Json(serde_json::json!({
+            "provider": "twitch", "subscriptionId": id, "status": "degraded",
+            "checkedAt": checked_at, "failureCount": record.failure_count,
+            "lastError": twitch_provider_error_code(&error.to_string()),
+            "channel": {"id": user.id, "login": user.login, "displayName": user.display_name},
+            "message": "EventSub health could not be checked right now."
+        }))),
+    }
+}
+
+/// Send a real Discord message proving that the configured Twitch destination
+/// works. It uses a clearly marked synthetic stream payload and does not stage
+/// or acknowledge an EventSub event.
+async fn test_twitch_delivery(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(input): Json<TwitchSubscriptionInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let record = state
+        .store
+        .twitch_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .find(|record| record.id == id)
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "twitch_subscription_not_found"))?;
+    let (login, target, template, _mention, _enabled) = validate_twitch_subscription(input)
+        .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let Some(client) = state.twitch.as_ref() else {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "provider_not_configured",
+        ));
+    };
+    let user = client.user(&login).await.map_err(|error| {
+        let code = twitch_provider_error_code(&error.to_string());
+        client_error(
+            if code == "invalid_twitch_login" {
+                StatusCode::BAD_REQUEST
+            } else if code == "twitch_rate_limited" {
+                StatusCode::TOO_MANY_REQUESTS
+            } else {
+                StatusCode::BAD_GATEWAY
+            },
+            code,
+        )
+    })?;
+    let Some(user) = user else {
+        return Err(client_error(
+            StatusCode::NOT_FOUND,
+            "twitch_channel_not_found",
+        ));
+    };
+    let started_at = Utc::now().to_rfc3339();
+    let content = format_twitch_message(&template, "", &user.login, "test-stream", &started_at);
+    let content = format!("✅ Vozen Twitch test\n{content}")
+        .chars()
+        .take(2_000)
+        .collect::<String>();
+    discord_send_channel_message(&state.discord_token, &target, &content)
+        .await
+        .map_err(|error| {
+            let status = if error == "discord_http_403" || error == "discord_http_401" {
+                StatusCode::FORBIDDEN
+            } else if error == "discord_http_404" {
+                StatusCode::NOT_FOUND
+            } else if error == "invalid_discord_channel_id" {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            let code = if error == "discord_http_403" || error == "discord_http_401" {
+                "discord_send_messages_forbidden"
+            } else if error == "discord_http_404" {
+                "discord_channel_not_found"
+            } else if error == "invalid_discord_channel_id" {
+                "invalid_discord_channel_id"
+            } else {
+                "discord_delivery_failed"
+            };
+            tracing::warn!(subscription_id = id, %error, "Twitch test delivery failed");
+            client_error(status, code)
+        })?;
+    let _ = state.store.record_activity(
+        &claims.guild_id,
+        "twitch_test_delivery",
+        &claims.user_id,
+        None,
+        Some(&claims.user_id),
+        &serde_json::json!({"subscriptionId": id, "sourceLogin": user.login, "mode": "test"})
+            .to_string(),
+    );
+    Ok(Json(serde_json::json!({
+        "provider": "twitch",
+        "subscriptionId": record.id,
+        "delivered": true,
+        "testedAt": Utc::now().timestamp_millis()
+    })))
 }
 
 fn stripe_approved() -> bool {
@@ -10509,6 +10690,45 @@ mod tests {
             let response = app.clone().oneshot(request).await.expect("response");
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn twitch_health_and_test_routes_require_a_session() {
+        let store = Store::open(":memory:").expect("in-memory store");
+        let app = router(state(store));
+        for path in ["/api/config/twitch/1/health", "/api/config/twitch/1/test"] {
+            let method = if path.ends_with("/test") {
+                http::Method::POST
+            } else {
+                http::Method::GET
+            };
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"sourceLogin":"vozen","targetChannelId":"123456789012345","messageTemplate":"{broadcaster} is live","mention":"","enabled":true}"#,
+                ))
+                .expect("request");
+            let response = app.clone().oneshot(request).await.expect("response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+    }
+
+    #[test]
+    fn twitch_test_delivery_maps_provider_errors_without_leaking_bodies() {
+        assert_eq!(
+            super::twitch_provider_error_code("twitch_api_error:429"),
+            "twitch_rate_limited"
+        );
+        assert_eq!(
+            super::twitch_provider_error_code("twitch_auth_error:401"),
+            "twitch_auth_failed"
+        );
+        assert_eq!(
+            super::twitch_provider_error_code("request failed with secret"),
+            "twitch_provider_unavailable"
+        );
     }
 
     #[test]

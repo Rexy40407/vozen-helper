@@ -132,6 +132,17 @@ export type TwitchSubscription = {
   failureCount: number;
   lastError?: string | null;
 };
+export type TwitchSubscriptionHealth = {
+  provider: 'twitch';
+  subscriptionId: number;
+  status: 'ready' | 'degraded' | 'dependency_down';
+  checkedAt: number;
+  failureCount: number;
+  lastError?: string | null;
+  message?: string;
+  eventSub?: 'enabled' | 'missing';
+  channel?: { id: string; login: string; displayName: string };
+};
 export type ExternalSubscription = {
   id: number;
   sourceSubreddit?: string;
@@ -723,6 +734,34 @@ export const api = {
     }),
   deleteTwitchSubscription: (id: number) =>
     request<{ deleted: boolean; id: number }>(`/api/config/twitch/${id}`, { method: 'DELETE' }),
+  twitchHealth: (id: number) =>
+    request<TwitchSubscriptionHealth>(`/api/config/twitch/${id}/health`),
+  testTwitchDelivery: (
+    id: number,
+    payload: {
+      sourceLogin: string;
+      targetChannelId: string;
+      messageTemplate: string;
+      mention: string;
+      enabled: boolean;
+    },
+  ) =>
+    request<{
+      provider: 'twitch';
+      subscriptionId: number;
+      delivered: boolean;
+      testedAt: number;
+    }>(`/api/config/twitch/${id}/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sourceLogin: payload.sourceLogin,
+        targetChannelId: payload.targetChannelId,
+        messageTemplate: payload.messageTemplate,
+        mention: payload.mention,
+        enabled: payload.enabled,
+      }),
+    }),
   externalSubscriptions: (provider: ExternalProvider) =>
     request<{ guildId: string; subscriptions: ExternalSubscription[] }>(
       `/api/config/${provider}`,

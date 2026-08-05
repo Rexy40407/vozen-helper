@@ -18,7 +18,7 @@ use helper_modules::{
     EthereumRpcClient, GasClient, GasQuote, InstagramClient, InstagramMedia, KickClient,
     KickStream, OpenSeaClient, OpenSeaCollectionInfo, OpenSeaCollectionStats, OpenSeaSale,
     RedditClient, RedditPost, RssClient, TikTokClient, TikTokVideo, TwitchClient, XClient, XPost,
-    YouTubeClient, format_rss_message, format_youtube_message,
+    YouTubeClient, format_rss_message, format_twitch_message, format_youtube_message,
 };
 use helper_store::{
     BlueskySubscriptionRecord, InstagramSubscriptionRecord, KickSubscriptionRecord,
@@ -5221,28 +5221,6 @@ async fn process_twitch_subscription(
     }
     store.ack_twitch_event(subscription.id, event_id, i64::MAX, 0, None)?;
     Ok(())
-}
-
-fn format_twitch_message(
-    template: &str,
-    mention: &str,
-    login: &str,
-    stream_id: &str,
-    started_at: &str,
-) -> String {
-    let url = format!("https://twitch.tv/{login}");
-    let rendered = template
-        .replace("{broadcaster}", login)
-        .replace("{login}", login)
-        .replace("{stream_id}", stream_id)
-        .replace("{started_at}", started_at)
-        .replace("{url}", &url);
-    let rendered = if mention.is_empty() {
-        rendered
-    } else {
-        format!("{mention} {rendered}")
-    };
-    rendered.chars().take(2_000).collect()
 }
 
 fn configured_achievement_milestones(

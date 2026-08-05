@@ -128,6 +128,30 @@ pub fn format_youtube_message(
     rendered.chars().take(2_000).collect()
 }
 
+/// Render a Twitch live alert with bounded substitutions shared by the
+/// EventSub worker and the API delivery probe.
+pub fn format_twitch_message(
+    template: &str,
+    mention: &str,
+    login: &str,
+    stream_id: &str,
+    started_at: &str,
+) -> String {
+    let url = format!("https://twitch.tv/{login}");
+    let rendered = template
+        .replace("{broadcaster}", login)
+        .replace("{login}", login)
+        .replace("{stream_id}", stream_id)
+        .replace("{started_at}", started_at)
+        .replace("{url}", &url);
+    let rendered = if mention.is_empty() {
+        rendered
+    } else {
+        format!("{mention} {rendered}")
+    };
+    rendered.chars().take(2_000).collect()
+}
+
 /// Client for the public Bluesky AppView API. Alerts only read public posts;
 /// no account token is required. The runtime polls the author's feed with a
 /// bounded page size and stores the last URI for idempotent delivery.
@@ -2067,6 +2091,32 @@ impl TwitchClient {
         anyhow::bail!("twitch_api_error:{status}");
     }
 
+    /// Read-only check used by health endpoints. Unlike
+    /// `ensure_stream_online_subscription`, this never creates or changes a
+    /// Twitch subscription.
+    pub async fn has_stream_online_subscription(&self, user_id: &str) -> anyhow::Result<bool> {
+        let token = self.app_token().await?;
+        let response = self
+            .http
+            .get("https://api.twitch.tv/helix/eventsub/subscriptions")
+            .query(&[("type", "stream.online"), ("user_id", user_id)])
+            .header("Client-Id", self.client_id.as_ref())
+            .bearer_auth(token)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!("twitch_api_error:{}", response.status());
+        }
+        let payload: TwitchEventSubResponse = response.json().await?;
+        Ok(payload.data.iter().any(|item| {
+            item.status == "enabled"
+                && item
+                    .condition
+                    .get("broadcaster_user_id")
+                    .is_some_and(|value| value == user_id)
+        }))
+    }
+
     async fn app_token(&self) -> anyhow::Result<String> {
         let mut cached = self.token.lock().await;
         if let Some(value) = cached.as_ref()
@@ -2912,6 +2962,25 @@ mod tests {
             "Vozen: A new video — https://youtube.com/watch?v=video-1"
         );
         let bounded = format_youtube_message(&"x".repeat(3_000), "@everyone", &video, "UC123");
+        assert_eq!(bounded.chars().count(), 2_000);
+        assert!(bounded.starts_with("@everyone "));
+    }
+
+    #[test]
+    fn twitch_message_renderer_matches_bounded_discord_contract() {
+        let rendered = format_twitch_message(
+            "{broadcaster} is live! {url} ({stream_id})",
+            "",
+            "vozen",
+            "stream-1",
+            "2026-08-05T12:00:00Z",
+        );
+        assert_eq!(
+            rendered,
+            "vozen is live! https://twitch.tv/vozen (stream-1)"
+        );
+        let bounded =
+            format_twitch_message(&"x".repeat(3_000), "@everyone", "vozen", "stream-1", "now");
         assert_eq!(bounded.chars().count(), 2_000);
         assert!(bounded.starts_with("@everyone "));
     }
