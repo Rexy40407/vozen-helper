@@ -10,7 +10,8 @@ use helper_core::{
     evaluate_anti_raid, evaluate_anti_spam, evaluate_join_gate, evaluate_leaderboard,
     evaluate_moderation, evaluate_scam_with_roles, evaluate_starboard, evaluate_workflow,
     feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
-    parse_utc_offset_minutes, quota_limit, scam_policy_from_json, starboard_policy_from_json,
+    parse_utc_offset_minutes, quota_limit, render_member_message, scam_policy_from_json,
+    starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -2308,19 +2309,21 @@ impl EventHandler for Handler {
             {
                 let _ = new_member.add_role(&ctx.http, RoleId::new(role_id)).await;
             }
-            let message = setting_string(&self.store, &guild_text, "support.welcome.message")
-                .map(|message| {
-                    template_message(
-                        &self.store,
-                        &guild_text,
-                        "support.welcome.template_id",
-                        "welcome",
-                        message,
-                    )
-                })
-                .unwrap_or_else(|| "👋 Welcome to the server, {member}!".to_string())
-                .replace("{member}", &member_mention)
-                .replace("{server}", "this server");
+            let message_template =
+                setting_string(&self.store, &guild_text, "support.welcome.message")
+                    .map(|message| {
+                        template_message(
+                            &self.store,
+                            &guild_text,
+                            "support.welcome.template_id",
+                            "welcome",
+                            message,
+                        )
+                    })
+                    .unwrap_or_else(|| "👋 Welcome to the server, {member}!".to_string())
+                    .replace("{member}", &member_mention)
+                    .replace("{server}", "this server");
+            let message = render_member_message(&message_template, &member_mention, "this server");
             let fallback_channel = guild_id
                 .to_partial_guild(&ctx.http)
                 .await
@@ -2334,19 +2337,21 @@ impl EventHandler for Handler {
                 let _ = channel_id.say(&ctx.http, message).await;
             }
             if setting_bool(&self.store, &guild_text, "support.welcome.send_dm", false) {
-                let dm = setting_string(&self.store, &guild_text, "support.welcome.dm_message")
-                    .map(|message| {
-                        template_message(
-                            &self.store,
-                            &guild_text,
-                            "support.welcome.template_id",
-                            "dm",
-                            message,
-                        )
-                    })
-                    .unwrap_or_else(|| "Hello {member}, welcome to the server!".to_string())
-                    .replace("{member}", &member_mention)
-                    .replace("{server}", "this server");
+                let dm_template =
+                    setting_string(&self.store, &guild_text, "support.welcome.dm_message")
+                        .map(|message| {
+                            template_message(
+                                &self.store,
+                                &guild_text,
+                                "support.welcome.template_id",
+                                "dm",
+                                message,
+                            )
+                        })
+                        .unwrap_or_else(|| "Hello {member}, welcome to the server!".to_string())
+                        .replace("{member}", &member_mention)
+                        .replace("{server}", "this server");
+                let dm = render_member_message(&dm_template, &member_mention, "this server");
                 let _ = new_member
                     .user
                     .direct_message(&ctx.http, serenity::all::CreateMessage::new().content(dm))
@@ -2381,7 +2386,7 @@ impl EventHandler for Handler {
             .unwrap_or_else(|| {
                 "Welcome {member}! Start with the rules, introduce yourself and check the server channels.".to_string()
             });
-            let guide = template_message(
+            let guide_template = template_message(
                 &self.store,
                 &guild_text,
                 "support.welcome_channel.template_id",
@@ -2390,6 +2395,7 @@ impl EventHandler for Handler {
             )
             .replace("{member}", &member_mention)
             .replace("{server}", "this server");
+            let guide = render_member_message(&guide_template, &member_mention, "this server");
             let configured_steps =
                 setting_string(&self.store, &guild_text, "support.welcome_channel.steps")
                     .unwrap_or_else(|| "rules,introductions,channels".to_string());
@@ -2474,7 +2480,7 @@ impl EventHandler for Handler {
             );
         }
         if feature_enabled(&self.store, &guild_text, "support.welcome", None) {
-            let farewell =
+            let farewell_template =
                 setting_string(&self.store, &guild_text, "support.welcome.farewell_message")
                     .map(|message| {
                         template_message(
@@ -2488,6 +2494,7 @@ impl EventHandler for Handler {
                     .unwrap_or_else(|| "Goodbye {member}. We hope to see you again!".to_string())
                     .replace("{member}", &user.name)
                     .replace("{server}", "this server");
+            let farewell = render_member_message(&farewell_template, &user.name, "this server");
             let channel = setting_u64_optional(
                 &self.store,
                 &guild_text,

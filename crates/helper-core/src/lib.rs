@@ -847,6 +847,25 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
+/// Render the bounded member/server variables used by welcome and farewell
+/// messages.  Legacy settings pass through this function as well, so a value
+/// loaded from the compatibility projection cannot re-enable mass mentions or
+/// exceed Discord's message limit.
+pub fn render_member_message(template: &str, member: &str, server: &str) -> String {
+    let rendered = template
+        .replace("{member}", member)
+        .replace("{server}", server)
+        .replace("@everyone", "@\u{200b}everyone")
+        .replace("@here", "@\u{200b}here");
+    truncate_chars(
+        &rendered
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect::<String>(),
+        2_000,
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AchievementPolicy {
     pub first_threshold: i64,
@@ -3788,6 +3807,51 @@ impl FeatureAdapter for WelcomeAdapter {
             pairs.push(("support.welcome.delay_seconds".into(), value.to_string()));
         }
         pairs
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let member = fixture_string(fixture, "member", "member", "<@member>");
+        let server = fixture_string(fixture, "server", "server", "this server");
+        let message = config
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Welcome {member} to {server}!");
+        let rendered = render_member_message(message, member, server);
+        let delay = config
+            .get("delaySeconds")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0)
+            .clamp(0, 300);
+        let mut effects = vec![format!(
+            "Send the welcome message `{rendered}` after {delay} second(s)."
+        )];
+        if config
+            .get("sendDm")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            let dm = config
+                .get("dmMessage")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Hello {member}, welcome to {server}!");
+            effects.push(format!(
+                "Send a direct message `{}`.",
+                render_member_message(dm, member, server)
+            ));
+        }
+        if let Some(role) = config
+            .get("autoRole")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            effects.push(format!("Assign the configured automatic role `{role}`."));
+        }
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
@@ -8742,6 +8806,49 @@ mod tests {
             clamped
                 .iter()
                 .any(|effect| effect.contains("count_clamped"))
+        );
+    }
+
+    #[test]
+    fn welcome_renderer_bounds_templates_and_mentions() {
+        let rendered =
+            render_member_message("Hello {member} in {server}: @everyone", "<@42>", "Vozen");
+        assert_eq!(rendered, "Hello <@42> in Vozen: @\u{200b}everyone");
+        assert!(
+            render_member_message(&"x".repeat(2_500), "m", "s")
+                .chars()
+                .count()
+                <= 2_000
+        );
+    }
+
+    #[test]
+    fn welcome_adapter_simulation_uses_rendered_runtime_message() {
+        let adapter = feature_adapter("support.welcome").expect("welcome adapter");
+        let effects = adapter.simulate(
+            &serde_json::json!({
+                "message": "Welcome {member} to {server}! @everyone",
+                "sendDm": true,
+                "dmMessage": "Read the rules, {member}.",
+                "delaySeconds": 5,
+                "autoRole": "123"
+            }),
+            &serde_json::json!({"member": "<@42>", "server": "Vozen"}),
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| effect.contains("@\u{200b}everyone"))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| effect.contains("after 5 second(s)"))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| effect.contains("automatic role `123`"))
         );
     }
 
