@@ -8627,6 +8627,12 @@ struct FeatureTestRequest {
     /// opt-out evaluator used by the Discord command.
     #[serde(default, rename = "leaderboardEntries")]
     leaderboard_entries: Vec<LeaderboardEntry>,
+    /// Bounded role-panel fixture fields used by the same selection evaluator
+    /// as the Discord component handler.
+    #[serde(default, rename = "selectedRoleIds")]
+    selected_role_ids: Vec<String>,
+    #[serde(default, rename = "clickedRoleId")]
+    clicked_role_id: Option<String>,
     #[serde(default, rename = "reminderDelayMs")]
     reminder_delay_ms: Option<i64>,
     #[serde(default, rename = "reminderText")]
@@ -8795,6 +8801,8 @@ async fn test_feature(
         "hasAvatar": test.has_avatar,
         "displayName": test.display_name.clone(),
         "leaderboardEntries": test.leaderboard_entries.clone(),
+        "selectedRoleIds": test.selected_role_ids.clone(),
+        "clickedRoleId": test.clicked_role_id.clone(),
         "delayMs": test.reminder_delay_ms,
         "reminderText": test.reminder_text.clone().or_else(|| test.content.clone()),
         "repeat": test.reminder_repeat.clone(),
@@ -11313,6 +11321,19 @@ mod tests {
                 "community.starboard",
                 serde_json::json!({"config":{"threshold":5}, "reaction_count":3}),
                 "below",
+            ),
+            (
+                "community.role_panels",
+                serde_json::json!({
+                    "config": {
+                        "roleIds": ["111111111111111111", "222222222222222222"],
+                        "selectionMode": "unique",
+                        "removeOnUnselect": true
+                    },
+                    "selectedRoleIds": ["111111111111111111"],
+                    "clickedRoleId": "222222222222222222"
+                }),
+                "assign role 222222222222222222",
             ),
         ];
         for (key, payload, expected) in cases {

@@ -1411,6 +1411,95 @@ pub struct CommunityInteractionAdapter {
     pub projection: fn(&serde_json::Value) -> Vec<(String, String)>,
 }
 
+/// The pure selection decision used by role-panel previews and component
+/// interactions.  Discord-specific checks (managed roles, hierarchy and
+/// permissions) happen at the gateway boundary; this value only describes
+/// the bounded state transition once those checks have passed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RolePanelObservation {
+    pub panel_role_ids: Vec<u64>,
+    pub selected_role_ids: Vec<u64>,
+    pub clicked_role_id: u64,
+    pub selection_mode: String,
+    pub remove_on_unselect: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RolePanelDecision {
+    pub allowed: bool,
+    pub assign_clicked: bool,
+    pub remove_role_ids: Vec<u64>,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+/// Evaluate a single role-panel click without touching Discord.  Keeping
+/// this transition in `helper-core` means the API preview and the Serenity
+/// interaction handler cannot drift on unique/multiple or toggle-off rules.
+pub fn evaluate_role_panel(observation: &RolePanelObservation) -> RolePanelDecision {
+    let clicked_is_panel_role = observation
+        .panel_role_ids
+        .contains(&observation.clicked_role_id);
+    if !clicked_is_panel_role {
+        return RolePanelDecision {
+            allowed: false,
+            assign_clicked: false,
+            remove_role_ids: Vec::new(),
+            reason_code: "role_not_in_panel",
+            explanation: "The clicked role is not part of this role panel.".into(),
+        };
+    }
+
+    let selected = observation
+        .selected_role_ids
+        .iter()
+        .copied()
+        .filter(|role_id| observation.panel_role_ids.contains(role_id))
+        .collect::<Vec<_>>();
+    if selected.contains(&observation.clicked_role_id) {
+        if !observation.remove_on_unselect {
+            return RolePanelDecision {
+                allowed: true,
+                assign_clicked: false,
+                remove_role_ids: Vec::new(),
+                reason_code: "role_kept",
+                explanation: "This panel keeps selected roles assigned when toggled.".into(),
+            };
+        }
+        return RolePanelDecision {
+            allowed: true,
+            assign_clicked: false,
+            remove_role_ids: vec![observation.clicked_role_id],
+            reason_code: "role_removed",
+            explanation: "Remove the selected role because toggle-off is enabled.".into(),
+        };
+    }
+
+    let remove_role_ids = if observation.selection_mode == "unique" {
+        selected
+            .into_iter()
+            .filter(|role_id| *role_id != observation.clicked_role_id)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    RolePanelDecision {
+        allowed: true,
+        assign_clicked: true,
+        remove_role_ids,
+        reason_code: if observation.selection_mode == "unique" {
+            "role_assigned_unique"
+        } else {
+            "role_assigned"
+        },
+        explanation: if observation.selection_mode == "unique" {
+            "Assign the clicked role and remove other selected roles from this panel.".into()
+        } else {
+            "Assign the clicked role without removing other selections.".into()
+        },
+    }
+}
+
 fn project_suggestions(config: &serde_json::Value) -> Vec<(String, String)> {
     let Some(object) = config.as_object() else {
         return Vec::new();
@@ -1761,6 +1850,102 @@ impl FeatureAdapter for CommunityInteractionAdapter {
     }
     fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
         (self.projection)(config)
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        if self.key != "community.role_panels" {
+            let descriptor = self.descriptor();
+            return simulate_feature_effect(
+                &descriptor.key,
+                config,
+                fixture,
+                &self.runtime_projection(config),
+            );
+        }
+
+        let panel_role_ids = config
+            .get("roleIds")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter_map(|value| value.parse::<u64>().ok())
+                    .take(5)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let selected_role_ids = fixture
+            .get("selectedRoleIds")
+            .or_else(|| fixture.get("selected_role_ids"))
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter_map(|value| value.parse::<u64>().ok())
+                    .take(5)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let clicked_role_id = fixture
+            .get("clickedRoleId")
+            .or_else(|| fixture.get("clicked_role_id"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| value.parse::<u64>().ok())
+            .or_else(|| panel_role_ids.first().copied())
+            .unwrap_or_default();
+        let selection_mode = config
+            .get("selectionMode")
+            .and_then(serde_json::Value::as_str)
+            .filter(|mode| matches!(*mode, "multiple" | "unique"))
+            .unwrap_or("multiple")
+            .to_owned();
+        let remove_on_unselect = config
+            .get("removeOnUnselect")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let decision = evaluate_role_panel(&RolePanelObservation {
+            panel_role_ids,
+            selected_role_ids,
+            clicked_role_id,
+            selection_mode,
+            remove_on_unselect,
+        });
+        let mut effects = if !decision.allowed {
+            vec![format!(
+                "Role-panel click rejected ({}): {}",
+                decision.reason_code, decision.explanation
+            )]
+        } else if decision.assign_clicked {
+            let removed = if decision.remove_role_ids.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " Remove first: {}.",
+                    decision
+                        .remove_role_ids
+                        .iter()
+                        .map(|role_id| role_id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            vec![format!("Assign role {}.{}", clicked_role_id, removed)]
+        } else if decision.remove_role_ids.is_empty() {
+            vec![format!(
+                "Keep role {} assigned because toggle-off is disabled.",
+                clicked_role_id
+            )]
+        } else {
+            vec![format!("Remove role {}.", clicked_role_id)]
+        };
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
@@ -10206,6 +10391,72 @@ mod tests {
                 .iter()
                 .any(|issue| issue.code == "invalid_selection_mode")
         );
+    }
+
+    #[test]
+    fn role_panel_evaluator_matches_unique_and_toggle_rules() {
+        let unique = evaluate_role_panel(&RolePanelObservation {
+            panel_role_ids: vec![11, 22, 33],
+            selected_role_ids: vec![11],
+            clicked_role_id: 22,
+            selection_mode: "unique".into(),
+            remove_on_unselect: true,
+        });
+        assert!(unique.allowed);
+        assert!(unique.assign_clicked);
+        assert_eq!(unique.remove_role_ids, vec![11]);
+        assert_eq!(unique.reason_code, "role_assigned_unique");
+
+        let removed = evaluate_role_panel(&RolePanelObservation {
+            panel_role_ids: vec![11, 22],
+            selected_role_ids: vec![22],
+            clicked_role_id: 22,
+            selection_mode: "multiple".into(),
+            remove_on_unselect: true,
+        });
+        assert!(!removed.assign_clicked);
+        assert_eq!(removed.remove_role_ids, vec![22]);
+
+        let kept = evaluate_role_panel(&RolePanelObservation {
+            panel_role_ids: vec![11, 22],
+            selected_role_ids: vec![22],
+            clicked_role_id: 22,
+            selection_mode: "multiple".into(),
+            remove_on_unselect: false,
+        });
+        assert_eq!(kept.reason_code, "role_kept");
+        assert!(kept.remove_role_ids.is_empty());
+
+        let invalid = evaluate_role_panel(&RolePanelObservation {
+            panel_role_ids: vec![11],
+            selected_role_ids: vec![],
+            clicked_role_id: 99,
+            selection_mode: "multiple".into(),
+            remove_on_unselect: true,
+        });
+        assert!(!invalid.allowed);
+        assert_eq!(invalid.reason_code, "role_not_in_panel");
+    }
+
+    #[test]
+    fn role_panel_simulation_uses_the_shared_selection_evaluator() {
+        let adapter = feature_adapter("community.role_panels").expect("role panel adapter");
+        let effects = adapter.simulate(
+            &serde_json::json!({
+                "roleIds": ["11", "22"],
+                "selectionMode": "unique",
+                "removeOnUnselect": true
+            }),
+            &serde_json::json!({
+                "selectedRoleIds": ["11"],
+                "clickedRoleId": "22"
+            }),
+        );
+        assert!(effects[0].contains("Assign role 22"));
+        assert!(effects[0].contains("Remove first: 11"));
+        assert!(effects.iter().any(|effect| {
+            effect.contains("community.role_panels.selection_mode") && effect.contains("unique")
+        }));
     }
 
     #[test]

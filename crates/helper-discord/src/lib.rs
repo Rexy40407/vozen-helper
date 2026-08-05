@@ -6,12 +6,13 @@ use helper_contracts::{AntiSpamObservation, AntiSpamPolicy, Plan};
 use helper_core::{
     AchievementPolicy, AntiRaidPolicy, Config, JoinGateObservation, JoinGatePolicy,
     LeaderboardEntry, ModerationObservation, ModerationPolicy, ReminderObservation, ReminderPolicy,
-    StarboardObservation, WorkflowObservation, WorkflowPolicy, anti_spam_policy_from_json,
-    evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam, evaluate_join_gate,
-    evaluate_leaderboard, evaluate_moderation, evaluate_reminder, evaluate_scam_with_roles,
-    evaluate_starboard, evaluate_workflow, feature_is_configurable, feature_maturity,
-    leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit, render_member_message,
-    scam_policy_from_json, starboard_policy_from_json,
+    RolePanelObservation, StarboardObservation, WorkflowObservation, WorkflowPolicy,
+    anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
+    evaluate_join_gate, evaluate_leaderboard, evaluate_moderation, evaluate_reminder,
+    evaluate_role_panel, evaluate_scam_with_roles, evaluate_starboard, evaluate_workflow,
+    feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
+    parse_utc_offset_minutes, quota_limit, render_member_message, scam_policy_from_json,
+    starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -8629,6 +8630,33 @@ impl Handler {
                 .await;
             }
             let member = guild_id.member(&ctx.http, component.user.id).await?;
+            let decision = evaluate_role_panel(&RolePanelObservation {
+                panel_role_ids: panel_roles.clone(),
+                selected_role_ids: member.roles.iter().map(|value| value.get()).collect(),
+                clicked_role_id: role_id.get(),
+                selection_mode: selection_mode.clone(),
+                remove_on_unselect,
+            });
+            if !decision.allowed {
+                return respond_component(ctx, component, "This role panel is no longer valid.")
+                    .await;
+            }
+            if !decision.assign_clicked {
+                for remove_id in decision.remove_role_ids {
+                    member
+                        .remove_role(&ctx.http, RoleId::new(remove_id))
+                        .await?;
+                }
+                if decision.reason_code == "role_kept" {
+                    return respond_component(
+                        ctx,
+                        component,
+                        "This panel keeps selected roles assigned.",
+                    )
+                    .await;
+                }
+                return respond_component(ctx, component, "Role removed.").await;
+            }
             if member.roles.contains(&role_id) {
                 if !remove_on_unselect {
                     return respond_component(
@@ -8641,15 +8669,8 @@ impl Handler {
                 member.remove_role(&ctx.http, role_id).await?;
                 return respond_component(ctx, component, "Cargo removido.").await;
             }
-            if selection_mode == "unique" {
-                for other_id in panel_roles
-                    .into_iter()
-                    .filter(|other_id| *other_id != role_id.get())
-                    .map(RoleId::new)
-                    .filter(|other_id| member.roles.contains(other_id))
-                {
-                    member.remove_role(&ctx.http, other_id).await?;
-                }
+            for other_id in decision.remove_role_ids {
+                member.remove_role(&ctx.http, RoleId::new(other_id)).await?;
             }
             member.add_role(&ctx.http, role_id).await?;
             return respond_component(ctx, component, "Cargo atribuído.").await;
