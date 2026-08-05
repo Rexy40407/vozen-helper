@@ -3378,14 +3378,16 @@ impl ReminderAdapter {
                 "fields": [
                     {"key":"maxDelayHours","label":"Maximum delay (hours)","kind":"number","min":1,"max":8760,"help":"The longest time a member can schedule a reminder."},
                     {"key":"maxTextLength","label":"Maximum message length","kind":"number","min":50,"max":500,"help":"Longer text is rejected before a job is created."},
-                    {"key":"notifyUser","label":"Mention the member when it fires","kind":"toggle","help":"Turn off to post a quiet reminder without a mention."}
+                    {"key":"notifyUser","label":"Mention the member when it fires","kind":"toggle","help":"Turn off to post a quiet reminder without a mention."},
+                    {"key":"allowRecurring","label":"Allow recurring reminders","kind":"toggle","help":"Members can choose a bounded daily or weekly reminder."},
+                    {"key":"maxRecurrences","label":"Maximum repeats","kind":"number","min":1,"max":52,"help":"Limits how many times a recurring reminder is re-created."}
                 ]
             }]
         })
     }
 
     fn defaults() -> serde_json::Value {
-        serde_json::json!({"maxDelayHours": 168, "maxTextLength": 500, "notifyUser": true})
+        serde_json::json!({"maxDelayHours": 168, "maxTextLength": 500, "notifyUser": true, "allowRecurring": false, "maxRecurrences": 12})
     }
 }
 
@@ -3459,6 +3461,36 @@ impl FeatureAdapter for ReminderAdapter {
                 severity: "error".into(),
             });
         }
+        if object
+            .get("allowRecurring")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "allowRecurring".into(),
+                code: "boolean_required".into(),
+                message: "Recurring reminder preference must be true or false.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(value) = object.get("maxRecurrences") {
+            if let Some(value) = value.as_i64() {
+                if !(1..=52).contains(&value) {
+                    issues.push(ValidationIssue {
+                        path: "maxRecurrences".into(),
+                        code: "out_of_range".into(),
+                        message: "The value must be between 1 and 52.".into(),
+                        severity: "error".into(),
+                    });
+                }
+            } else {
+                issues.push(ValidationIssue {
+                    path: "maxRecurrences".into(),
+                    code: "integer_required".into(),
+                    message: "Maximum repeats must be an integer.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
         issues
     }
 
@@ -3490,6 +3522,24 @@ impl FeatureAdapter for ReminderAdapter {
             .and_then(serde_json::Value::as_bool)
         {
             projection.push(("utility.reminders.notify_user".into(), value.to_string()));
+        }
+        if let Some(value) = object
+            .get("allowRecurring")
+            .and_then(serde_json::Value::as_bool)
+        {
+            projection.push((
+                "utility.reminders.allow_recurring".into(),
+                value.to_string(),
+            ));
+        }
+        if let Some(value) = object
+            .get("maxRecurrences")
+            .and_then(serde_json::Value::as_i64)
+        {
+            projection.push((
+                "utility.reminders.max_recurrences".into(),
+                value.to_string(),
+            ));
         }
         projection
     }
@@ -7581,11 +7631,15 @@ mod tests {
         let projection = adapter.runtime_projection(&serde_json::json!({
             "maxDelayHours": 24,
             "maxTextLength": 240,
-            "notifyUser": false
+            "notifyUser": false,
+            "allowRecurring": true,
+            "maxRecurrences": 6
         }));
         assert!(projection.contains(&("utility.reminders.max_delay_hours".into(), "24".into())));
         assert!(projection.contains(&("utility.reminders.max_text_length".into(), "240".into())));
         assert!(projection.contains(&("utility.reminders.notify_user".into(), "false".into())));
+        assert!(projection.contains(&("utility.reminders.allow_recurring".into(), "true".into())));
+        assert!(projection.contains(&("utility.reminders.max_recurrences".into(), "6".into())));
         assert_eq!(
             feature_maturity("utility.reminders"),
             FeatureMaturity::Operational

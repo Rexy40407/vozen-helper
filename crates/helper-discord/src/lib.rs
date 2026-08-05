@@ -791,6 +791,16 @@ impl EventHandler for Handler {
                         "Reminder text",
                     )
                     .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "repeat",
+                        "Optional repeat interval",
+                    )
+                    .add_string_choice("Daily", "daily")
+                    .add_string_choice("Weekly", "weekly")
+                    .required(false),
                 ),
             CreateCommand::new("tag")
                 .description("Show a saved tag")
@@ -5748,6 +5758,20 @@ impl Handler {
                 }
                 let time = option_string(command, "time").unwrap_or_default();
                 let text = option_string(command, "text").unwrap_or_default();
+                let repeat = option_string(command, "repeat");
+                if repeat.is_some()
+                    && !setting_bool(&self.store, &guild_text, "utility.reminders.allow_recurring", false)
+                {
+                    return respond(
+                        ctx,
+                        command,
+                        "Recurring reminders are disabled in this server's dashboard.",
+                    )
+                    .await;
+                }
+                if repeat.is_some_and(|value| value != "daily" && value != "weekly") {
+                    return respond(ctx, command, "Choose daily or weekly for repeat.").await;
+                }
                 let Some(delay) = parse_duration(time) else {
                     return respond(ctx, command, "Duração inválida. Usa formatos como 10m, 2h ou 1d.").await;
                 };
@@ -5784,13 +5808,30 @@ impl Handler {
                     )
                     .await;
                 }
+                let max_recurrences = setting_u64(
+                    &self.store,
+                    &guild_text,
+                    "utility.reminders.max_recurrences",
+                    12,
+                )
+                .clamp(1, 52);
+                let payload = serde_json::json!({
+                    "channel_id": command.channel_id.to_string(),
+                    "text": text,
+                    "repeat": repeat,
+                    "remaining": repeat.as_ref().map(|_| max_recurrences),
+                });
                 let id = self.store.schedule(
                     &guild_text,
                     &command.user.id.to_string(),
                     chrono::Utc::now().timestamp_millis() + delay,
-                    &serde_json::json!({"channel_id": command.channel_id.to_string(), "text": text}).to_string(),
+                    &payload.to_string(),
                 )?;
-                format!("Lembrete #{id} agendado.")
+                if repeat.is_some() {
+                    format!("Reminder #{id} scheduled with bounded repeats.")
+                } else {
+                    format!("Reminder #{id} scheduled.")
+                }
             }
             "birthday-set" => {
                 let Some(guild_id) = command.guild_id else {
@@ -9982,6 +10023,28 @@ async fn deliver_scheduled_action(
         channel_id
             .send_message(http, serenity::all::CreateMessage::new().content(content))
             .await?;
+        if action_type == "reminder"
+            && let Some(repeat) = value.get("repeat").and_then(serde_json::Value::as_str)
+            && let Some(remaining) = value.get("remaining").and_then(serde_json::Value::as_u64)
+            && remaining > 0
+        {
+            let interval_ms = match repeat {
+                "daily" => 86_400_000_i64,
+                "weekly" => 604_800_000_i64,
+                _ => 0,
+            };
+            if interval_ms > 0 {
+                let mut next_payload = value.clone();
+                next_payload["remaining"] = serde_json::json!(remaining - 1);
+                let _ = store.schedule_typed(
+                    guild_id,
+                    "reminder",
+                    target_id,
+                    Utc::now().timestamp_millis() + interval_ms,
+                    &next_payload.to_string(),
+                )?;
+            }
+        }
     }
     store.delete_scheduled_action(id)?;
     Ok(())
