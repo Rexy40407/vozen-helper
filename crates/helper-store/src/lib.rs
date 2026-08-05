@@ -4713,6 +4713,25 @@ impl Store {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Return the creation time of the latest suggestion submitted by a
+    /// member in a guild.  Keeping this query in the store makes cooldown
+    /// checks atomic with the same source of truth used for moderation and
+    /// privacy exports.
+    pub fn latest_suggestion_created_at(
+        &self,
+        guild_id: &str,
+        author_id: &str,
+    ) -> Result<Option<i64>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT created_at FROM suggestions WHERE guild_id=?1 AND author_id=?2 ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![guild_id, author_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn set_suggestion_message(&self, id: i64, message_id: &str) -> Result<()> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
@@ -6029,6 +6048,18 @@ mod tests {
         let suggestion = store
             .create_suggestion("g", "u", "Add a weekly event")
             .unwrap();
+        assert!(
+            store
+                .latest_suggestion_created_at("g", "u")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .latest_suggestion_created_at("g", "missing")
+                .unwrap()
+                .is_none()
+        );
         store.vote_suggestion(suggestion, "voter", 1).unwrap();
         assert_eq!(store.suggestion_votes(suggestion).unwrap(), (1, 0));
         assert!(

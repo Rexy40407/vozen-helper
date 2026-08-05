@@ -6974,6 +6974,31 @@ impl Handler {
                     return respond(ctx, command, "A sugestão deve ter entre 3 e 1000 caracteres.").await;
                 }
                 let guild_text = guild_id.to_string();
+                let cooldown_hours = setting_i64(
+                    &self.store,
+                    &guild_text,
+                    "community.suggestions.cooldown_hours",
+                    24,
+                )
+                .clamp(0, 720);
+                if cooldown_hours > 0
+                    && let Some(created_at) = self.store.latest_suggestion_created_at(
+                        &guild_text,
+                        &command.user.id.to_string(),
+                    )?
+                {
+                    let elapsed = Utc::now().timestamp_millis() - created_at;
+                    let cooldown_ms = cooldown_hours.saturating_mul(60 * 60 * 1_000);
+                    if elapsed < cooldown_ms {
+                        let minutes = ((cooldown_ms - elapsed) / 60_000).max(1);
+                        return respond(
+                            ctx,
+                            command,
+                            &format!("You can submit another suggestion in about {minutes} minute(s)."),
+                        )
+                        .await;
+                    }
+                }
                 if let Some(raw_role) = setting_string(&self.store, &guild_text, "community.suggestions.required_role")
                     .filter(|value| !value.trim().is_empty())
                     && let Ok(role_id) = raw_role.parse::<u64>()
@@ -6995,12 +7020,55 @@ impl Handler {
                     .unwrap_or(command.channel_id);
                 let message = target_channel.send_message(&ctx.http, serenity::all::CreateMessage::new()
                     .content(format!("**Suggestion #{id}** by {author}\n{text}\n\nVote on this suggestion:"))
-                    .components(vec![CreateActionRow::Buttons(vec![
-                        CreateButton::new(format!("suggest:up:{id}")).label("Support").style(ButtonStyle::Success),
-                        CreateButton::new(format!("suggest:down:{id}")).label("Against").style(ButtonStyle::Danger),
-                    ])])).await?;
+                    .components(vec![CreateActionRow::Buttons({
+                        let mut buttons = vec![
+                            CreateButton::new(format!("suggest:up:{id}"))
+                                .label("Support")
+                                .style(ButtonStyle::Success),
+                        ];
+                        if setting_string(
+                            &self.store,
+                            &guild_text,
+                            "community.suggestions.vote_mode",
+                        )
+                        .as_deref()
+                            != Some("up_only")
+                        {
+                            buttons.push(
+                                CreateButton::new(format!("suggest:down:{id}"))
+                                    .label("Against")
+                                    .style(ButtonStyle::Danger),
+                            );
+                        }
+                        buttons
+                    })])).await?;
                 self.store.set_suggestion_message(id, &message.id.to_string())?;
-                format!("Sugestão #{id} publicada.")
+                if let Some(staff_channel) = setting_string(
+                    &self.store,
+                    &guild_text,
+                    "community.suggestions.staff_channel_id",
+                )
+                .and_then(|value| value.parse::<u64>().ok())
+                {
+                    let _ = ChannelId::new(staff_channel)
+                        .send_message(
+                            &ctx.http,
+                            CreateMessage::new()
+                                .content(format!(
+                                    "New suggestion #{id} submitted by <@{}>: {text}",
+                                    command.user.id
+                                ))
+                                .allowed_mentions(
+                                    CreateAllowedMentions::new()
+                                        .everyone(false)
+                                        .empty_users()
+                                        .empty_roles()
+                                        .replied_user(false),
+                                ),
+                        )
+                        .await;
+                }
+                format!("Suggestion #{id} published.")
             }
             "suggestion" => {
                 let Some(guild_id) = command.guild_id else {
@@ -8166,6 +8234,22 @@ impl Handler {
             let id = raw_id
                 .parse::<i64>()
                 .map_err(|_| anyhow::anyhow!("invalid suggestion button"))?;
+            if kind == "down"
+                && setting_string(
+                    &self.store,
+                    &guild_id.to_string(),
+                    "community.suggestions.vote_mode",
+                )
+                .as_deref()
+                    == Some("up_only")
+            {
+                return respond_component(
+                    ctx,
+                    component,
+                    "This suggestion only accepts support votes.",
+                )
+                .await;
+            }
             let vote = if kind == "up" { 1 } else { -1 };
             self.store
                 .vote_suggestion(id, &component.user.id.to_string(), vote)?;
@@ -8173,14 +8257,19 @@ impl Handler {
                 return respond_component(ctx, component, "Sugestão não encontrada.").await;
             };
             let (up, down) = self.store.suggestion_votes(id)?;
+            let author = if setting_bool(
+                &self.store,
+                &guild_id.to_string(),
+                "community.suggestions.anonymous",
+                false,
+            ) {
+                "Anonymous".to_string()
+            } else {
+                format!("<@{}>", suggestion.author_id)
+            };
             let content = format!(
-                "**Sugestão #{}** por <@{}>\n{}\n\nEstado: **{}** · Apoio: {} · Contra: {}",
-                suggestion.id,
-                suggestion.author_id,
-                suggestion.content,
-                suggestion.status,
-                up,
-                down
+                "**Suggestion #{}** by {}\n{}\n\nStatus: **{}** · Support: {} · Against: {}",
+                suggestion.id, author, suggestion.content, suggestion.status, up, down
             );
             let _ = ctx
                 .http

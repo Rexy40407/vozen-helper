@@ -1410,6 +1410,32 @@ fn project_suggestions(config: &serde_json::Value) -> Vec<(String, String)> {
     {
         pairs.push(("community.suggestions.required_role".into(), value.into()));
     }
+    if let Some(value) = object
+        .get("voteMode")
+        .and_then(serde_json::Value::as_str)
+        .filter(|mode| *mode == "up_down" || *mode == "up_only")
+    {
+        pairs.push(("community.suggestions.vote_mode".into(), value.into()));
+    }
+    if let Some(value) = object
+        .get("cooldownHours")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|hours| (0..=720).contains(hours))
+    {
+        pairs.push((
+            "community.suggestions.cooldown_hours".into(),
+            value.to_string(),
+        ));
+    }
+    if let Some(value) = object
+        .get("staffChannel")
+        .and_then(serde_json::Value::as_str)
+    {
+        pairs.push((
+            "community.suggestions.staff_channel_id".into(),
+            value.into(),
+        ));
+    }
     pairs
 }
 
@@ -1548,7 +1574,12 @@ fn validate_interaction_config(config: &serde_json::Value, key: &str) -> Vec<Val
         }];
     };
     let mut issues = Vec::new();
-    for field in ["channel", "requiredRole", "announcementChannel"] {
+    for field in [
+        "channel",
+        "requiredRole",
+        "announcementChannel",
+        "staffChannel",
+    ] {
         if object.get(field).is_some_and(|value| {
             value
                 .as_str()
@@ -1577,6 +1608,7 @@ fn validate_interaction_config(config: &serde_json::Value, key: &str) -> Vec<Val
         ("defaultWinners", 1_i64, 20_i64),
         ("defaultCapacity", 0_i64, 100_000_i64),
         ("maxRoles", 1_i64, 5_i64),
+        ("cooldownHours", 0_i64, 720_i64),
     ] {
         if let Some(value) = object.get(field) {
             if value.as_i64().is_none() {
@@ -1597,6 +1629,20 @@ fn validate_interaction_config(config: &serde_json::Value, key: &str) -> Vec<Val
                     severity: "error".into(),
                 });
             }
+        }
+    }
+    if key == "community.suggestions" {
+        if let Some(value) = object.get("voteMode")
+            && !value
+                .as_str()
+                .is_some_and(|mode| mode == "up_down" || mode == "up_only")
+        {
+            issues.push(ValidationIssue {
+                path: "voteMode".into(),
+                code: "invalid_vote_mode".into(),
+                message: "Choose support/against voting or support-only voting.".into(),
+                severity: "error".into(),
+            });
         }
     }
     if key == "community.role_panels" {
@@ -7336,9 +7382,9 @@ static SUGGESTIONS_ADAPTER: CommunityInteractionAdapter = CommunityInteractionAd
     key: "community.suggestions",
     source: "suggestions_adapter_v2",
     title: "Suggestion workflow",
-    description: "Route suggestions, control anonymous submissions and require an optional member role.",
-    schema: r#"{"version":1,"source":"suggestions_adapter_v2","sections":[{"title":"Suggestion intake","description":"These options are applied to every new suggestion.","fields":[{"key":"channel","label":"Suggestion channel","kind":"channel"},{"key":"anonymous","label":"Hide author in the public message","kind":"toggle"},{"key":"requiredRole","label":"Required role (optional)","kind":"role"}]}]}"#,
-    defaults: r#"{"channel":"","anonymous":false,"requiredRole":""}"#,
+    description: "Route suggestions, control voting, cooldowns and staff notifications.",
+    schema: r#"{"version":1,"source":"suggestions_adapter_v2","sections":[{"title":"Suggestion intake","description":"These options are applied to every new suggestion.","fields":[{"key":"channel","label":"Suggestion channel","kind":"channel"},{"key":"voteMode","label":"Voting mode","kind":"select","options":[["up_down","Support / against"],["up_only","Support only"]]},{"key":"anonymous","label":"Hide author in the public message","kind":"toggle"}]},{"title":"Moderation","description":"Control submission frequency and give staff a private notification channel.","fields":[{"key":"cooldownHours","label":"Cooldown per member (hours)","kind":"number","min":0,"max":720,"advanced":true},{"key":"requiredRole","label":"Required role (optional)","kind":"role","advanced":true},{"key":"staffChannel","label":"Staff notification channel (optional)","kind":"channel","advanced":true}]}]}"#,
+    defaults: r#"{"channel":"","voteMode":"up_down","anonymous":false,"cooldownHours":24,"requiredRole":"","staffChannel":""}"#,
     dependencies: &["send_messages", "interactions"],
     projection: project_suggestions,
 };
@@ -8874,6 +8920,29 @@ mod tests {
             &serde_json::json!({"reaction_count": 3}),
         );
         assert!(starboard_effects[0].contains("below the board threshold (3/5"));
+
+        let suggestions = feature_adapter("community.suggestions").unwrap();
+        assert!(
+            suggestions.descriptor().schema["sections"][1]["fields"]
+                .as_array()
+                .is_some_and(|fields| fields.iter().any(|field| field["key"] == "staffChannel"))
+        );
+        assert!(
+            suggestions
+                .validate(&serde_json::json!({"voteMode": "poll", "cooldownHours": 721}))
+                .iter()
+                .any(|issue| issue.path == "voteMode")
+        );
+        assert!(
+            suggestions
+                .runtime_projection(&serde_json::json!({
+                    "channel": "123",
+                    "voteMode": "up_only",
+                    "cooldownHours": 12,
+                    "staffChannel": "456"
+                }))
+                .contains(&("community.suggestions.vote_mode".into(), "up_only".into()))
+        );
     }
 
     #[test]
