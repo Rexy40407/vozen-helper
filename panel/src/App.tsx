@@ -1844,6 +1844,37 @@ function defaultQuickSetupState(guildId: string): QuickSetupState {
   };
 }
 
+type QuickSetupFeatureDefaults = Partial<{
+  welcome: FeatureConfig;
+  roles: FeatureConfig;
+  moderation: FeatureConfig;
+  antiRaid: FeatureConfig;
+  antiSpam: FeatureConfig;
+}>;
+
+function quickSetupDraft(
+  featureDefaults: QuickSetupFeatureDefaults,
+  useLocalCompatibilityDefaults: boolean,
+): Record<QuickSetupStepKey, FeatureConfig> {
+  // In the deployed panel the adapter response is authoritative.  The old
+  // catalogue remains available only for the explicit local preview so a
+  // disconnected designer preview does not pretend to be a server schema.
+  const legacy = (key: string) => (useLocalCompatibilityDefaults ? defaults[key] ?? {} : {});
+  const api = (key: keyof QuickSetupFeatureDefaults) => featureDefaults[key] ?? {};
+  return {
+    welcome: { ...legacy('support.welcome'), ...api('welcome'), mode: 'recommended', createChannel: true },
+    roles: {
+      ...legacy('community.role_panels'),
+      ...api('roles'),
+      template: 'notifications',
+      createChannel: true,
+      roleNames: 'Announcements, Events, News',
+    },
+    moderation: { ...legacy('management.moderation'), ...api('moderation') },
+    protection: { profile: 'balanced', logChannel: '', createChannel: true },
+  };
+}
+
 function App() {
   const [youtubeSubscriptions, setYoutubeSubscriptions] = useState<YouTubeSubscription[]>([]);
   const [rssSubscriptions, setRssSubscriptions] = useState<RssSubscription[]>([]);
@@ -1857,6 +1888,7 @@ function App() {
   const [guilds, setGuilds] = useState<Guild[]>(demoGuilds);
   const [guildContext, setGuildContext] = useState<GuildContext | null>(null);
   const [quickSetup, setQuickSetup] = useState<QuickSetupState | null>(null);
+  const [quickSetupDefaults, setQuickSetupDefaults] = useState<QuickSetupFeatureDefaults>({});
   const [features, setFeatures] = useState<Feature[]>(() =>
     demoFeatures.concat(additionalFeatures).map(presentFeature),
   );
@@ -1975,6 +2007,13 @@ function App() {
         capabilities: { channelSelectors: true, roleSelectors: true, permissionPreflight: true },
         stale: false,
       });
+      setQuickSetupDefaults({
+        welcome: defaults['support.welcome'],
+        roles: defaults['community.role_panels'],
+        moderation: defaults['management.moderation'],
+        antiRaid: defaults['protection.anti_raid'],
+        antiSpam: defaults['protection.antispam'],
+      });
       return;
     }
     void api
@@ -1985,6 +2024,26 @@ function App() {
       .guildContext()
       .then(setGuildContext)
       .catch(() => undefined);
+    // Quick Setup is a composition of real feature adapters.  Fetch their
+    // defaults from Rust instead of reconstructing a second schema in React.
+    void Promise.all(
+      [
+        ['welcome', 'support.welcome'],
+        ['roles', 'community.role_panels'],
+        ['moderation', 'management.moderation'],
+        ['antiRaid', 'protection.anti_raid'],
+        ['antiSpam', 'protection.antispam'],
+      ].map(async ([name, key]) => {
+        try {
+          const detail = await api.feature(key);
+          return [name, { ...(detail.defaults ?? {}), ...detail.config }] as const;
+        } catch {
+          return [name, {}] as const;
+        }
+      }),
+    ).then((entries) => {
+      setQuickSetupDefaults(Object.fromEntries(entries) as QuickSetupFeatureDefaults);
+    });
   }, [me?.guildId, guilds]);
   useEffect(() => {
     if (route.page !== 'overview' || !quickSetup || quickSetup.status !== 'not_started') return;
@@ -2356,6 +2415,7 @@ function App() {
         const profiles: Record<string, { antispam: FeatureConfig; antiRaid: FeatureConfig }> = {
           monitor: {
             antispam: {
+              ...quickSetupDefaults.antiSpam,
               floodCount: 8,
               windowSeconds: 10,
               duplicateLimit: 4,
@@ -2367,14 +2427,19 @@ function App() {
               logChannel: config.logChannel ?? '',
             },
             antiRaid: {
-              ...defaults['protection.anti_raid'],
+              ...quickSetupDefaults.antiRaid,
               joinThreshold: 12,
+              windowSeconds: 20,
+              incidentMinutes: 10,
+              verification: 'high',
+              pauseInvites: true,
               alertOnly: true,
               alertChannel: config.logChannel ?? '',
             },
           },
           balanced: {
             antispam: {
+              ...quickSetupDefaults.antiSpam,
               floodCount: 6,
               windowSeconds: 10,
               duplicateLimit: 3,
@@ -2386,14 +2451,19 @@ function App() {
               logChannel: config.logChannel ?? '',
             },
             antiRaid: {
-              ...defaults['protection.anti_raid'],
+              ...quickSetupDefaults.antiRaid,
               joinThreshold: 10,
+              windowSeconds: 20,
+              incidentMinutes: 10,
+              verification: 'high',
+              pauseInvites: true,
               alertOnly: true,
               alertChannel: config.logChannel ?? '',
             },
           },
           strict: {
             antispam: {
+              ...quickSetupDefaults.antiSpam,
               floodCount: 5,
               windowSeconds: 10,
               duplicateLimit: 2,
@@ -2405,8 +2475,12 @@ function App() {
               logChannel: config.logChannel ?? '',
             },
             antiRaid: {
-              ...defaults['protection.anti_raid'],
+              ...quickSetupDefaults.antiRaid,
               joinThreshold: 8,
+              windowSeconds: 20,
+              incidentMinutes: 10,
+              verification: 'high',
+              pauseInvites: true,
               alertOnly: false,
               alertChannel: config.logChannel ?? '',
             },
@@ -2642,6 +2716,8 @@ function App() {
           <QuickSetup
             state={quickSetup ?? defaultQuickSetupState(currentGuild?.id ?? 'demo')}
             context={guildContext}
+            featureDefaults={quickSetupDefaults}
+            localCompatibilityDefaults={localPreviewMode}
             onApply={applyQuickSetupStep}
             onSkip={skipQuickSetupStep}
             onDismiss={() => void dismissQuickSetup()}
@@ -2710,6 +2786,8 @@ function App() {
 function QuickSetup({
   state,
   context,
+  featureDefaults,
+  localCompatibilityDefaults,
   onApply,
   onSkip,
   onDismiss,
@@ -2717,6 +2795,8 @@ function QuickSetup({
 }: {
   state: QuickSetupState;
   context: GuildContext | null;
+  featureDefaults: QuickSetupFeatureDefaults;
+  localCompatibilityDefaults: boolean;
   onApply: (step: QuickSetupStepKey, config: FeatureConfig, enabled?: boolean) => Promise<boolean>;
   onSkip: (step: QuickSetupStepKey) => Promise<boolean>;
   onDismiss: () => void;
@@ -2732,17 +2812,12 @@ function QuickSetup({
     ),
   );
   const [applying, setApplying] = useState(false);
-  const [draft, setDraft] = useState<Record<QuickSetupStepKey, FeatureConfig>>({
-    welcome: { ...defaults['support.welcome'], mode: 'recommended', createChannel: true },
-    roles: {
-      ...defaults['community.role_panels'],
-      template: 'notifications',
-      createChannel: true,
-      roleNames: 'Anúncios, Eventos, Novidades',
-    },
-    moderation: { ...defaults['management.moderation'], createChannel: true },
-    protection: { profile: 'balanced', logChannel: '', createChannel: true },
-  });
+  const [draft, setDraft] = useState<Record<QuickSetupStepKey, FeatureConfig>>(() =>
+    quickSetupDraft(featureDefaults, localCompatibilityDefaults),
+  );
+  useEffect(() => {
+    setDraft(quickSetupDraft(featureDefaults, localCompatibilityDefaults));
+  }, [featureDefaults, localCompatibilityDefaults]);
   useEffect(() => {
     setStarted(state.status === 'in_progress' || state.status === 'completed');
     const next = quickSetupSteps.findIndex((item) => item.key === state.currentStep);
@@ -2761,7 +2836,7 @@ function QuickSetup({
     const ok = await onApply(
       current.key,
       draft[current.key],
-      current.key !== 'moderation' || draft[current.key].mode !== 'off',
+      current.key !== 'welcome' || draft[current.key].mode !== 'off',
     );
     setApplying(false);
     if (ok && index < quickSetupSteps.length - 1) setIndex((value) => value + 1);
@@ -3018,52 +3093,33 @@ function QuickSetup({
           )}
           {current.key === 'moderation' && (
             <>
-              <SelectField
-                label="Canal de registos"
-                value={String(currentConfig.logChannel ?? '')}
-                options={channels}
-                placeholder="Escolhe um canal"
-                onChange={(value) => patch('logChannel', value)}
-              />
               <label className="field toggle-field">
                 <span>
-                  <b>Criar #vozen-alertas se não existir</b>
-                  <small>Inclui ações do Helper e alterações importantes.</small>
+                  <b>Exigir motivo nas ações</b>
+                  <small>Ajuda a equipa a manter uma auditoria clara e consistente.</small>
                 </span>
                 <input
                   type="checkbox"
-                  checked={Boolean(currentConfig.createChannel)}
-                  onChange={(event) => patch('createChannel', event.target.checked)}
+                  checked={currentConfig.requireReason !== false}
+                  onChange={(event) => patch('requireReason', event.target.checked)}
                 />
               </label>
-              <div className="field-grid">
-                <label className="field">
-                  <span>
-                    <b>Avisos antes de agir</b>
-                  </span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={10}
-                    value={Number(currentConfig.warnThreshold ?? 3)}
-                    onChange={(event) => patch('warnThreshold', Number(event.target.value))}
-                  />
-                </label>
-                <label className="field">
-                  <span>
-                    <b>Timeout (minutos)</b>
-                  </span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={10080}
-                    value={Number(currentConfig.timeoutMinutes ?? 10)}
-                    onChange={(event) => patch('timeoutMinutes', Number(event.target.value))}
-                  />
-                </label>
-              </div>
-              <div className="notice warning">
-                Esta etapa só será publicada quando o runtime de moderação estiver operacional.
+              <label className="field">
+                <span>
+                  <b>Limite de limpeza por ação</b>
+                  <small>Protege contra purgas acidentais e respeita os limites do Discord.</small>
+                </span>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={Number(currentConfig.maxPurge ?? 100)}
+                  onChange={(event) => patch('maxPurge', Number(event.target.value))}
+                />
+              </label>
+              <div className="notice">
+                As regras de auditoria e o canal de registos são configurados em Auditoria e
+                permissões, para não duplicar definições.
               </div>
             </>
           )}
