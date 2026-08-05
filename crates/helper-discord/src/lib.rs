@@ -8683,6 +8683,7 @@ fn english_bot_text(input: &str) -> String {
         ),
         ("AFK definido:", "AFK status set:"),
         ("AFK removido.", "AFK status removed."),
+        ("Evento nativo", "Native event"),
         ("conta criada em", "account created at"),
         ("Aviso criado como caso", "Warning created as case"),
         ("Registo #", "Record #"),
