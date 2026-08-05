@@ -273,6 +273,12 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/api/custom-commands/{name}",
             put(update_custom_command).delete(delete_custom_command),
+        )
+        .route("/api/role-panels", get(role_panels).post(create_role_panel))
+        .route("/api/role-panels/{message_id}", delete(delete_role_panel))
+        .route(
+            "/api/role-panels/{message_id}/repair",
+            post(repair_role_panel),
         );
     let router = if let Some(origins) = allowed_origin {
         let values = origins
@@ -5359,6 +5365,8 @@ async fn discord_publish_role_panel(
     state: &ApiState,
     guild_id: &str,
     config: &serde_json::Value,
+    reuse_existing: bool,
+    source: &str,
 ) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
     let channel_id = config
         .get("channel")
@@ -5381,11 +5389,12 @@ async fn discord_publish_role_panel(
     if channel_id.is_empty() || role_ids.is_empty() {
         return Ok(None);
     }
-    if state
-        .store
-        .count_settings_prefix(guild_id, "community.role_panel.")
-        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
-        > 0
+    if reuse_existing
+        && state
+            .store
+            .count_settings_prefix(guild_id, "community.role_panel.")
+            .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+            > 0
     {
         return Ok(None);
     }
@@ -5489,12 +5498,336 @@ async fn discord_publish_role_panel(
                 "role_ids": role_ids,
                 "selection_mode": selection_mode,
                 "remove_on_unselect": remove_on_unselect,
-                "source": "quick_setup"
+                "source": source
             })
             .to_string(),
         )
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     Ok(Some(message_id.to_owned()))
+}
+
+#[derive(Debug, Deserialize)]
+struct RolePanelRequest {
+    channel: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default, rename = "roleIds")]
+    role_ids: Vec<String>,
+    #[serde(default, rename = "selectionMode")]
+    selection_mode: String,
+    #[serde(default = "default_true", rename = "removeOnUnselect")]
+    remove_on_unselect: bool,
+}
+
+fn normalize_role_panel_request(
+    request: RolePanelRequest,
+) -> Result<serde_json::Value, (StatusCode, Json<ApiError>)> {
+    let channel = request.channel.trim();
+    if channel.parse::<u64>().is_err() {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "role_panel_channel_required",
+        ));
+    }
+    let mut role_ids = Vec::new();
+    for role_id in request.role_ids {
+        let role_id = role_id.trim();
+        if role_id.parse::<u64>().is_err() || role_ids.iter().any(|value| value == role_id) {
+            continue;
+        }
+        role_ids.push(role_id.to_owned());
+        if role_ids.len() == 5 {
+            break;
+        }
+    }
+    if role_ids.is_empty() {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "role_panel_roles_required",
+        ));
+    }
+    let title = request.title.trim();
+    if title.is_empty() || title.chars().count() > 80 {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "role_panel_title_invalid",
+        ));
+    }
+    let description = request.description.trim();
+    if description.chars().count() > 1_000 {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "role_panel_description_invalid",
+        ));
+    }
+    let selection_mode = match request.selection_mode.as_str() {
+        "unique" => "unique",
+        "" | "multiple" => "multiple",
+        _ => {
+            return Err(client_error(
+                StatusCode::BAD_REQUEST,
+                "role_panel_selection_invalid",
+            ));
+        }
+    };
+    Ok(serde_json::json!({
+        "channel": channel,
+        "roleIds": role_ids,
+        "panelTitle": title,
+        "panelDescription": description,
+        "maxRoles": if selection_mode == "unique" { 1 } else { role_ids.len().clamp(1, 5) },
+        "selectionMode": selection_mode,
+        "removeOnUnselect": request.remove_on_unselect,
+    }))
+}
+
+fn stored_role_panel_value(key: &str, value: &str) -> Option<serde_json::Value> {
+    let message_id = key.strip_prefix("community.role_panel.")?;
+    if message_id.parse::<u64>().is_err() {
+        return None;
+    }
+    let mut panel = serde_json::from_str::<serde_json::Value>(value).ok()?;
+    panel["message_id"] = serde_json::json!(message_id);
+    Some(panel)
+}
+
+async fn discord_delete_role_panel(
+    state: &ApiState,
+    channel_id: &str,
+    message_id: &str,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if state.discord_token.len() < 20 {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "discord_adapter_unavailable",
+        ));
+    }
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| Client::new());
+    let response = client
+        .delete(format!(
+            "{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}"
+        ))
+        .header(
+            header::AUTHORIZATION,
+            format!("Bot {}", state.discord_token),
+        )
+        .header("X-Audit-Log-Reason", "Vozen role panel repair")
+        .send()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_unreachable"))?;
+    if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    Err(client_error(
+        StatusCode::BAD_GATEWAY,
+        "discord_role_panel_delete_failed",
+    ))
+}
+
+async fn role_panels(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let panels = state
+        .store
+        .settings_with_prefix(&claims.guild_id, "community.role_panel.")
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .filter_map(|(key, value)| stored_role_panel_value(&key, &value))
+        .collect::<Vec<_>>();
+    Ok(Json(
+        serde_json::json!({"guildId": claims.guild_id, "panels": panels}),
+    ))
+}
+
+async fn create_role_panel(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(request): Json<RolePanelRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    if !feature_enabled(&state, &claims.guild_id, "community.role_panels") {
+        return Err(client_error(StatusCode::CONFLICT, "feature_disabled"));
+    }
+    let config = normalize_role_panel_request(request)?;
+    let preflight = generic_feature_preflight(
+        State(state.clone()),
+        headers.clone(),
+        "community.role_panels".into(),
+        FeaturePreflightRequest {
+            config: config.clone(),
+            enabled: true,
+        },
+    )
+    .await?;
+    if !preflight
+        .0
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(client_error(
+            StatusCode::PRECONDITION_FAILED,
+            "feature_preflight_failed",
+        ));
+    }
+    let plan = effective_plan(&state, &claims).await;
+    let limit = quota_limit(&plan, "role_panels");
+    if state
+        .store
+        .count_settings_prefix(&claims.guild_id, "community.role_panel.")
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        >= limit
+    {
+        return Err(client_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "role_panel_quota_exceeded",
+        ));
+    }
+    let message_id = discord_publish_role_panel(&state, &claims.guild_id, &config, false, "panel")
+        .await?
+        .ok_or_else(|| {
+            client_error(StatusCode::BAD_GATEWAY, "discord_role_panel_publish_failed")
+        })?;
+    let enabled_value = "true".to_owned();
+    let mut projections = vec![
+        (feature_key("community.role_panels"), enabled_value),
+        (
+            feature_config_key("community.role_panels"),
+            config.to_string(),
+        ),
+    ];
+    projections.extend(runtime_projection_pairs("community.role_panels", &config));
+    state
+        .store
+        .publish_feature_setting(
+            &claims.guild_id,
+            "community.role_panels",
+            true,
+            &config.to_string(),
+            None,
+            &claims.user_id,
+            &projections,
+        )
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let _ = state.store.record_activity(
+        &claims.guild_id,
+        "role_panel_config",
+        &claims.user_id,
+        None,
+        Some(&claims.user_id),
+        &serde_json::json!({"operation":"publish","messageId":message_id}).to_string(),
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({"messageId": message_id, "config": config})),
+    ))
+}
+
+async fn delete_role_panel(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(message_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    if message_id.parse::<u64>().is_err() {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "role_panel_message_invalid",
+        ));
+    }
+    let key = format!("community.role_panel.{message_id}");
+    let stored = state
+        .store
+        .get_setting(&claims.guild_id, &key)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "role_panel_not_found"))?;
+    let panel = stored_role_panel_value(&key, &stored)
+        .ok_or_else(|| client_error(StatusCode::INTERNAL_SERVER_ERROR, "role_panel_invalid"))?;
+    let channel_id = panel
+        .get("channel_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| client_error(StatusCode::INTERNAL_SERVER_ERROR, "role_panel_invalid"))?;
+    discord_delete_role_panel(&state, channel_id, &message_id).await?;
+    state
+        .store
+        .delete_setting(&claims.guild_id, &key)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let _ = state.store.record_activity(
+        &claims.guild_id,
+        "role_panel_config",
+        &claims.user_id,
+        None,
+        Some(&claims.user_id),
+        &serde_json::json!({"operation":"delete","messageId":message_id}).to_string(),
+    );
+    Ok(Json(
+        serde_json::json!({"ok": true, "messageId": message_id}),
+    ))
+}
+
+async fn repair_role_panel(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(message_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    if message_id.parse::<u64>().is_err() {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "role_panel_message_invalid",
+        ));
+    }
+    let key = format!("community.role_panel.{message_id}");
+    let stored = state
+        .store
+        .get_setting(&claims.guild_id, &key)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "role_panel_not_found"))?;
+    let panel = stored_role_panel_value(&key, &stored)
+        .ok_or_else(|| client_error(StatusCode::INTERNAL_SERVER_ERROR, "role_panel_invalid"))?;
+    let channel_id = panel
+        .get("channel_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if !channel_id.is_empty() {
+        discord_delete_role_panel(&state, channel_id, &message_id).await?;
+    }
+    let config = serde_json::json!({
+        "channel": channel_id,
+        "roleIds": panel.get("role_ids").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "panelTitle": panel.get("title").and_then(serde_json::Value::as_str).unwrap_or("Choose your roles"),
+        "panelDescription": "",
+        "selectionMode": panel.get("selection_mode").and_then(serde_json::Value::as_str).unwrap_or("multiple"),
+        "removeOnUnselect": panel.get("remove_on_unselect").and_then(serde_json::Value::as_bool).unwrap_or(true),
+    });
+    state
+        .store
+        .delete_setting(&claims.guild_id, &key)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let new_id = discord_publish_role_panel(&state, &claims.guild_id, &config, false, "repair")
+        .await?
+        .ok_or_else(|| {
+            client_error(StatusCode::BAD_GATEWAY, "discord_role_panel_publish_failed")
+        })?;
+    let _ = state.store.record_activity(
+        &claims.guild_id,
+        "role_panel_config",
+        &claims.user_id,
+        None,
+        Some(&claims.user_id),
+        &serde_json::json!({"operation":"repair","oldMessageId":message_id,"messageId":new_id})
+            .to_string(),
+    );
+    Ok(Json(
+        serde_json::json!({"ok": true, "messageId": new_id, "config": config}),
+    ))
 }
 
 fn publish_quick_setup_feature(
@@ -5661,9 +5994,14 @@ async fn quick_setup_step(
                     &normalized_config,
                 )?;
                 if update.enabled
-                    && let Some(message_id) =
-                        discord_publish_role_panel(&state, &claims.guild_id, &normalized_config)
-                            .await?
+                    && let Some(message_id) = discord_publish_role_panel(
+                        &state,
+                        &claims.guild_id,
+                        &normalized_config,
+                        true,
+                        "quick_setup",
+                    )
+                    .await?
                 {
                     created_resources.push(
                         serde_json::json!({"type": "role_panel", "messageId": message_id, "state": "published"}),

@@ -16,6 +16,7 @@ import {
   type QuickSetupState,
   type QuickSetupStepKey,
   type RankCardConfig,
+  type RolePanelRecord,
   type RssSubscription,
   type StudioTemplate,
   type TwitchSubscription,
@@ -1113,7 +1114,8 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       title: 'Painel de escolha',
       description: 'Prepara a mensagem onde os membros escolhem cargos.',
       fields: [
-        { key: 'channel', label: 'Canal do painel', kind: 'text' },
+        { key: 'channel', label: 'Canal do painel', kind: 'channel' },
+        { key: 'roleIds', label: 'Role options', kind: 'roles', max: 5 },
         { key: 'panelTitle', label: 'Título do painel', kind: 'text' },
         { key: 'panelDescription', label: 'Descrição do painel', kind: 'textarea' },
       ],
@@ -1123,6 +1125,7 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       description: 'Evita escolhas excessivas.',
       fields: [
         { key: 'maxRoles', label: 'Máximo de cargos por membro', kind: 'number', min: 1, max: 25 },
+        { key: 'selectionMode', label: 'Selection mode', kind: 'select', options: [['multiple', 'Several roles'], ['unique', 'One role']] },
         { key: 'removeOnUnselect', label: 'Remover cargo ao desselecionar', kind: 'toggle' },
       ],
     },
@@ -2330,6 +2333,26 @@ function App() {
       const result = localPreviewMode
         ? { enabled: detailEnabled, config: detailConfig, revision: detailRevision }
         : await api.saveFeature(route.key, detailEnabled, detailConfig, detailRevision);
+      if (
+        !localPreviewMode &&
+        route.key === 'community.role_panels' &&
+        detailEnabled &&
+        typeof detailConfig.channel === 'string' &&
+        Array.isArray(detailConfig.roleIds) &&
+        detailConfig.roleIds.length > 0
+      ) {
+        const existingPanels = await api.rolePanels();
+        if (existingPanels.panels.length === 0) {
+          await api.createRolePanel({
+            channel: detailConfig.channel,
+            title: String(detailConfig.panelTitle ?? 'Choose your roles'),
+            description: String(detailConfig.panelDescription ?? ''),
+            roleIds: detailConfig.roleIds.map(String),
+            selectionMode: detailConfig.selectionMode === 'unique' ? 'unique' : 'multiple',
+            removeOnUnselect: detailConfig.removeOnUnselect !== false,
+          });
+        }
+      }
       setFeatures((items) =>
         items.map((item) => (item.key === route.key ? { ...item, enabled: result.enabled } : item)),
       );
@@ -3838,6 +3861,9 @@ function FeatureDetail({
           {feature?.key === 'management.custom_commands' && (
             <CustomCommandManager localPreviewMode={localPreviewMode} />
           )}
+          {feature?.key === 'community.role_panels' && (
+            <RolePanelManager context={context} localPreviewMode={localPreviewMode} />
+          )}
           {sections.map((section) => (
             <ConfigSection
               key={section.title}
@@ -4154,6 +4180,107 @@ function CustomCommandManager({ localPreviewMode }: { localPreviewMode: boolean 
           ))}
         </div>
       )}
+    </section>
+  );
+}
+
+function RolePanelManager({
+  context,
+  localPreviewMode,
+}: {
+  context: GuildContext | null;
+  localPreviewMode: boolean;
+}) {
+  const [panels, setPanels] = useState<RolePanelRecord[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(!localPreviewMode);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (localPreviewMode) return;
+    let cancelled = false;
+    void api.rolePanels()
+      .then((result) => {
+        if (!cancelled) setPanels(result.panels);
+      })
+      .catch((cause) => {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Could not load role panels.');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [localPreviewMode]);
+
+  const channelName = (id?: string) => context?.channels.find((channel) => channel.id === id)?.name;
+  const roleNames = (ids?: string[]) =>
+    (ids ?? []).map((id) => context?.roles.find((role) => role.id === id)?.name ?? id).join(', ');
+
+  async function remove(messageId: string) {
+    if (localPreviewMode || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api.deleteRolePanel(messageId);
+      setPanels((current) => current.filter((panel) => panel.message_id !== messageId));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not delete the role panel.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function repair(messageId: string) {
+    if (localPreviewMode || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await api.repairRolePanel(messageId);
+      setPanels((current) => current.map((panel) => panel.message_id === messageId
+        ? { ...panel, message_id: result.messageId }
+        : panel));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not repair the role panel.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="config-section card">
+      <div className="section-heading">
+        <div>
+          <small className="eyebrow">REAL DISCORD PANELS</small>
+          <h3>Role panel manager</h3>
+          <p>
+            Guardar a configuração publica um painel real. Aqui podes confirmar onde está,
+            reparar uma mensagem apagada ou removê-la sem apagar os cargos.
+          </p>
+        </div>
+      </div>
+      {loading && <p className="tip" role="status">A carregar painéis deste servidor…</p>}
+      {!localPreviewMode && !loading && panels.length === 0 && (
+        <p className="tip">Ainda não existe um painel publicado. Escolhe um canal e cargos acima e guarda.</p>
+      )}
+      {panels.length > 0 && (
+        <div className="template-list" aria-label="Role panels">
+          {panels.map((panel) => (
+            <div className="template-row" key={panel.message_id}>
+              <div>
+                <b>{panel.title || 'Role panel'}</b>
+                <small>
+                  #{channelName(panel.channel_id) ?? panel.channel_id ?? 'unknown channel'} · {roleNames(panel.role_ids) || 'no roles'} · {panel.selection_mode === 'unique' ? 'one choice' : 'multiple choices'}
+                </small>
+              </div>
+              <div className="inline-actions">
+                <button className="ghost" onClick={() => void repair(panel.message_id)} disabled={busy}>Repair</button>
+                <button className="ghost" onClick={() => void remove(panel.message_id)} disabled={busy}>Delete</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {error && <p className="tip" role="alert">{error}</p>}
     </section>
   );
 }

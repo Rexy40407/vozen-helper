@@ -51,6 +51,15 @@ export type CustomCommand = {
   author_id?: string;
   created_at?: number;
 };
+export type RolePanelRecord = {
+  channel_id?: string;
+  message_id: string;
+  title?: string;
+  role_ids?: string[];
+  selection_mode?: string;
+  remove_on_unselect?: boolean;
+  source?: string;
+};
 export type YouTubeSubscription = {
   id: number;
   sourceChannelId: string;
@@ -358,6 +367,30 @@ export const api = {
     request<{ ok: boolean; name: string }>(`/api/custom-commands/${encodeURIComponent(name)}`, {
       method: 'DELETE',
     }),
+  rolePanels: () =>
+    request<{ guildId: string; panels: RolePanelRecord[] }>('/api/role-panels'),
+  createRolePanel: (payload: {
+    channel: string;
+    title: string;
+    description: string;
+    roleIds: string[];
+    selectionMode: 'multiple' | 'unique';
+    removeOnUnselect: boolean;
+  }) =>
+    request<{ messageId: string; config: FeatureConfig }>('/api/role-panels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  deleteRolePanel: (messageId: string) =>
+    request<{ ok: boolean; messageId: string }>(`/api/role-panels/${encodeURIComponent(messageId)}`, {
+      method: 'DELETE',
+    }),
+  repairRolePanel: (messageId: string) =>
+    request<{ ok: boolean; messageId: string; config: FeatureConfig }>(
+      `/api/role-panels/${encodeURIComponent(messageId)}/repair`,
+      { method: 'POST' },
+    ),
   features: () => request<{ guildId: string; features: Feature[] }>('/api/config/features'),
   updateFeature: (key: string, enabled: boolean) =>
     request<{ ok: boolean; enabled: boolean }>('/api/config/features', {
