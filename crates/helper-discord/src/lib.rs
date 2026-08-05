@@ -2790,7 +2790,7 @@ impl EventHandler for Handler {
             return;
         }
         let content = format!(
-            "⭐ **{} estrelas** em <@{}>\n{}\n{}",
+            "⭐ **{} stars** on <@{}>\n{}\n{}",
             count, original.author.id, original.content, link
         );
         let attachment_links = original
@@ -8436,6 +8436,301 @@ async fn respond_component(
 /// settings compatible while ensuring command/component feedback is English.
 fn english_bot_text(input: &str) -> String {
     const REPLACEMENTS: &[(&str, &str)] = &[
+        // Keep all Helper-owned command and component feedback in English.
+        // These entries intentionally cover the correctly encoded strings
+        // still present in older handlers; the mojibake variants below keep
+        // responses from legacy persisted/configured paths readable too.
+        (
+            "Este comando só pode ser usado num servidor.",
+            "This command can only be used in a server.",
+        ),
+        ("Indica um membro.", "Specify a member."),
+        ("Indica um utilizador.", "Specify a user."),
+        ("Indica um ID de utilizador.", "Specify a user ID."),
+        ("ID de utilizador inválido.", "Invalid user ID."),
+        ("Indica um canal válido.", "Specify a valid channel."),
+        (
+            "Indica pelo menos um cargo válido.",
+            "Specify at least one valid role.",
+        ),
+        (
+            "Indica uma pergunta e pelo menos duas opções.",
+            "Specify a question and at least two options.",
+        ),
+        (
+            "Indica prioridade, categoria ou nota.",
+            "Specify a priority, category or note.",
+        ),
+        (
+            "Indica pelo menos um campo para alterar.",
+            "Specify at least one field to change.",
+        ),
+        (
+            "O conteúdo não pode exceder 500 caracteres.",
+            "Content cannot exceed 500 characters.",
+        ),
+        (
+            "Duração inválida. Usa 10m, 2h ou 1d.",
+            "Invalid duration. Use 10m, 2h or 1d.",
+        ),
+        (
+            "Duração inválida. Usa formatos como 10m, 2h ou 1d.",
+            "Invalid duration. Use formats such as 10m, 2h or 1d.",
+        ),
+        ("Nome ou conteúdo inválido.", "Invalid name or content."),
+        (
+            "Nome, condição ou resposta inválidos.",
+            "Invalid name, condition or response.",
+        ),
+        (
+            "Nome, local ou descrição inválidos.",
+            "Invalid name, location or description.",
+        ),
+        (
+            "A mensagem de teste não pode exceder 2000 caracteres.",
+            "The test message cannot exceed 2,000 characters.",
+        ),
+        (
+            "As sugestões estão desativadas neste servidor. Ativa-as no painel.",
+            "Suggestions are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "A sugestão deve ter entre 3 e 1000 caracteres.",
+            "The suggestion must be between 3 and 1,000 characters.",
+        ),
+        (
+            "Estado inválido: pending, approved, denied ou considered.",
+            "Invalid status: pending, approved, denied or considered.",
+        ),
+        (
+            "Os giveaways estão desativados neste servidor. Ativa-os no painel.",
+            "Giveaways are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "Giveaway não encontrado ou já terminado.",
+            "Giveaway not found or already ended.",
+        ),
+        (
+            "Giveaway não encontrado, ainda ativo ou sem participantes.",
+            "Giveaway not found, still active or without participants.",
+        ),
+        (
+            "O prémio deve ter entre 1 e 200 caracteres.",
+            "The prize must be between 1 and 200 characters.",
+        ),
+        (
+            "As enquetes estão desativadas neste servidor. Ativa-as no painel.",
+            "Polls are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "Esse membro não está em quarantine.",
+            "That member is not quarantined.",
+        ),
+        (
+            "Configura primeiro `/join-gate` com um cargo de verificação.",
+            "Configure `/join-gate` first with a verification role.",
+        ),
+        (
+            "Ativa primeiro o `/join-gate`; o painel não deve ficar exposto enquanto o gate está desligado.",
+            "Enable `/join-gate` first; do not expose the panel while the gate is disabled.",
+        ),
+        (
+            "Os eventos estão desativados neste servidor. Ativa-os no painel.",
+            "Events are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "A lotação deve estar entre 1 e 100000.",
+            "Capacity must be between 1 and 100,000.",
+        ),
+        (
+            "Não existem eventos agendados neste servidor.",
+            "There are no scheduled events in this server.",
+        ),
+        (
+            "Não encontrei esse evento neste servidor.",
+            "That event was not found in this server.",
+        ),
+        (
+            "Eventos concluídos ou cancelados não podem ser editados.",
+            "Completed or cancelled events cannot be edited.",
+        ),
+        (
+            "Indica um ID de evento válido.",
+            "Specify a valid event ID.",
+        ),
+        (
+            "O nome tem de ter entre 1 e 100 caracteres.",
+            "The name must be between 1 and 100 characters.",
+        ),
+        (
+            "A localização só pode ser alterada em eventos externos e deve ter 1–100 caracteres.",
+            "Location can only be changed for external events and must be 1–100 characters.",
+        ),
+        (
+            "A descrição não pode exceder 1000 caracteres.",
+            "The description cannot exceed 1,000 characters.",
+        ),
+        (
+            "A nova data de início tem de estar no futuro.",
+            "The new start date must be in the future.",
+        ),
+        (
+            "O fim tem de ser depois do início.",
+            "The end must be after the start.",
+        ),
+        (
+            "O evento não pode durar mais de 365 dias.",
+            "The event cannot last longer than 365 days.",
+        ),
+        (
+            "Este evento já terminou ou foi cancelado.",
+            "This event has already ended or was cancelled.",
+        ),
+        (
+            "Não tens uma inscrição neste evento.",
+            "You are not registered for this event.",
+        ),
+        (
+            "Inscreve-te primeiro com `/event-register`.",
+            "Register first with `/event-register`.",
+        ),
+        (
+            "O teu check-in já está registado.",
+            "Your check-in is already recorded.",
+        ),
+        (
+            "Nome, condição ou resposta inválidos.",
+            "Invalid name, condition or response.",
+        ),
+        (
+            "Workflow não encontrado neste servidor.",
+            "Workflow not found in this server.",
+        ),
+        (
+            "A mensagem de teste não pode exceder 2000 caracteres.",
+            "The test message cannot exceed 2,000 characters.",
+        ),
+        (
+            "O SLA deve estar entre 5 e 1440 minutos.",
+            "SLA must be between 5 and 1,440 minutes.",
+        ),
+        (
+            "Este canal não é um ticket do Helper.",
+            "This channel is not a Helper ticket.",
+        ),
+        (
+            "Só o autor do ticket pode avaliá-lo.",
+            "Only the ticket author can rate it.",
+        ),
+        (
+            "A avaliação tem de ser entre 1 e 5.",
+            "The rating must be between 1 and 5.",
+        ),
+        (
+            "Só podes avaliar um ticket fechado.",
+            "You can only rate a closed ticket.",
+        ),
+        (
+            "Não foi possível guardar a avaliação.",
+            "Unable to save the rating.",
+        ),
+        (
+            "Os painéis de cargos estão desativados neste servidor. Ativa-os no painel.",
+            "Role panels are disabled in this server. Enable them in the dashboard.",
+        ),
+        (
+            "Este botão só funciona num servidor.",
+            "This button can only be used in a server.",
+        ),
+        ("Sugestão não encontrada.", "Suggestion not found."),
+        ("Voto registado.", "Vote recorded."),
+        ("Giveaway não encontrado.", "Giveaway not found."),
+        (
+            "Este giveaway já terminou.",
+            "This giveaway has already ended.",
+        ),
+        (
+            "Entrada registada. Boa sorte!",
+            "Entry recorded. Good luck!",
+        ),
+        ("Saíste do giveaway.", "You left the giveaway."),
+        ("Poll não encontrada.", "Poll not found."),
+        ("Cargo removido.", "Role removed."),
+        ("Cargo atribuído.", "Role assigned."),
+        (
+            "Este painel pertence a outro servidor.",
+            "This panel belongs to another server.",
+        ),
+        (
+            "Painel de verificação inválido.",
+            "Invalid verification panel.",
+        ),
+        ("Já estás verificado.", "You are already verified."),
+        (
+            "Verificacao concluida; cargo atribuido.",
+            "Verification complete; role assigned.",
+        ),
+        ("Botão desconhecido.", "Unknown button."),
+        ("Tag não encontrada.", "Tag not found."),
+        ("Ainda não existem tags.", "There are no tags yet."),
+        ("Ainda não existem dados de XP.", "There is no XP data yet."),
+        ("Tag `", "Tag `"),
+        ("` guardada.", "` saved."),
+        ("` eliminada.", "` deleted."),
+        (
+            "Este comando só pode ser usado num servidor.",
+            "This command can only be used in a server.",
+        ),
+        ("AFK definido:", "AFK status set:"),
+        ("AFK removido.", "AFK status removed."),
+        ("conta criada em", "account created at"),
+        ("Aviso criado como caso", "Warning created as case"),
+        ("Registo #", "Record #"),
+        (
+            "Caso não encontrado neste servidor.",
+            "Case not found in this server.",
+        ),
+        ("Não existem casos para", "There are no cases for"),
+        ("Sugestão publicada.", "Suggestion published."),
+        (
+            "Sugestão não encontrada neste servidor.",
+            "Suggestion not found in this server.",
+        ),
+        ("Giveaway criado.", "Giveaway created."),
+        ("Giveaway terminado.", "Giveaway ended."),
+        (
+            "Não existem giveaways ativos.",
+            "There are no active giveaways.",
+        ),
+        ("Poll #{} criada.", "Poll #{} created."),
+        (
+            "<@{}> colocado em quarantine como caso",
+            "<@{}> quarantined as case",
+        ),
+        ("Quarantine removida de", "Quarantine removed from"),
+        (
+            "Painel de verificação publicado neste canal.",
+            "Verification panel posted in this channel.",
+        ),
+        (
+            "Join gate desativado; as definições guardadas podem ser reativadas.",
+            "Join gate disabled; saved settings can be re-enabled.",
+        ),
+        ("Lockdown aplicado em", "Lockdown applied to"),
+        ("Lockdown removido de", "Lockdown removed from"),
+        ("Evento nativo #{} criado:", "Native event #{} created:"),
+        (
+            "Não existem workflows configurados.",
+            "There are no workflows configured.",
+        ),
+        ("Workflow #{} criado.", "Workflow #{} created."),
+        (
+            "Configuração de tickets guardada.",
+            "Ticket configuration saved.",
+        ),
+        ("Painel de tickets criado em", "Ticket panel created in"),
+        ("Ticket atualizado:", "Ticket updated:"),
+        ("Painel de cargos criado.", "Role panel created."),
         // Current Rust literals are UTF-8, while older releases persisted a
         // few mojibake variants. Keep both forms so Helper-owned responses
         // remain English after an upgrade; user content is not translated.
@@ -9899,7 +10194,7 @@ fn starboard_policy_for_store(store: &Store, guild_id: &str) -> helper_core::Sta
 }
 
 fn permission_passport_message() -> String {
-    "**Permission Passport**\nBase: `View Channels`, `Send Messages`, `Embed Links`, `Read Message History`, `Use Application Commands`.\nSecurity opcional: `Manage Messages`, `Moderate Members`, `Kick Members`, `Ban Members`, `Manage Roles`.\nSupport/Events opcionais: `Manage Channels`, `Manage Threads`, `Create Private Threads`.\nGateway: `MESSAGE_CONTENT` e `GUILD_MEMBERS` só suportam módulos que precisam deles.\nCada permissão extra tem um módulo e uma consequência explícita; usa o painel para comparar o concedido com o necessário.".to_string()
+    "**Permission Passport**\nBase: `View Channels`, `Send Messages`, `Embed Links`, `Read Message History`, `Use Application Commands`.\nOptional security: `Manage Messages`, `Moderate Members`, `Kick Members`, `Ban Members`, `Manage Roles`.\nOptional support/events: `Manage Channels`, `Manage Threads`, `Create Private Threads`.\nGateway: `MESSAGE_CONTENT` and `GUILD_MEMBERS` are enabled only for modules that need them.\nEvery extra permission has a module and an explicit consequence; use the dashboard to compare granted permissions with the required ones.".to_string()
 }
 
 fn parse_scheduled_event_window(
@@ -10276,6 +10571,22 @@ mod tests {
             english_bot_text("Este comando só pode ser usado num servidor."),
             "This command can only be used in a server."
         );
+        for (source, expected) in [
+            ("Indica um canal válido.", "Specify a valid channel."),
+            (
+                "As sugestões estão desativadas neste servidor. Ativa-as no painel.",
+                "Suggestions are disabled in this server. Enable them in the dashboard.",
+            ),
+            ("Evento nativo #12 criado:", "Native event #12 created:"),
+            (
+                "Ticket atualizado: categoria **support**.",
+                "Ticket updated: categoria **support**.",
+            ),
+            ("AFK definido: away", "AFK status set: away"),
+            ("Cargo atribuído.", "Role assigned."),
+        ] {
+            assert_eq!(english_bot_text(source), expected);
+        }
     }
 
     #[test]
