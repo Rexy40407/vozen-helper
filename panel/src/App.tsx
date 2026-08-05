@@ -846,6 +846,7 @@ const defaults: Record<string, FeatureConfig> = {
     defaultCapacity: 0,
     announcementChannel: '',
     reminders: true,
+    reminderHours: 1,
   },
   'utility.help': { channel: '', showAdminOnly: true, includeExamples: true },
   'utility.reminders': {
@@ -1156,13 +1157,16 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
           min: 0,
           max: 100000,
         },
-        { key: 'announcementChannel', label: 'Canal de anúncios', kind: 'text' },
+        { key: 'announcementChannel', label: 'Canal de anúncios', kind: 'channel' },
       ],
     },
     {
       title: 'Acompanhamento',
       description: 'Ajuda os membros a não perderem o início.',
-      fields: [{ key: 'reminders', label: 'Enviar lembretes', kind: 'toggle' }],
+      fields: [
+        { key: 'reminders', label: 'Enviar lembretes', kind: 'toggle' },
+        { key: 'reminderHours', label: 'Horas antes do evento', kind: 'number', min: 1, max: 168, advanced: true },
+      ],
     },
   ],
   'utility.help': [

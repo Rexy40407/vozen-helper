@@ -1515,6 +1515,15 @@ fn project_events(config: &serde_json::Value) -> Vec<(String, String)> {
     };
     let mut pairs = Vec::new();
     if let Some(value) = object
+        .get("defaultDurationHours")
+        .and_then(serde_json::Value::as_i64)
+    {
+        pairs.push((
+            "community.events.default_duration_hours".into(),
+            value.to_string(),
+        ));
+    }
+    if let Some(value) = object
         .get("defaultCapacity")
         .and_then(serde_json::Value::as_i64)
     {
@@ -1531,6 +1540,15 @@ fn project_events(config: &serde_json::Value) -> Vec<(String, String)> {
             "community.events.announcement_channel_id".into(),
             value.into(),
         ));
+    }
+    if let Some(value) = object.get("reminders").and_then(serde_json::Value::as_bool) {
+        pairs.push(("community.events.reminders".into(), value.to_string()));
+    }
+    if let Some(value) = object
+        .get("reminderHours")
+        .and_then(serde_json::Value::as_i64)
+    {
+        pairs.push(("community.events.reminder_hours".into(), value.to_string()));
     }
     pairs
 }
@@ -1611,7 +1629,7 @@ fn validate_interaction_config(config: &serde_json::Value, key: &str) -> Vec<Val
             });
         }
     }
-    for field in ["anonymous", "removeOnUnselect"] {
+    for field in ["anonymous", "removeOnUnselect", "reminders"] {
         if object.get(field).is_some_and(|value| !value.is_boolean()) {
             issues.push(ValidationIssue {
                 path: field.into(),
@@ -1622,11 +1640,20 @@ fn validate_interaction_config(config: &serde_json::Value, key: &str) -> Vec<Val
         }
     }
     for (field, min, max) in [
-        ("defaultDurationHours", 1_i64, 168_i64),
+        (
+            "defaultDurationHours",
+            1_i64,
+            if key == "community.events" {
+                8760_i64
+            } else {
+                168_i64
+            },
+        ),
         ("defaultWinners", 1_i64, 20_i64),
         ("defaultCapacity", 0_i64, 100_000_i64),
         ("maxRoles", 1_i64, 5_i64),
         ("cooldownHours", 0_i64, 720_i64),
+        ("reminderHours", 1_i64, 168_i64),
     ] {
         if let Some(value) = object.get(field) {
             if value.as_i64().is_none() {
@@ -7453,9 +7480,9 @@ static EVENTS_ADAPTER: CommunityInteractionAdapter = CommunityInteractionAdapter
     key: "community.events",
     source: "events_adapter_v2",
     title: "Discord events",
-    description: "Set event capacity and an optional announcement channel for native events.",
-    schema: r#"{"version":1,"source":"events_adapter_v2","sections":[{"title":"Event defaults","description":"Capacity is stored with each event; announcements use the selected channel.","fields":[{"key":"defaultCapacity","label":"Default capacity (0 = unlimited)","kind":"number","min":0,"max":100000},{"key":"announcementChannel","label":"Announcement channel (optional)","kind":"channel"}]}]}"#,
-    defaults: r#"{"defaultCapacity":0,"announcementChannel":""}"#,
+    description: "Set duration, capacity and optional start reminders for native events.",
+    schema: r#"{"version":1,"source":"events_adapter_v2","sections":[{"title":"Event defaults","description":"These values are applied to new events created with the Helper.","fields":[{"key":"defaultDurationHours","label":"Default duration (hours)","kind":"number","min":1,"max":8760},{"key":"defaultCapacity","label":"Default capacity (0 = unlimited)","kind":"number","min":0,"max":100000},{"key":"announcementChannel","label":"Announcement channel (optional)","kind":"channel"}]},{"title":"Start reminder","description":"Post one reminder before each new event in the announcement channel.","fields":[{"key":"reminders","label":"Send start reminders","kind":"toggle"},{"key":"reminderHours","label":"Hours before start","kind":"number","min":1,"max":168,"advanced":true}]}]}"#,
+    defaults: r#"{"defaultDurationHours":2,"defaultCapacity":0,"announcementChannel":"","reminders":true,"reminderHours":1}"#,
     dependencies: &["manage_events", "scheduler"],
     projection: project_events,
 };
@@ -9082,6 +9109,21 @@ mod tests {
             );
             assert!(adapter.validate(&serde_json::json!({})).is_empty());
         }
+        let events = feature_adapter("community.events").expect("events adapter");
+        assert_eq!(events.descriptor().defaults["defaultDurationHours"], 2);
+        assert_eq!(events.descriptor().defaults["reminderHours"], 1);
+        let event_projection = events.runtime_projection(&serde_json::json!({
+            "defaultDurationHours": 4,
+            "defaultCapacity": 25,
+            "announcementChannel": "123",
+            "reminders": true,
+            "reminderHours": 2
+        }));
+        assert!(
+            event_projection
+                .contains(&("community.events.default_duration_hours".into(), "4".into()))
+        );
+        assert!(event_projection.contains(&("community.events.reminder_hours".into(), "2".into())));
 
         let temp = feature_adapter("utility.temp_channels").expect("temporary channels adapter");
         assert_eq!(temp.descriptor().source, "temp_channels_adapter_v2");

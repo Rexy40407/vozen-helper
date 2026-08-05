@@ -1207,6 +1207,22 @@ impl Store {
         Ok(())
     }
 
+    /// Remove all scheduled actions for one bounded feature object. This is
+    /// used when an event is edited or cancelled so a stale reminder cannot
+    /// fire after the object has changed.
+    pub fn delete_scheduled_actions_for(
+        &self,
+        guild_id: &str,
+        action_type: &str,
+        target_id: &str,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "DELETE FROM scheduled_actions WHERE guild_id=?1 AND type=?2 AND target_id=?3",
+            params![guild_id, action_type, target_id],
+        )?)
+    }
+
     /// Records a provider event exactly once. The boolean is false for a
     /// duplicate webhook, making at-least-once providers idempotent.
     pub fn record_provider_event(
@@ -5329,6 +5345,20 @@ mod tests {
         let jobs = store.due_scheduled_actions(1, 10).unwrap();
         assert_eq!(jobs[0].0, id);
         assert_eq!(jobs[0].4, r#"{"channel_id":"2","text":"hello"}"#);
+        store.delete_scheduled_action(id).unwrap();
+        store
+            .schedule_typed("g", "event_reminder", "event-1", 2, "{}")
+            .unwrap();
+        store
+            .schedule_typed("g", "event_reminder", "event-2", 2, "{}")
+            .unwrap();
+        assert_eq!(
+            store
+                .delete_scheduled_actions_for("g", "event_reminder", "event-1")
+                .unwrap(),
+            1
+        );
+        assert_eq!(store.due_scheduled_actions(2, 10).unwrap().len(), 1);
         store.open_ticket("g", "u", "20").unwrap();
         assert_eq!(store.active_ticket_count_for_user("g", "u").unwrap(), 1);
         assert!(!store.try_open_ticket("g", "u", "21", 1).unwrap());

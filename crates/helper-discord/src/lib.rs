@@ -1604,7 +1604,7 @@ impl EventHandler for Handler {
                         "end",
                         "RFC3339 end",
                     )
-                    .required(true),
+                    .required(false),
                 )
                 .add_option(
                     CreateCommandOption::new(
@@ -7434,7 +7434,7 @@ impl Handler {
                 }
                 let name = option_string(command, "name").unwrap_or_default().trim();
                 let start_raw = option_string(command, "start").unwrap_or_default().trim();
-                let end_raw = option_string(command, "end").unwrap_or_default().trim();
+                let end_raw = option_string(command, "end").map(|value| value.trim().to_owned());
                 let location = option_string(command, "location").unwrap_or_default().trim();
                 let description = option_string(command, "description").unwrap_or_default().trim();
                 let default_capacity = setting_u64(&self.store, &guild_id.to_string(), "community.events.default_capacity", 0).min(100_000) as i64;
@@ -7450,23 +7450,46 @@ impl Handler {
                 {
                     return respond(ctx, command, "Nome, local ou descrição inválidos.").await;
                 }
-                let (start, end) = match parse_scheduled_event_window(
-                    start_raw,
-                    end_raw,
-                    serenity::all::Timestamp::now().unix_timestamp(),
-                ) {
-                    Ok(window) => window,
-                    Err(reason) => {
-                        let message = match reason {
-                            "invalid_start" => "The start date is not valid RFC3339.",
-                            "invalid_end" => "The end date is not valid RFC3339.",
-                            "start_must_be_in_future" => "The start must be in the future.",
-                            "end_must_follow_start" => "The end must be after the start.",
-                            "event_too_long" => "The event cannot last longer than 365 days.",
-                            _ => "The event window is invalid.",
-                        };
-                        return respond(ctx, command, message).await;
+                let now_seconds = serenity::all::Timestamp::now().unix_timestamp();
+                let (start, end) = if let Some(end_raw) = end_raw.as_deref() {
+                    match parse_scheduled_event_window(start_raw, end_raw, now_seconds) {
+                        Ok(window) => window,
+                        Err(reason) => {
+                            let message = match reason {
+                                "invalid_start" => "The start date is not valid RFC3339.",
+                                "invalid_end" => "The end date is not valid RFC3339.",
+                                "start_must_be_in_future" => "The start must be in the future.",
+                                "end_must_follow_start" => "The end must be after the start.",
+                                "event_too_long" => "The event cannot last longer than 365 days.",
+                                _ => "The event window is invalid.",
+                            };
+                            return respond(ctx, command, message).await;
+                        }
                     }
+                } else {
+                    let start = match serenity::all::Timestamp::parse(start_raw) {
+                        Ok(value) if value.unix_timestamp() > now_seconds => value,
+                        Ok(_) => {
+                            return respond(ctx, command, "The start must be in the future.").await;
+                        }
+                        Err(_) => {
+                            return respond(ctx, command, "The start date is not valid RFC3339.").await;
+                        }
+                    };
+                    let duration_hours = setting_u64(
+                        &self.store,
+                        &guild_id.to_string(),
+                        "community.events.default_duration_hours",
+                        2,
+                    )
+                    .clamp(1, 8_760);
+                    let end_seconds = start
+                        .unix_timestamp()
+                        .checked_add((duration_hours as i64).saturating_mul(3_600))
+                        .ok_or_else(|| anyhow::anyhow!("event duration overflowed"))?;
+                    let end = serenity::all::Timestamp::from_unix_timestamp(end_seconds)
+                        .map_err(|_| anyhow::anyhow!("event duration is invalid"))?;
+                    (start, end)
                 };
                 let mut builder = serenity::all::CreateScheduledEvent::new(
                     serenity::all::ScheduledEventType::External,
@@ -7495,6 +7518,13 @@ impl Handler {
                         CreateMessage::new().content(format!("New event **{}** is scheduled for <t:{}:F>.", event.name, start.unix_timestamp())),
                     ).await;
                 }
+                schedule_event_reminder(
+                    &self.store,
+                    &guild_id.to_string(),
+                    &event.id.to_string(),
+                    &event.name,
+                    start,
+                )?;
                 format!(
                     "Native event #{} created: **{}** (<t:{}:F>–<t:{}:F>).",
                     event.id,
@@ -7632,6 +7662,13 @@ impl Handler {
                     builder = builder.description(description.to_string());
                 }
                 let edited = guild_id.edit_scheduled_event(&ctx.http, event_id, builder).await?;
+                schedule_event_reminder(
+                    &self.store,
+                    &guild_id.to_string(),
+                    &edited.id.to_string(),
+                    &edited.name,
+                    edited.start_time,
+                )?;
                 format!("Native event #{} updated: **{}**.", edited.id, edited.name)
             }
             "event-register" => {
@@ -7806,6 +7843,11 @@ impl Handler {
                         serenity::all::ScheduledEventId::new(event_id as u64),
                     )
                     .await?;
+                self.store.delete_scheduled_actions_for(
+                    &guild_id.to_string(),
+                    "event_reminder",
+                    &event_id.to_string(),
+                )?;
                 format!("Native event #{} cancelled.", event_id)
             }
             "workflow-create" => {
@@ -10747,6 +10789,7 @@ fn scheduled_action_feature(action_type: &str) -> Option<&'static str> {
         "giveaway_end" => Some("community.giveaways"),
         "poll_end" => Some("management.polls"),
         "ticket_sla" => Some("support.tickets"),
+        "event_reminder" => Some("community.events"),
         _ => None,
     }
 }
@@ -11076,6 +11119,47 @@ async fn deliver_birthday_announcements(
     Ok(())
 }
 
+fn schedule_event_reminder(
+    store: &Store,
+    guild_id: &str,
+    event_id: &str,
+    event_name: &str,
+    start: serenity::all::Timestamp,
+) -> Result<()> {
+    store.delete_scheduled_actions_for(guild_id, "event_reminder", event_id)?;
+    if !setting_bool(store, guild_id, "community.events.reminders", true) {
+        return Ok(());
+    }
+    let Some(channel_id) =
+        setting_string(store, guild_id, "community.events.announcement_channel_id")
+            .and_then(|value| value.parse::<u64>().ok())
+    else {
+        // A reminder without a real destination is not useful. The scheduled
+        // action was removed above, so correcting the channel later is safe.
+        return Ok(());
+    };
+    let reminder_hours =
+        setting_u64(store, guild_id, "community.events.reminder_hours", 1).clamp(1, 168) as i64;
+    let now_ms = Utc::now().timestamp_millis();
+    let start_ms = start.unix_timestamp().saturating_mul(1_000);
+    let execute_at = start_ms
+        .saturating_sub(reminder_hours.saturating_mul(3_600_000))
+        .max(now_ms);
+    let payload = serde_json::json!({
+        "channel_id": channel_id.to_string(),
+        "event_id": event_id,
+        "text": format!("Reminder: **{}** starts <t:{}:R>.", event_name, start.unix_timestamp()),
+    });
+    store.schedule_typed(
+        guild_id,
+        "event_reminder",
+        event_id,
+        execute_at,
+        &payload.to_string(),
+    )?;
+    Ok(())
+}
+
 async fn deliver_scheduled_action(
     http: &serenity::http::Http,
     store: &Store,
@@ -11315,9 +11399,13 @@ async fn deliver_scheduled_action(
         } else {
             text.to_string()
         };
-        channel_id
-            .send_message(http, serenity::all::CreateMessage::new().content(content))
-            .await?;
+        let mut message = serenity::all::CreateMessage::new().content(content);
+        if action_type == "event_reminder" {
+            // Event names are user-controlled; never let a reminder turn an
+            // event title into an unexpected @everyone or role mention.
+            message = message.allowed_mentions(serenity::all::CreateAllowedMentions::new());
+        }
+        channel_id.send_message(http, message).await?;
         if action_type == "reminder"
             && let Some(repeat) = value.get("repeat").and_then(serde_json::Value::as_str)
             && let Some(remaining) = value.get("remaining").and_then(serde_json::Value::as_u64)
