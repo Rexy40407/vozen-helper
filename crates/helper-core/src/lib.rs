@@ -1649,19 +1649,18 @@ fn validate_interaction_config(config: &serde_json::Value, key: &str) -> Vec<Val
             }
         }
     }
-    if key == "community.suggestions" {
-        if let Some(value) = object.get("voteMode")
-            && !value
-                .as_str()
-                .is_some_and(|mode| mode == "up_down" || mode == "up_only")
-        {
-            issues.push(ValidationIssue {
-                path: "voteMode".into(),
-                code: "invalid_vote_mode".into(),
-                message: "Choose support/against voting or support-only voting.".into(),
-                severity: "error".into(),
-            });
-        }
+    if key == "community.suggestions"
+        && let Some(value) = object.get("voteMode")
+        && !value
+            .as_str()
+            .is_some_and(|mode| mode == "up_down" || mode == "up_only")
+    {
+        issues.push(ValidationIssue {
+            path: "voteMode".into(),
+            code: "invalid_vote_mode".into(),
+            message: "Choose support/against voting or support-only voting.".into(),
+            severity: "error".into(),
+        });
     }
     if key == "community.role_panels" {
         for (field, max) in [("panelTitle", 80_usize), ("panelDescription", 1_000_usize)] {
@@ -2248,11 +2247,12 @@ impl FeatureAdapter for BirthdaysAdapter {
                     "description": "Store only day and month and announce birthdays once per year.",
                     "fields": [
                         {"key":"channel","label":"Announcement channel","kind":"channel"},
-                        {"key":"message","label":"Announcement message","kind":"text","min":1,"max":1000,"help":"Use {user} for the member mention."}
+                        {"key":"message","label":"Announcement message","kind":"text","min":1,"max":1000,"help":"Use {user} for the member mention."},
+                        {"key":"timezone","label":"Announcement timezone","kind":"select","options":[["UTC","UTC"],["UTC-05:00","UTC-05:00"],["UTC+01:00","UTC+01:00"],["UTC+02:00","UTC+02:00"],["UTC+05:30","UTC+05:30"],["UTC+08:00","UTC+08:00"]],"help":"The local day used to decide when a birthday announcement is sent."}
                     ]
                 }]
             }),
-            defaults: serde_json::json!({"channel":"", "message":"Happy birthday, {user}! 🎉"}),
+            defaults: serde_json::json!({"channel":"", "message":"Happy birthday, {user}! 🎉", "timezone":"UTC"}),
             dependencies: vec![
                 "guild_members".into(),
                 "send_messages".into(),
@@ -2301,6 +2301,22 @@ impl FeatureAdapter for BirthdaysAdapter {
                 });
             }
         }
+        if let Some(timezone) = object.get("timezone") {
+            let valid = timezone
+                .as_str()
+                .and_then(parse_utc_offset_minutes)
+                .is_some();
+            if !valid {
+                issues.push(ValidationIssue {
+                    path: "timezone".into(),
+                    code: "invalid_timezone".into(),
+                    message:
+                        "Birthday timezone must be UTC or a fixed offset between -14:00 and +14:00."
+                            .into(),
+                    severity: "error".into(),
+                });
+            }
+        }
         issues
     }
 
@@ -2314,6 +2330,13 @@ impl FeatureAdapter for BirthdaysAdapter {
         }
         if let Some(value) = object.get("message").and_then(serde_json::Value::as_str) {
             projection.push(("community.birthdays.message".into(), value.into()));
+        }
+        if let Some(value) = object
+            .get("timezone")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| parse_utc_offset_minutes(value).is_some())
+        {
+            projection.push(("community.birthdays.timezone".into(), value.into()));
         }
         projection
     }
@@ -8950,7 +8973,7 @@ mod tests {
         );
         assert!(suggestion_preview[0].contains("up_only voting"));
         assert!(suggestion_preview[0].contains("12-hour member cooldown"));
-        assert!(suggestion_preview[0].contains("<@456>"));
+        assert!(suggestion_preview[0].contains("<#456>"));
         assert!(
             suggestions.descriptor().schema["sections"][1]["fields"]
                 .as_array()
@@ -9233,10 +9256,22 @@ mod tests {
         );
         assert!(
             birthdays
+                .runtime_projection(&serde_json::json!({"timezone":"UTC+01:00"}))
+                .contains(&("community.birthdays.timezone".into(), "UTC+01:00".into()))
+        );
+        assert!(
+            birthdays
                 .validate(&serde_json::json!({"message": ""}))
                 .iter()
                 .any(|issue| issue.path == "message")
         );
+        assert!(
+            birthdays
+                .validate(&serde_json::json!({"timezone": "Europe/Lisbon"}))
+                .iter()
+                .any(|issue| issue.code == "invalid_timezone")
+        );
+        assert_eq!(birthdays.descriptor().defaults["timezone"], "UTC");
         assert_eq!(
             feature_maturity("community.birthdays"),
             FeatureMaturity::Operational

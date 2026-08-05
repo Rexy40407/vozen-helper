@@ -1,7 +1,7 @@
 //! Discord gateway boundary. Handlers stay thin and delegate to core/modules.
 
 use anyhow::Result;
-use chrono::{Datelike, Duration as ChronoDuration, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, FixedOffset, TimeZone, Utc};
 use helper_contracts::{AntiSpamObservation, AntiSpamPolicy, Plan};
 use helper_core::{
     AchievementPolicy, AntiRaidPolicy, Config, JoinGateObservation, JoinGatePolicy,
@@ -366,7 +366,7 @@ impl EventHandler for Handler {
                         birthday_now.day(),
                     );
                     if last_birthday_day != Some(birthday_day) {
-                        let _ = deliver_birthday_announcements(&http, &store, birthday_day).await;
+                        let _ = deliver_birthday_announcements(&http, &store, birthday_now).await;
                         last_birthday_day = Some(birthday_day);
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -10945,29 +10945,58 @@ fn parse_scheduled_event_window(
 async fn deliver_birthday_announcements(
     http: &serenity::http::Http,
     store: &Store,
-    date: (i32, u32, u32),
+    now: DateTime<Utc>,
 ) -> Result<()> {
-    let (year, month, day) = date;
-    let birthdays = store.due_birthdays(month, day, year, 500)?;
-    for birthday in birthdays {
-        if !feature_enabled(store, &birthday.guild_id, "community.birthdays", None) {
+    for setting in store.enabled_feature_settings("community.birthdays")? {
+        let config: serde_json::Value =
+            serde_json::from_str(&setting.config_json).unwrap_or_default();
+        let timezone = config
+            .get("timezone")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+            .or_else(|| setting_string(store, &setting.guild_id, "community.birthdays.timezone"))
+            .unwrap_or_else(|| "UTC".to_string());
+        let Some(offset_minutes) = parse_utc_offset_minutes(&timezone) else {
+            warn!(guild_id = %setting.guild_id, timezone, "skipping birthdays with invalid timezone");
             continue;
-        }
-        let Some(channel_id) =
-            setting_string(store, &birthday.guild_id, "community.birthdays.channel_id")
-                .and_then(|value| value.parse::<u64>().ok())
+        };
+        let Some(offset) = FixedOffset::east_opt(offset_minutes.saturating_mul(60)) else {
+            continue;
+        };
+        let local = now.with_timezone(&offset);
+        let (year, month, day) = (local.year(), local.month(), local.day());
+        let birthdays = store.due_birthdays_for_guild(&setting.guild_id, month, day, year, 500)?;
+        let Some(channel_id) = config
+            .get("channel")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+            .or_else(|| setting_string(store, &setting.guild_id, "community.birthdays.channel_id"))
+            .and_then(|value| value.parse::<u64>().ok())
         else {
             continue;
         };
-        let template = setting_string(store, &birthday.guild_id, "community.birthdays.message")
-            .unwrap_or_else(|| "Happy birthday, {user}! 🎉".into());
-        let content = template.replace("{user}", &format!("<@{}>", birthday.user_id));
-        if ChannelId::new(channel_id)
-            .send_message(http, CreateMessage::new().content(content))
-            .await
-            .is_ok()
-        {
-            let _ = store.mark_birthday_announced(&birthday.guild_id, &birthday.user_id, year);
+        let template = config
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+            .or_else(|| setting_string(store, &setting.guild_id, "community.birthdays.message"))
+            .unwrap_or_else(|| "Happy birthday, {user}! 🎉".to_string());
+        for birthday in birthdays {
+            let content = template.replace("{user}", &format!("<@{}>", birthday.user_id));
+            if ChannelId::new(channel_id)
+                .send_message(
+                    http,
+                    CreateMessage::new().content(content).allowed_mentions(
+                        CreateAllowedMentions::new().users([serenity::all::UserId::new(
+                            birthday.user_id.parse().unwrap_or_default(),
+                        )]),
+                    ),
+                )
+                .await
+                .is_ok()
+            {
+                let _ = store.mark_birthday_announced(&birthday.guild_id, &birthday.user_id, year);
+            }
         }
     }
     Ok(())

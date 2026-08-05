@@ -1461,6 +1461,35 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Return birthdays for one guild only. Workers use this scoped query when
+    /// each guild can choose its own announcement timezone.
+    pub fn due_birthdays_for_guild(
+        &self,
+        guild_id: &str,
+        month: u32,
+        day: u32,
+        year: i32,
+        limit: u32,
+    ) -> Result<Vec<BirthdayRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT guild_id,user_id,month,day,last_announced_year FROM birthdays WHERE guild_id=?1 AND month=?2 AND day=?3 AND (last_announced_year IS NULL OR last_announced_year<>?4) LIMIT ?5",
+        )?;
+        let rows = stmt.query_map(
+            params![guild_id, month, day, year, i64::from(limit.min(500))],
+            |row| {
+                Ok(BirthdayRecord {
+                    guild_id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    month: row.get(2)?,
+                    day: row.get(3)?,
+                    last_announced_year: row.get(4)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn mark_birthday_announced(
         &self,
         guild_id: &str,
@@ -6563,6 +6592,19 @@ mod tests {
         let store = Store::open(":memory:").unwrap();
         store.set_birthday("g", "u", 8, 3).unwrap();
         assert_eq!(store.due_birthdays(8, 3, 2026, 10).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .due_birthdays_for_guild("g", 8, 3, 2026, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .due_birthdays_for_guild("other", 8, 3, 2026, 10)
+                .unwrap()
+                .is_empty()
+        );
         assert!(store.mark_birthday_announced("g", "u", 2026).unwrap());
         assert!(store.due_birthdays(8, 3, 2026, 10).unwrap().is_empty());
         assert_eq!(store.due_birthdays(8, 3, 2027, 10).unwrap().len(), 1);
