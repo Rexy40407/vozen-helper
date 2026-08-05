@@ -3595,6 +3595,39 @@ impl FeatureAdapter for NicknameAdapter {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ReminderAdapter;
 
+/// Parse the fixed UTC offsets supported by the reminder scheduler.
+///
+/// The panel deliberately offers a bounded list instead of arbitrary IANA
+/// names: this keeps scheduling deterministic across the API, gateway and
+/// tests without pulling a timezone database into the bot process.  Values
+/// such as `UTC+01`, `UTC+01:30`, `UTC-05:00` and `UTC` are accepted.
+pub fn parse_utc_offset_minutes(raw: &str) -> Option<i32> {
+    let value = raw.trim();
+    if value.eq_ignore_ascii_case("UTC") || value.eq_ignore_ascii_case("GMT") {
+        return Some(0);
+    }
+    let suffix = value
+        .strip_prefix("UTC")
+        .or_else(|| value.strip_prefix("GMT"))?;
+    let (sign, digits) = match suffix.as_bytes().first().copied()? {
+        b'+' => (1_i32, &suffix[1..]),
+        b'-' => (-1_i32, &suffix[1..]),
+        _ => return None,
+    };
+    let (hours, minutes) = if let Some((hours, minutes)) = digits.split_once(':') {
+        (hours.parse::<i32>().ok()?, minutes.parse::<i32>().ok()?)
+    } else {
+        (digits.parse::<i32>().ok()?, 0)
+    };
+    if !(0..=14).contains(&hours) || !(0..=59).contains(&minutes) {
+        return None;
+    }
+    if hours == 14 && minutes != 0 {
+        return None;
+    }
+    Some(sign * (hours * 60 + minutes))
+}
+
 impl ReminderAdapter {
     pub const KEY: &'static str = "utility.reminders";
     pub const SOURCE: &'static str = "reminders_adapter_v1";
@@ -3609,6 +3642,7 @@ impl ReminderAdapter {
                 "fields": [
                     {"key":"maxDelayHours","label":"Maximum delay (hours)","kind":"number","min":1,"max":8760,"help":"The longest time a member can schedule a reminder."},
                     {"key":"maxTextLength","label":"Maximum message length","kind":"number","min":50,"max":500,"help":"Longer text is rejected before a job is created."},
+                    {"key":"timezone","label":"Reminder timezone","kind":"select","options":[["UTC","UTC"],["UTC-05:00","UTC-05:00"],["UTC+01:00","UTC+01:00"],["UTC+02:00","UTC+02:00"],["UTC+05:30","UTC+05:30"],["UTC+08:00","UTC+08:00"]],"help":"Used when a reminder time is written as HH:MM, such as 09:30."},
                     {"key":"notifyUser","label":"Mention the member when it fires","kind":"toggle","help":"Turn off to post a quiet reminder without a mention."},
                     {"key":"allowRecurring","label":"Allow recurring reminders","kind":"toggle","help":"Members can choose a bounded daily or weekly reminder."},
                     {"key":"maxRecurrences","label":"Maximum repeats","kind":"number","min":1,"max":52,"help":"Limits how many times a recurring reminder is re-created."}
@@ -3618,7 +3652,7 @@ impl ReminderAdapter {
     }
 
     fn defaults() -> serde_json::Value {
-        serde_json::json!({"maxDelayHours": 168, "maxTextLength": 500, "notifyUser": true, "allowRecurring": false, "maxRecurrences": 12})
+        serde_json::json!({"maxDelayHours": 168, "maxTextLength": 500, "timezone": "UTC", "notifyUser": true, "allowRecurring": false, "maxRecurrences": 12})
     }
 }
 
@@ -3692,6 +3726,17 @@ impl FeatureAdapter for ReminderAdapter {
                 severity: "error".into(),
             });
         }
+        if let Some(value) = object.get("timezone") {
+            let valid = value.as_str().and_then(parse_utc_offset_minutes).is_some();
+            if !valid {
+                issues.push(ValidationIssue {
+                    path: "timezone".into(),
+                    code: "invalid_timezone".into(),
+                    message: "Use UTC or a fixed offset from UTC between -14:00 and +14:00.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
         if object
             .get("allowRecurring")
             .is_some_and(|value| !value.is_boolean())
@@ -3747,6 +3792,11 @@ impl FeatureAdapter for ReminderAdapter {
                 "utility.reminders.max_text_length".into(),
                 value.to_string(),
             ));
+        }
+        if let Some(value) = object.get("timezone").and_then(serde_json::Value::as_str)
+            && parse_utc_offset_minutes(value).is_some()
+        {
+            projection.push(("utility.reminders.timezone".into(), value.to_owned()));
         }
         if let Some(value) = object
             .get("notifyUser")
@@ -8016,19 +8066,28 @@ mod tests {
         let descriptor = adapter.descriptor();
         assert_eq!(descriptor.source, "reminders_adapter_v1");
         assert_eq!(descriptor.defaults["maxDelayHours"], 168);
+        assert_eq!(descriptor.defaults["timezone"], "UTC");
         assert!(adapter
             .validate(&serde_json::json!({"maxDelayHours": 0, "maxTextLength": 500, "notifyUser": true}))
             .iter()
             .any(|issue| issue.path == "maxDelayHours"));
+        assert!(
+            adapter
+                .validate(&serde_json::json!({"timezone": "Europe/Lisbon"}))
+                .iter()
+                .any(|issue| issue.code == "invalid_timezone")
+        );
         let projection = adapter.runtime_projection(&serde_json::json!({
             "maxDelayHours": 24,
             "maxTextLength": 240,
+            "timezone": "UTC+01:00",
             "notifyUser": false,
             "allowRecurring": true,
             "maxRecurrences": 6
         }));
         assert!(projection.contains(&("utility.reminders.max_delay_hours".into(), "24".into())));
         assert!(projection.contains(&("utility.reminders.max_text_length".into(), "240".into())));
+        assert!(projection.contains(&("utility.reminders.timezone".into(), "UTC+01:00".into())));
         assert!(projection.contains(&("utility.reminders.notify_user".into(), "false".into())));
         assert!(projection.contains(&("utility.reminders.allow_recurring".into(), "true".into())));
         assert!(projection.contains(&("utility.reminders.max_recurrences".into(), "6".into())));
@@ -8036,6 +8095,15 @@ mod tests {
             feature_maturity("utility.reminders"),
             FeatureMaturity::Operational
         );
+    }
+
+    #[test]
+    fn reminder_timezones_are_bounded_fixed_offsets() {
+        assert_eq!(parse_utc_offset_minutes("UTC"), Some(0));
+        assert_eq!(parse_utc_offset_minutes("UTC+05:30"), Some(330));
+        assert_eq!(parse_utc_offset_minutes("GMT-05"), Some(-300));
+        assert_eq!(parse_utc_offset_minutes("UTC+14:30"), None);
+        assert_eq!(parse_utc_offset_minutes("Europe/Lisbon"), None);
     }
 
     #[test]

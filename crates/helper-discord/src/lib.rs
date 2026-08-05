@@ -1,14 +1,14 @@
 //! Discord gateway boundary. Handlers stay thin and delegate to core/modules.
 
 use anyhow::Result;
-use chrono::{Datelike, Utc};
+use chrono::{Datelike, Duration as ChronoDuration, TimeZone, Utc};
 use helper_contracts::{AntiSpamObservation, AntiSpamPolicy, Plan};
 use helper_core::{
     AntiRaidPolicy, Config, JoinGateObservation, JoinGatePolicy, LeaderboardEntry,
     StarboardObservation, anti_spam_policy_from_json, evaluate_anti_raid, evaluate_anti_spam,
     evaluate_join_gate, evaluate_leaderboard, evaluate_scam_with_roles, evaluate_starboard,
-    feature_is_configurable, feature_maturity, leaderboard_policy_from_json, quota_limit,
-    scam_policy_from_json, starboard_policy_from_json,
+    feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
+    parse_utc_offset_minutes, quota_limit, scam_policy_from_json, starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -781,7 +781,7 @@ impl EventHandler for Handler {
                     CreateCommandOption::new(
                         serenity::all::CommandOptionType::String,
                         "time",
-                        "Examples: 10m, 2h, 1d",
+                        "Examples: 10m, 2h, 1d or 09:30",
                     )
                     .required(true),
                 )
@@ -5935,6 +5935,20 @@ impl Handler {
                 let time = option_string(command, "time").unwrap_or_default();
                 let text = option_string(command, "text").unwrap_or_default();
                 let repeat = option_string(command, "repeat");
+                let timezone = setting_string(
+                    &self.store,
+                    &guild_text,
+                    "utility.reminders.timezone",
+                )
+                .unwrap_or_else(|| "UTC".to_string());
+                if parse_utc_offset_minutes(&timezone).is_none() {
+                    return respond(
+                        ctx,
+                        command,
+                        "The server reminder timezone is invalid; ask an administrator to choose a supported UTC offset.",
+                    )
+                    .await;
+                }
                 if repeat.is_some()
                     && !setting_bool(&self.store, &guild_text, "utility.reminders.allow_recurring", false)
                 {
@@ -5948,8 +5962,14 @@ impl Handler {
                 if repeat.is_some_and(|value| value != "daily" && value != "weekly") {
                     return respond(ctx, command, "Choose daily or weekly for repeat.").await;
                 }
-                let Some(delay) = parse_duration(time) else {
-                    return respond(ctx, command, "Duração inválida. Usa formatos como 10m, 2h ou 1d.").await;
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let Some(delay) = parse_reminder_delay(time, &timezone, now_ms) else {
+                    return respond(
+                        ctx,
+                        command,
+                        "Invalid reminder time. Use a duration such as 10m, 2h or 1d, or a local 24-hour time such as 09:30.",
+                    )
+                    .await;
                 };
                 let max_delay_hours = setting_u64(
                     &self.store,
@@ -5995,12 +6015,14 @@ impl Handler {
                     "channel_id": command.channel_id.to_string(),
                     "text": text,
                     "repeat": repeat,
+                    "timezone": timezone,
+                    "local_time": parse_clock_time(time).map(|(hour, minute)| format!("{hour:02}:{minute:02}")),
                     "remaining": repeat.as_ref().map(|_| max_recurrences),
                 });
                 let id = self.store.schedule(
                     &guild_text,
                     &command.user.id.to_string(),
-                    chrono::Utc::now().timestamp_millis() + delay,
+                    now_ms + delay,
                     &payload.to_string(),
                 )?;
                 if repeat.is_some() {
@@ -9909,6 +9931,36 @@ fn parse_duration(raw: &str) -> Option<i64> {
     (amount > 0 && amount <= 365 * 86_400_000).then_some(amount)
 }
 
+fn parse_clock_time(raw: &str) -> Option<(u32, u32)> {
+    let (hour, minute) = raw.trim().split_once(':')?;
+    if hour.len() != 2 || minute.len() != 2 {
+        return None;
+    }
+    let hour = hour.parse::<u32>().ok()?;
+    let minute = minute.parse::<u32>().ok()?;
+    (hour < 24 && minute < 60).then_some((hour, minute))
+}
+
+/// Return the delay until a reminder expression. Durations retain their
+/// existing semantics; `HH:MM` is interpreted in the server's configured
+/// fixed UTC offset and resolves to the next occurrence of that local time.
+fn parse_reminder_delay(raw: &str, timezone: &str, now_ms: i64) -> Option<i64> {
+    if let Some(delay) = parse_duration(raw) {
+        return Some(delay);
+    }
+    let (hour, minute) = parse_clock_time(raw)?;
+    let offset = parse_utc_offset_minutes(timezone)?;
+    let now = Utc.timestamp_millis_opt(now_ms).single()?;
+    let local_now = (now + ChronoDuration::minutes(i64::from(offset))).naive_utc();
+    let target = local_now.date().and_hms_opt(hour, minute, 0)?;
+    let mut delay = target - local_now;
+    if delay <= ChronoDuration::zero() {
+        delay += ChronoDuration::days(1);
+    }
+    let milliseconds = delay.num_milliseconds();
+    (milliseconds > 0).then_some(milliseconds)
+}
+
 fn format_duration(milliseconds: i64) -> String {
     let units = [
         (86_400_000, "d"),
@@ -10683,9 +10735,11 @@ mod tests {
         adapter::{DiscordAdapter, Effect, FakeDiscordAdapter},
         command_feature_key, english_bot_text, feature_enabled, feature_title,
         format_nft_collection, is_destructive_audit_action, join_burst_armed, parse_duration,
-        parse_scheduled_event_window, reminder_repeat_interval_ms, scheduled_action_feature,
-        shadow_mode_enabled, should_cleanup_temp_channel, template_message,
+        parse_reminder_delay, parse_scheduled_event_window, reminder_repeat_interval_ms,
+        scheduled_action_feature, shadow_mode_enabled, should_cleanup_temp_channel,
+        template_message,
     };
+    use chrono::TimeZone;
     use helper_store::Store;
     use std::{
         collections::{HashMap, VecDeque},
@@ -11157,6 +11211,21 @@ mod tests {
         assert_eq!(reminder_repeat_interval_ms("daily"), Some(86_400_000));
         assert_eq!(reminder_repeat_interval_ms("weekly"), Some(604_800_000));
         assert_eq!(reminder_repeat_interval_ms("hourly"), None);
+    }
+
+    #[test]
+    fn reminder_clock_times_use_the_configured_utc_offset() {
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 8, 5, 12, 0, 0)
+            .single()
+            .expect("valid fixture")
+            .timestamp_millis();
+        let utc_delay = parse_reminder_delay("09:30", "UTC", now).expect("UTC time");
+        let plus_two_delay = parse_reminder_delay("09:30", "UTC+02:00", now).expect("offset time");
+        assert_eq!(utc_delay, 21 * 60 * 60 * 1_000 + 30 * 60 * 1_000);
+        assert_eq!(plus_two_delay, 19 * 60 * 60 * 1_000 + 30 * 60 * 1_000);
+        assert!(parse_reminder_delay("25:00", "UTC", now).is_none());
+        assert!(parse_reminder_delay("09:30", "Europe/Lisbon", now).is_none());
     }
 
     #[test]
