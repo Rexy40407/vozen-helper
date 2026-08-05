@@ -9049,6 +9049,23 @@ fn english_bot_text(input: &str) -> String {
         // still present in older handlers; the mojibake variants below keep
         // responses from legacy persisted/configured paths readable too.
         (
+            "Setup guiado: escolhe pelo menos um m\u{00f3}dulo (Security, Support, Events, Community, Automate ou Insights) e executa novamente. Depois confirma as permiss\u{00f5}es com `/permissions`.",
+            "Guided setup: choose at least one module (Security, Support, Events, Community, Automate or Insights), then run it again. Confirm permissions with `/permissions`.",
+        ),
+        (
+            "e depois configura cada m\u{00f3}dulo.",
+            "and then configure each module.",
+        ),
+        ("Isolamento por guild ativo", "Guild isolation enabled"),
+        (
+            "Privacy export/delete dispon\u{00ed}vel",
+            "Privacy export/delete available",
+        ),
+        (
+            "(o endpoint permanece desligado at\u{00e9} ao rollout aprovado).",
+            "(the endpoint remains disabled until the approved rollout).",
+        ),
+        (
             "Este comando só pode ser usado num servidor.",
             "This command can only be used in a server.",
         ),
@@ -11549,6 +11566,24 @@ mod tests {
         ] {
             assert_eq!(english_bot_text(source), expected);
         }
+        assert_eq!(
+            english_bot_text(
+                "Setup guiado: escolhe pelo menos um m\u{00f3}dulo (Security, Support, Events, Community, Automate ou Insights) e executa novamente. Depois confirma as permiss\u{00f5}es com `/permissions`."
+            ),
+            "Guided setup: choose at least one module (Security, Support, Events, Community, Automate or Insights), then run it again. Confirm permissions with `/permissions`."
+        );
+        assert_eq!(
+            english_bot_text(
+                "Setup guardado para: **Security**. Pr\u{00f3}ximo passo: `/permissions` e depois configura cada m\u{00f3}dulo."
+            ),
+            "Setup saved for: **Security**. Next step: `/permissions` and then configure each module."
+        );
+        assert_eq!(
+            english_bot_text(
+                "Setup: **conclu\u{00ed}do** · M\u{00f3}dulos: **Security** · Isolamento por guild ativo · Privacy export/delete dispon\u{00ed}vel"
+            ),
+            "Setup: **complete** · Modules: **Security** · Guild isolation enabled · Privacy export/delete available"
+        );
     }
 
     #[test]
