@@ -2679,6 +2679,19 @@ impl EventHandler for Handler {
         if !armed {
             return;
         }
+        let configured_log_channel =
+            setting_u64_optional(&self.store, &guild_text, "management.audit.log_channel")
+                .map(ChannelId::new);
+        let fallback_log_channel = if configured_log_channel.is_none() {
+            guild_id
+                .to_partial_guild(&ctx.http)
+                .await
+                .ok()
+                .and_then(|guild| guild.system_channel_id)
+        } else {
+            None
+        };
+        let audit_alert_channel = configured_log_channel.or(fallback_log_channel);
         let shadow_mode = shadow_mode_enabled(
             self.store
                 .get_setting(&guild_text, "security.shadow_mode")
@@ -2697,9 +2710,7 @@ impl EventHandler for Handler {
                 ),
                 None,
             );
-            if let Ok(guild) = guild_id.to_partial_guild(&ctx.http).await
-                && let Some(channel_id) = guild.system_channel_id
-            {
+            if let Some(channel_id) = audit_alert_channel {
                 let _ = channel_id
                     .say(
                         &ctx.http,
@@ -2726,9 +2737,7 @@ impl EventHandler for Handler {
             ),
             None,
         );
-        if let Ok(guild) = guild_id.to_partial_guild(&ctx.http).await
-            && let Some(channel_id) = guild.system_channel_id
-        {
+        if let Some(channel_id) = audit_alert_channel {
             let _ = channel_id
                 .say(
                     &ctx.http,
