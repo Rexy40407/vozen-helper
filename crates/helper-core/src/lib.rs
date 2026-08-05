@@ -4348,7 +4348,7 @@ impl FeatureAdapter for ReminderAdapter {
                 .to_owned(),
         };
         let decision = evaluate_reminder(&policy, &observation);
-        if decision.allowed {
+        let mut effects = if decision.allowed {
             let mention = if policy.notify_user {
                 " with a member mention"
             } else {
@@ -4368,7 +4368,13 @@ impl FeatureAdapter for ReminderAdapter {
                 "Reminder rejected ({}): {}",
                 decision.reason_code, decision.explanation
             )]
-        }
+        };
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
