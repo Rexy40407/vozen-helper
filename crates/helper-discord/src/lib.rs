@@ -9,9 +9,9 @@ use helper_core::{
     RolePanelObservation, StarboardObservation, WorkflowObservation, WorkflowPolicy,
     anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
     evaluate_custom_command, evaluate_embed, evaluate_join_gate, evaluate_leaderboard,
-    evaluate_moderation, evaluate_reminder, evaluate_role_panel, evaluate_scam_with_roles,
-    evaluate_starboard, evaluate_temp_channel, evaluate_welcome_channel, evaluate_workflow,
-    feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
+    evaluate_moderation, evaluate_poll, evaluate_reminder, evaluate_role_panel,
+    evaluate_scam_with_roles, evaluate_starboard, evaluate_temp_channel, evaluate_welcome_channel,
+    evaluate_workflow, feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
     parse_utc_offset_minutes, quota_limit, render_member_message, scam_policy_from_json,
     starboard_policy_from_json,
 };
@@ -7304,16 +7304,33 @@ impl Handler {
                 }
                 let poll_duration = option_string(command, "duration").unwrap_or_default();
                 let default_hours = setting_u64(&self.store, &guild_id.to_string(), "management.polls.default_duration_hours", 24).clamp(1, 168);
-                let delay = if poll_duration.trim().is_empty() {
-                    (default_hours as i64) * 3_600_000
+                let configured_channel = setting_string(&self.store, &guild_id.to_string(), "management.polls.channel_id")
+                    .filter(|value| !value.trim().is_empty());
+                let poll_config = serde_json::json!({
+                    "defaultDurationHours": default_hours,
+                    "channel": configured_channel.clone().unwrap_or_default(),
+                });
+                let duration_override_ms = if poll_duration.trim().is_empty() {
+                    None
                 } else {
-                    parse_duration(poll_duration).unwrap_or((default_hours as i64) * 3_600_000)
+                    parse_duration(poll_duration)
                 };
+                let decision = evaluate_poll(
+                    &poll_config,
+                    question,
+                    &options,
+                    duration_override_ms,
+                    &command.channel_id.to_string(),
+                );
+                if !decision.allowed {
+                    return respond(ctx, command, &decision.explanation).await;
+                }
+                let question = decision.question;
+                let options = decision.options;
+                let delay = decision.duration_ms;
                 let end_at = chrono::Utc::now().timestamp_millis() + delay;
-                let poll_channel = setting_string(&self.store, &guild_id.to_string(), "management.polls.channel_id")
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| command.channel_id.to_string());
-                let id = self.store.create_poll(&guild_id.to_string(), &poll_channel, question, &options, end_at)?;
+                let poll_channel = decision.channel_id;
+                let id = self.store.create_poll(&guild_id.to_string(), &poll_channel, &question, &options, end_at)?;
                 let labels = options.iter().enumerate().map(|(index, value)| CreateButton::new(format!("poll:{id}:{index}")).label(format!("{}: {}", index + 1, truncate(value, 70))).style(ButtonStyle::Secondary)).collect::<Vec<_>>();
                 let message_channel = poll_channel.parse::<u64>().map(ChannelId::new).unwrap_or(command.channel_id);
                 let message = message_channel.send_message(&ctx.http, serenity::all::CreateMessage::new()

@@ -8664,6 +8664,14 @@ struct FeatureTestRequest {
     reminder_repeat: Option<String>,
     #[serde(default, rename = "reminderTimezone")]
     reminder_timezone: Option<String>,
+    /// Bounded poll fixture values used by the same publication evaluator as
+    /// the Discord `/poll` command.
+    #[serde(default)]
+    question: Option<String>,
+    #[serde(default)]
+    options: Vec<String>,
+    #[serde(default, rename = "durationMs")]
+    duration_ms: Option<i64>,
 }
 
 fn generic_feature_effect(key: &str) -> Vec<String> {
@@ -8841,6 +8849,9 @@ async fn test_feature(
         "reminderText": test.reminder_text.clone().or_else(|| test.content.clone()),
         "repeat": test.reminder_repeat.clone(),
         "timezone": test.reminder_timezone.clone(),
+        "question": test.question.clone(),
+        "options": test.options.clone(),
+        "durationMs": test.duration_ms,
     });
     let adapter_effects = if maturity == FeatureMaturity::Blocked {
         // A blocked provider must never claim that a JSON draft would be

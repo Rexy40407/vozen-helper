@@ -1433,6 +1433,121 @@ pub struct RolePanelDecision {
     pub explanation: String,
 }
 
+/// The bounded poll publication decision shared by the dashboard preview and
+/// the Discord `/poll` command.  Keeping the duration, destination and
+/// choice limits here prevents a valid-looking panel setting from drifting
+/// away from what the command actually publishes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PollDecision {
+    pub allowed: bool,
+    pub question: String,
+    pub options: Vec<String>,
+    pub channel_id: String,
+    pub duration_ms: i64,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+pub fn evaluate_poll(
+    config: &serde_json::Value,
+    question: &str,
+    options: &[String],
+    duration_override_ms: Option<i64>,
+    command_channel_id: &str,
+) -> PollDecision {
+    let object = config.as_object();
+    let question = question.trim();
+    if question.is_empty() {
+        return PollDecision {
+            allowed: false,
+            question: String::new(),
+            options: Vec::new(),
+            channel_id: String::new(),
+            duration_ms: 0,
+            reason_code: "question_required",
+            explanation: "A poll needs a question.".into(),
+        };
+    }
+    if question.chars().count() > 256 {
+        return PollDecision {
+            allowed: false,
+            question: question.chars().take(256).collect(),
+            options: Vec::new(),
+            channel_id: String::new(),
+            duration_ms: 0,
+            reason_code: "question_too_long",
+            explanation: "The poll question must be 256 characters or fewer.".into(),
+        };
+    }
+    let options = options
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if options.len() < 2 {
+        return PollDecision {
+            allowed: false,
+            question: question.into(),
+            options,
+            channel_id: String::new(),
+            duration_ms: 0,
+            reason_code: "options_required",
+            explanation: "A poll needs at least two non-empty options.".into(),
+        };
+    }
+    if options.len() > 5 {
+        return PollDecision {
+            allowed: false,
+            question: question.into(),
+            options,
+            channel_id: String::new(),
+            duration_ms: 0,
+            reason_code: "too_many_options",
+            explanation: "A poll can have at most five options.".into(),
+        };
+    }
+    if let Some(value) = options
+        .iter()
+        .find(|value| value.chars().count() > 70)
+        .cloned()
+    {
+        return PollDecision {
+            allowed: false,
+            question: question.into(),
+            options,
+            channel_id: String::new(),
+            duration_ms: 0,
+            reason_code: "option_too_long",
+            explanation: format!("Poll option `{value}` must be 70 characters or fewer."),
+        };
+    }
+    let channel_id = object
+        .and_then(|values| values.get("channel"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| value.parse::<u64>().is_ok())
+        .unwrap_or(command_channel_id)
+        .to_owned();
+    let default_hours = object
+        .and_then(|values| values.get("defaultDurationHours"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(24)
+        .clamp(1, 168);
+    let duration_ms = duration_override_ms
+        .filter(|value| (60_000..=168 * 3_600_000).contains(value))
+        .unwrap_or(default_hours * 3_600_000);
+    PollDecision {
+        allowed: true,
+        question: question.into(),
+        options,
+        channel_id,
+        duration_ms,
+        reason_code: "poll_ready",
+        explanation: "The poll is within Discord's bounded question, option and duration limits."
+            .into(),
+    }
+}
+
 /// Evaluate a single role-panel click without touching Discord.  Keeping
 /// this transition in `helper-core` means the API preview and the Serenity
 /// interaction handler cannot drift on unique/multiple or toggle-off rules.
@@ -1853,6 +1968,42 @@ impl FeatureAdapter for CommunityInteractionAdapter {
     }
 
     fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        if self.key == "management.polls" {
+            let question = fixture_string(fixture, "question", "question", "Preview poll");
+            let options = fixture_strings(fixture, "options", "options");
+            let options = if options.is_empty() {
+                vec!["Option one".into(), "Option two".into()]
+            } else {
+                options
+            };
+            let duration_override_ms = fixture
+                .get("durationMs")
+                .or_else(|| fixture.get("duration_ms"))
+                .and_then(serde_json::Value::as_i64);
+            let channel_id = fixture_string(fixture, "channelId", "channel_id", "preview-channel");
+            let decision =
+                evaluate_poll(config, question, &options, duration_override_ms, channel_id);
+            let mut effects = if !decision.allowed {
+                vec![format!(
+                    "Poll rejected ({}): {}",
+                    decision.reason_code, decision.explanation
+                )]
+            } else {
+                vec![format!(
+                    "Publish poll `{}` with {} options in <#{}> for {} hour(s).",
+                    decision.question,
+                    decision.options.len(),
+                    decision.channel_id,
+                    decision.duration_ms / 3_600_000
+                )]
+            };
+            effects.extend(
+                self.runtime_projection(config)
+                    .into_iter()
+                    .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+            );
+            return effects;
+        }
         if self.key != "community.role_panels" {
             let descriptor = self.descriptor();
             return simulate_feature_effect(
@@ -9802,6 +9953,26 @@ mod tests {
                 }))
                 .contains(&("community.suggestions.vote_mode".into(), "up_only".into()))
         );
+
+        let polls = feature_adapter("management.polls").expect("polls adapter");
+        let poll_preview = polls.simulate(
+            &serde_json::json!({"defaultDurationHours": 12, "channel": "789"}),
+            &serde_json::json!({
+                "question": "Where should we meet?",
+                "options": ["Lobby", "Garden"],
+                "durationMs": 3_600_000
+            }),
+        );
+        assert!(poll_preview[0].contains("Publish poll"));
+        assert!(poll_preview[0].contains("1 hour"));
+        let rejected = polls.simulate(
+            &serde_json::json!({"defaultDurationHours": 12}),
+            &serde_json::json!({
+                "question": "Only one choice",
+                "options": ["Lobby"]
+            }),
+        );
+        assert!(rejected[0].contains("options_required"));
     }
 
     #[test]
