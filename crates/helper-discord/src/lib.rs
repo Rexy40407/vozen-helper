@@ -2374,7 +2374,6 @@ impl EventHandler for Handler {
                 &guild_text,
                 "support.welcome_channel.message",
             )
-            .map(|message| template_message(&self.store, &guild_text, "support.welcome_channel.template_id", "welcomeChannel", message))
             .unwrap_or_else(|| {
                 "Welcome {member}! Start with the rules, introduce yourself and check the server channels.".to_string()
             })
@@ -2416,9 +2415,34 @@ impl EventHandler for Handler {
             if !buttons.is_empty() {
                 message = message.components(vec![CreateActionRow::Buttons(buttons)]);
             }
-            let _ = ChannelId::new(channel_id)
+            let delivery = ChannelId::new(channel_id)
                 .send_message(&ctx.http, message)
                 .await;
+            let (kind, detail) = match delivery {
+                Ok(sent) => (
+                    "welcome_channel_delivery",
+                    serde_json::json!({
+                        "channelId": channel_id,
+                        "messageId": sent.id.to_string(),
+                        "outcome": "sent"
+                    }),
+                ),
+                Err(_) => (
+                    "welcome_channel_delivery_failed",
+                    serde_json::json!({
+                        "channelId": channel_id,
+                        "outcome": "failed"
+                    }),
+                ),
+            };
+            let _ = self.store.record_activity(
+                &guild_text,
+                kind,
+                &new_member.user.id.to_string(),
+                Some(&new_member.user.name),
+                None,
+                &detail.to_string(),
+            );
         }
     }
 
