@@ -2299,15 +2299,6 @@ impl EventHandler for Handler {
                 .unwrap_or_else(|| "👋 Welcome to the server, {member}!".to_string())
                 .replace("{member}", &member_mention)
                 .replace("{server}", "this server");
-            let message = template_message(
-                &self.store,
-                &guild_text,
-                "support.welcome.template_id",
-                "welcome",
-                message,
-            )
-            .replace("{member}", &member_mention)
-            .replace("{server}", "this server");
             let fallback_channel = guild_id
                 .to_partial_guild(&ctx.http)
                 .await
@@ -2334,15 +2325,6 @@ impl EventHandler for Handler {
                     .unwrap_or_else(|| "Hello {member}, welcome to the server!".to_string())
                     .replace("{member}", &member_mention)
                     .replace("{server}", "this server");
-                let dm = template_message(
-                    &self.store,
-                    &guild_text,
-                    "support.welcome.template_id",
-                    "dm",
-                    dm,
-                )
-                .replace("{member}", &member_mention)
-                .replace("{server}", "this server");
                 let _ = new_member
                     .user
                     .direct_message(&ctx.http, serenity::all::CreateMessage::new().content(dm))
@@ -2376,9 +2358,7 @@ impl EventHandler for Handler {
             )
             .unwrap_or_else(|| {
                 "Welcome {member}! Start with the rules, introduce yourself and check the server channels.".to_string()
-            })
-            .replace("{member}", &member_mention)
-            .replace("{server}", "this server");
+            });
             let guide = template_message(
                 &self.store,
                 &guild_text,
@@ -2486,15 +2466,6 @@ impl EventHandler for Handler {
                     .unwrap_or_else(|| "Goodbye {member}. We hope to see you again!".to_string())
                     .replace("{member}", &user.name)
                     .replace("{server}", "this server");
-            let farewell = template_message(
-                &self.store,
-                &guild_text,
-                "support.welcome.template_id",
-                "farewell",
-                farewell,
-            )
-            .replace("{member}", &user.name)
-            .replace("{server}", "this server");
             let channel = setting_u64_optional(
                 &self.store,
                 &guild_text,
