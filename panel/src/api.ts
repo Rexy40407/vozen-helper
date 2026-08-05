@@ -86,6 +86,20 @@ export type RssSubscription = {
   failureCount: number;
   lastError?: string | null;
 };
+export type RssSubscriptionHealth = {
+  provider: 'rss';
+  subscriptionId: number;
+  status: 'ready' | 'degraded' | 'dependency_down';
+  checkedAt: number;
+  failureCount: number;
+  lastError?: string | null;
+  message?: string;
+  feed?: {
+    title: string;
+    latestItemId?: string | null;
+    latestTitle?: string | null;
+  };
+};
 export type TwitchSubscription = {
   id: number;
   sourceLogin: string;
@@ -582,6 +596,37 @@ export const api = {
     }),
   deleteRssSubscription: (id: number) =>
     request<{ deleted: boolean; id: number }>(`/api/config/rss/${id}`, { method: 'DELETE' }),
+  rssHealth: (id: number) =>
+    request<RssSubscriptionHealth>(`/api/config/rss/${id}/health`),
+  testRssDelivery: (
+    id: number,
+    payload: {
+      feedUrl: string;
+      targetChannelId: string;
+      messageTemplate: string;
+      mention: string;
+      intervalSeconds: number;
+      enabled: boolean;
+    },
+  ) =>
+    request<{
+      provider: 'rss';
+      subscriptionId: number;
+      delivered: boolean;
+      testedAt: number;
+      itemId?: string | null;
+    }>(`/api/config/rss/${id}/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        feed_url: payload.feedUrl,
+        target_channel_id: payload.targetChannelId,
+        message_template: payload.messageTemplate,
+        mention: payload.mention,
+        interval_seconds: payload.intervalSeconds,
+        enabled: payload.enabled,
+      }),
+    }),
   twitchSubscriptions: () =>
     request<{ guildId: string; subscriptions: TwitchSubscription[] }>('/api/config/twitch'),
   twitchChannel: (login: string) =>

@@ -81,6 +81,25 @@ pub struct RssFeed {
     pub latest: Option<RssItem>,
 }
 
+/// Render an RSS/Atom alert with the same bounded substitutions used by the
+/// Discord worker and the API test-delivery endpoint. Provider fields are
+/// treated as plain text and the result is always kept within Discord's
+/// 2,000-character message limit.
+pub fn format_rss_message(template: &str, mention: &str, item: &RssItem) -> String {
+    let rendered = template
+        .replace("{feed}", &item.feed_title)
+        .replace("{title}", &item.title)
+        .replace("{url}", &item.url)
+        .replace("{published_at}", &item.published_at)
+        .replace("{description}", &item.description);
+    let rendered = if mention.is_empty() {
+        rendered
+    } else {
+        format!("{mention} {rendered}")
+    };
+    rendered.chars().take(2_000).collect()
+}
+
 /// Client for the public Bluesky AppView API. Alerts only read public posts;
 /// no account token is required. The runtime polls the author's feed with a
 /// bounded page size and stores the last URI for idempotent delivery.
@@ -2827,6 +2846,26 @@ mod tests {
         assert!(private_or_local("192.168.1.1".parse().unwrap()));
         assert!(private_or_local("::1".parse().unwrap()));
         assert!(!private_or_local("1.1.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn rss_message_renderer_matches_bounded_discord_contract() {
+        let item = RssItem {
+            id: "post-1".into(),
+            title: "A new post".into(),
+            description: "Details".into(),
+            url: "https://example.com/post-1".into(),
+            published_at: "2026-08-02T12:00:00Z".into(),
+            feed_title: "Vozen News".into(),
+        };
+        let rendered = format_rss_message("{feed}: {title} — {url}", "", &item);
+        assert_eq!(
+            rendered,
+            "Vozen News: A new post — https://example.com/post-1"
+        );
+        let bounded = format_rss_message(&"x".repeat(3_000), "@everyone", &item);
+        assert_eq!(bounded.chars().count(), 2_000);
+        assert!(bounded.starts_with("@everyone "));
     }
 }
 

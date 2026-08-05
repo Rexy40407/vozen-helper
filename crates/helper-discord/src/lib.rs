@@ -17,8 +17,8 @@ use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
     EthereumRpcClient, GasClient, GasQuote, InstagramClient, InstagramMedia, KickClient,
     KickStream, OpenSeaClient, OpenSeaCollectionInfo, OpenSeaCollectionStats, OpenSeaSale,
-    RedditClient, RedditPost, RssClient, RssItem, TikTokClient, TikTokVideo, TwitchClient, XClient,
-    XPost, YouTubeClient, YouTubeVideo,
+    RedditClient, RedditPost, RssClient, TikTokClient, TikTokVideo, TwitchClient, XClient, XPost,
+    YouTubeClient, YouTubeVideo, format_rss_message,
 };
 use helper_store::{
     BlueskySubscriptionRecord, InstagramSubscriptionRecord, KickSubscriptionRecord,
@@ -3845,21 +3845,6 @@ async fn process_rss_subscription(
     ChannelId::new(channel_id).say(http, content).await?;
     store.update_rss_poll(subscription.id, Some(&item.id), next(), 0, None)?;
     Ok(())
-}
-
-fn format_rss_message(template: &str, mention: &str, item: &RssItem) -> String {
-    let rendered = template
-        .replace("{feed}", &item.feed_title)
-        .replace("{title}", &item.title)
-        .replace("{url}", &item.url)
-        .replace("{published_at}", &item.published_at)
-        .replace("{description}", &item.description);
-    let rendered = if mention.is_empty() {
-        rendered
-    } else {
-        format!("{mention} {rendered}")
-    };
-    rendered.chars().take(2_000).collect()
 }
 
 async fn run_bluesky_worker(http: Arc<serenity::http::Http>, store: Store, bluesky: BlueskyClient) {

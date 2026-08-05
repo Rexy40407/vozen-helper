@@ -2409,12 +2409,27 @@ function App() {
           setMessage('A confirmação do feed aparece quando o painel estiver ligado à API.');
           return;
         }
-        const result = await api.rssPreview(feedUrl);
-        const latest = result.feed.latest;
+        const subscription = rssSubscriptions[0];
+        if (!subscription) {
+          setMessage('Guarda primeiro a subscrição para poderes enviar um teste para o Discord.');
+          return;
+        }
+        const result = await api.testRssDelivery(subscription.id, {
+          feedUrl,
+          targetChannelId: String(detailConfig.targetChannelId ?? subscription.targetChannelId),
+          messageTemplate: String(
+            detailConfig.messageTemplate ?? subscription.messageTemplate,
+          ),
+          mention: String(detailConfig.mention ?? subscription.mention),
+          intervalSeconds: Number(
+            detailConfig.intervalSeconds ?? subscription.intervalSeconds,
+          ),
+          enabled: Boolean(detailEnabled),
+        });
         setMessage(
-          latest
-            ? `Feed confirmado: ${result.feed.title || 'sem título'} · Última publicação: ${latest.title || 'sem título'}.`
-            : `Feed confirmado: ${result.feed.title || 'sem título'}.`,
+          result.delivered
+            ? 'Mensagem de teste enviada para o canal Discord configurado. O cursor do feed não foi alterado.'
+            : 'O teste não foi entregue.',
         );
         return;
       }
@@ -3887,7 +3902,9 @@ function FeatureDetail({
             </p>
           </div>
           <button className="secondary full" onClick={onTest}>
-            Simular configuração
+            {feature?.key === 'social.rss' || feature?.key === 'social.podcasts'
+              ? 'Enviar teste para o Discord'
+              : 'Simular configuração'}
           </button>
           {!localPreviewMode && feature?.health?.status && feature.health.status !== 'ready' && (
             <button className="secondary full" onClick={onRepair} disabled={saving}>

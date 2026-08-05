@@ -24,7 +24,7 @@ use helper_core::{
 use helper_modules::{
     BlueskyClient, CoinGeckoClient, EntitlementClient, EthereumRpcClient, GasClient,
     InstagramClient, KickClient, OpenSeaClient, RedditClient, RssClient, SiweVerifier,
-    StripeConnectClient, TikTokClient, TwitchClient, XClient, YouTubeClient,
+    StripeConnectClient, TikTokClient, TwitchClient, XClient, YouTubeClient, format_rss_message,
 };
 use helper_store::{
     BlueskySubscriptionRecord, BlueskySubscriptionWrite, InstagramSubscriptionRecord,
@@ -116,6 +116,8 @@ pub fn router(state: ApiState) -> Router {
             "/api/config/rss/{id}",
             put(update_rss_subscription).delete(delete_rss_subscription),
         )
+        .route("/api/config/rss/{id}/health", get(rss_subscription_health))
+        .route("/api/config/rss/{id}/test", post(test_rss_delivery))
         .route(
             "/api/config/bluesky",
             get(bluesky_subscriptions).post(create_bluesky_subscription),
@@ -1273,6 +1275,179 @@ async fn rss_preview(
         return Err(client_error(StatusCode::BAD_REQUEST, "rss_feed_empty"));
     };
     Ok(Json(serde_json::json!({"provider": "rss", "feed": feed})))
+}
+
+fn rss_provider_error_code(error: &str) -> &'static str {
+    if error.starts_with("invalid_rss_url") || error.starts_with("rss_private_host") {
+        "invalid_rss_url"
+    } else if error.starts_with("rss_http_error:404") {
+        "rss_feed_not_found"
+    } else if error.starts_with("rss_http_error:429") {
+        "rss_rate_limited"
+    } else {
+        "rss_provider_unavailable"
+    }
+}
+
+/// Read-only health check for one persisted feed. It intentionally returns a
+/// degraded result as JSON when the external feed is unavailable so the
+/// panel can distinguish a provider incident from an authentication failure.
+async fn rss_subscription_health(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let record = state
+        .store
+        .rss_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .find(|record| record.id == id)
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "rss_subscription_not_found"))?;
+    let checked_at = Utc::now().timestamp_millis();
+    let Some(client) = state.rss.as_ref() else {
+        return Ok(Json(serde_json::json!({
+            "provider": "rss",
+            "subscriptionId": id,
+            "status": "dependency_down",
+            "checkedAt": checked_at,
+            "failureCount": record.failure_count,
+            "lastError": record.last_error,
+            "message": "RSS provider is not configured on this server."
+        })));
+    };
+    match client.fetch(&record.feed_url).await {
+        Ok(Some(feed)) => Ok(Json(serde_json::json!({
+            "provider": "rss",
+            "subscriptionId": id,
+            "status": "ready",
+            "checkedAt": checked_at,
+            "failureCount": record.failure_count,
+            "lastError": record.last_error,
+            "feed": {
+                "title": feed.title,
+                "latestItemId": feed.latest.as_ref().map(|item| item.id.clone()),
+                "latestTitle": feed.latest.as_ref().map(|item| item.title.clone())
+            }
+        }))),
+        Ok(None) => Ok(Json(serde_json::json!({
+            "provider": "rss",
+            "subscriptionId": id,
+            "status": "degraded",
+            "checkedAt": checked_at,
+            "failureCount": record.failure_count,
+            "lastError": "rss_feed_empty",
+            "message": "The feed responded but contains no readable item."
+        }))),
+        Err(error) => Ok(Json(serde_json::json!({
+            "provider": "rss",
+            "subscriptionId": id,
+            "status": "degraded",
+            "checkedAt": checked_at,
+            "failureCount": record.failure_count,
+            "lastError": rss_provider_error_code(&error.to_string()),
+            "message": "The feed could not be checked right now."
+        }))),
+    }
+}
+
+/// Send a real, bounded Discord message using the configured bot. This does
+/// not update `last_item_id`, `next_poll_at` or any subscription state; it is
+/// deliberately a delivery probe rather than a poll.
+async fn test_rss_delivery(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(input): Json<RssSubscriptionInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let record = state
+        .store
+        .rss_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .find(|record| record.id == id)
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "rss_subscription_not_found"))?;
+    let (feed_url, target, template, _mention, _enabled, _interval) =
+        validate_rss_subscription(input)
+            .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let Some(client) = state.rss.as_ref() else {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "provider_not_configured",
+        ));
+    };
+    let feed = client.fetch(&feed_url).await.map_err(|error| {
+        let code = rss_provider_error_code(&error.to_string());
+        let status = if code == "invalid_rss_url" {
+            StatusCode::BAD_REQUEST
+        } else if code == "rss_feed_not_found" {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::BAD_GATEWAY
+        };
+        client_error(status, code)
+    })?;
+    let Some(feed) = feed else {
+        return Err(client_error(StatusCode::BAD_REQUEST, "rss_feed_empty"));
+    };
+    let item_id = feed.latest.as_ref().map(|item| item.id.clone());
+    let content = if let Some(item) = feed.latest.as_ref() {
+        let rendered = format_rss_message(&template, "", item);
+        format!("✅ Vozen RSS test\n{rendered}")
+    } else {
+        format!(
+            "✅ Vozen RSS test — connected to **{}**. No item is currently available.",
+            feed.title
+        )
+    };
+    let content = content.chars().take(2_000).collect::<String>();
+    discord_send_channel_message(&state.discord_token, &target, &content)
+        .await
+        .map_err(|error| {
+            let status = if error == "discord_http_403" || error == "discord_http_401" {
+                StatusCode::FORBIDDEN
+            } else if error == "discord_http_404" {
+                StatusCode::NOT_FOUND
+            } else if error == "invalid_discord_channel_id" {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            let code = if error == "discord_http_403" || error == "discord_http_401" {
+                "discord_send_messages_forbidden"
+            } else if error == "discord_http_404" {
+                "discord_channel_not_found"
+            } else if error == "invalid_discord_channel_id" {
+                "invalid_discord_channel_id"
+            } else {
+                "discord_delivery_failed"
+            };
+            tracing::warn!(subscription_id = id, %error, "RSS test delivery failed");
+            client_error(status, code)
+        })?;
+    let _ = state.store.record_activity(
+        &claims.guild_id,
+        "rss_test_delivery",
+        &claims.user_id,
+        None,
+        Some(&claims.user_id),
+        &serde_json::json!({
+            "subscriptionId": id,
+            "itemId": item_id,
+            "feedUrl": feed_url,
+            "mode": "test"
+        })
+        .to_string(),
+    );
+    Ok(Json(serde_json::json!({
+        "provider": "rss",
+        "subscriptionId": record.id,
+        "delivered": true,
+        "testedAt": Utc::now().timestamp_millis(),
+        "itemId": item_id
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -4189,6 +4364,41 @@ async fn discord_json(
         .json::<serde_json::Value>()
         .await
         .map_err(|_| "discord_invalid_response".to_string())
+}
+
+async fn discord_send_channel_message(
+    discord_token: &str,
+    channel_id: &str,
+    content: &str,
+) -> Result<(), String> {
+    if discord_token.len() < 20 {
+        return Err("discord_adapter_unavailable".into());
+    }
+    let channel_id = channel_id.trim();
+    if channel_id.len() < 15
+        || channel_id.len() > 22
+        || !channel_id.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("invalid_discord_channel_id".into());
+    }
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|_| "discord_request_failed".to_string())?;
+    let response = client
+        .post(format!("{DISCORD_API_BASE}/channels/{channel_id}/messages"))
+        .header(header::AUTHORIZATION, format!("Bot {discord_token}"))
+        .json(&serde_json::json!({
+            "content": content,
+            "allowed_mentions": {"parse": []}
+        }))
+        .send()
+        .await
+        .map_err(|_| "discord_request_failed".to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("discord_http_{}", response.status().as_u16()));
+    }
+    Ok(())
 }
 
 async fn fetch_discord_guild_snapshot(guild_id: &str, discord_token: &str) -> DiscordGuildSnapshot {
@@ -10077,6 +10287,41 @@ mod tests {
             expires_at: now + Duration::hours(1),
             last_seen_at: now,
         }
+    }
+
+    #[tokio::test]
+    async fn rss_health_and_test_routes_require_a_session() {
+        let store = Store::open(":memory:").expect("in-memory store");
+        let app = router(state(store));
+        for path in ["/api/config/rss/1/health", "/api/config/rss/1/test"] {
+            let method = if path.ends_with("/test") {
+                http::Method::POST
+            } else {
+                http::Method::GET
+            };
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"feed_url":"https://example.com/feed.xml","target_channel_id":"123456789012345","message_template":"{title}","mention":"","interval_seconds":300,"enabled":true}"#,
+                ))
+                .expect("request");
+            let response = app.clone().oneshot(request).await.expect("response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+    }
+
+    #[test]
+    fn rss_test_delivery_rejects_private_or_invalid_channel_before_discord() {
+        assert_eq!(
+            super::rss_provider_error_code("rss_http_error:429"),
+            "rss_rate_limited"
+        );
+        assert_eq!(
+            super::rss_provider_error_code("rss_private_host"),
+            "invalid_rss_url"
+        );
     }
 
     #[test]
