@@ -562,6 +562,53 @@ pub trait FeatureAdapter: Sync {
     }
 }
 
+fn fixture_string<'a>(
+    fixture: &'a serde_json::Value,
+    camel: &str,
+    snake: &str,
+    fallback: &'a str,
+) -> &'a str {
+    fixture
+        .get(camel)
+        .or_else(|| fixture.get(snake))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback)
+}
+
+fn fixture_u64(fixture: &serde_json::Value, camel: &str, snake: &str, fallback: u64) -> u64 {
+    fixture
+        .get(camel)
+        .or_else(|| fixture.get(snake))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(fallback)
+}
+
+fn fixture_bool(fixture: &serde_json::Value, camel: &str, snake: &str, fallback: bool) -> bool {
+    fixture
+        .get(camel)
+        .or_else(|| fixture.get(snake))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(fallback)
+}
+
+fn fixture_strings(fixture: &serde_json::Value, camel: &str, snake: &str) -> Vec<String> {
+    fixture
+        .get(camel)
+        .or_else(|| fixture.get(snake))
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .take(100)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Describe the observable operation represented by a feature publication.
 /// This is intentionally pure and bounded: it never calls Discord or an
 /// external provider.  The Discord handlers consume the same projected
@@ -4248,6 +4295,39 @@ impl FeatureAdapter for AntiScamAdapter {
         }
         pairs
     }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let channel_id = fixture_string(fixture, "channelId", "channel_id", "preview-channel");
+        let content = fixture_string(
+            fixture,
+            "content",
+            "content",
+            "Claim your free Nitro at https://discord.gg/example",
+        );
+        let decision = evaluate_scam(&scam_policy_from_json(config), channel_id, content);
+        let mut effects = if decision.ignored {
+            vec!["Ignore the message because this channel is exempt.".into()]
+        } else if decision.matched.is_empty() {
+            vec!["No scam pattern matched; keep the message.".into()]
+        } else if decision.should_act {
+            vec![format!(
+                "Match {} and apply the configured action (timeout: {}s).",
+                decision.matched.join(", "),
+                decision.timeout_seconds
+            )]
+        } else {
+            vec![format!(
+                "Match {} in monitor-only mode; do not modify the message.",
+                decision.matched.join(", ")
+            )]
+        };
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -4875,6 +4955,57 @@ impl FeatureAdapter for StarboardAdapter {
         }
         pairs
     }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let policy = starboard_policy_from_json(config);
+        let reactor_ids = {
+            let values = fixture_strings(fixture, "reactorIds", "reactor_ids");
+            if values.is_empty() {
+                (0..fixture_u64(fixture, "reactionCount", "reaction_count", 5))
+                    .take(100)
+                    .map(|index| format!("preview-reactor-{index}"))
+                    .collect()
+            } else {
+                values
+            }
+        };
+        let decision = evaluate_starboard(
+            &policy,
+            &StarboardObservation {
+                source_channel_id: fixture_string(
+                    fixture,
+                    "channelId",
+                    "channel_id",
+                    "preview-channel",
+                )
+                .to_owned(),
+                author_id: fixture_string(fixture, "authorId", "author_id", "preview-author")
+                    .to_owned(),
+                reactor_ids,
+                author_role_ids: fixture_strings(fixture, "authorRoleIds", "author_role_ids"),
+                has_attachments: fixture_bool(fixture, "hasAttachments", "has_attachments", false),
+            },
+        );
+        let mut effects = if decision.should_publish {
+            vec![format!(
+                "Create or update the starboard mirror ({}/{} reactions). {}",
+                decision.count, decision.threshold, decision.reason
+            )]
+        } else if decision.ignored {
+            vec![format!("Do not mirror this message. {}", decision.reason)]
+        } else {
+            vec![format!(
+                "Keep the original message below the board threshold ({}/{} reactions). {}",
+                decision.count, decision.threshold, decision.reason
+            )]
+        };
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
+    }
 }
 
 /// Runtime policy for the starboard.  Both the Discord event handler and the
@@ -5148,6 +5279,47 @@ impl FeatureAdapter for AntiRaidAdapter {
         }
         pairs
     }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let policy = anti_raid_policy_from_json(config);
+        let joins = fixture_u64(
+            fixture,
+            "joinCount",
+            "join_count",
+            policy.join_threshold as u64,
+        );
+        let decision = evaluate_anti_raid(&policy, joins as u32, policy.alert_only);
+        let mut effects = if decision.armed {
+            vec![format!(
+                "{} ({}/{} joins in {}s; containment {} for {} minutes).",
+                if decision.shadow_mode {
+                    "Monitor the burst without automatic containment"
+                } else {
+                    "Contain the join burst"
+                },
+                decision.joins,
+                policy.join_threshold,
+                policy.window_seconds,
+                if decision.shadow_mode {
+                    "disabled"
+                } else {
+                    "enabled"
+                },
+                decision.incident_minutes
+            )]
+        } else {
+            vec![format!(
+                "Keep monitoring: {}/{} joins in the current {}s window.",
+                decision.joins, policy.join_threshold, policy.window_seconds
+            )]
+        };
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -5338,6 +5510,67 @@ impl FeatureAdapter for JoinGateAdapter {
             ));
         }
         pairs
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let object = config.as_object();
+        let policy = JoinGatePolicy {
+            minimum_account_days: object
+                .and_then(|values| values.get("minimumAccountDays"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+            require_avatar: object
+                .and_then(|values| values.get("requireAvatar"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            blocked_name_patterns: object
+                .and_then(|values| values.get("blockedNamePatterns"))
+                .and_then(serde_json::Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .take(20)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            action: object
+                .and_then(|values| values.get("action"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("quarantine")
+                .to_owned(),
+        };
+        let decision = evaluate_join_gate(
+            &policy,
+            &JoinGateObservation {
+                account_age_days: fixture_u64(fixture, "accountAgeDays", "account_age_days", 30)
+                    as i64,
+                has_avatar: fixture_bool(fixture, "hasAvatar", "has_avatar", true),
+                display_name: fixture_string(
+                    fixture,
+                    "displayName",
+                    "display_name",
+                    "Preview member",
+                )
+                .to_owned(),
+            },
+        );
+        let mut effects = if !decision.blocked {
+            vec!["Allow the member and apply the configured auto-role, if any.".into()]
+        } else {
+            vec![format!(
+                "Apply the {} join-gate action because {}.",
+                decision.action,
+                decision.reasons.join("; ")
+            )]
+        };
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
@@ -7076,6 +7309,38 @@ mod tests {
                     .any(|effect| effect.contains("security.antispam.flood_count=4"))
             );
         }
+    }
+
+    #[test]
+    fn protection_adapters_preview_the_same_policies_as_the_gateway() {
+        let scam = feature_adapter("protection.antiscam").unwrap();
+        let scam_effects = scam.simulate(
+            &serde_json::json!({"blockedKeywords": ["free nitro"], "timeoutSeconds": 120}),
+            &serde_json::json!({"channel_id": "general", "content": "free nitro"}),
+        );
+        assert!(scam_effects[0].contains("timeout: 120s"));
+
+        let raid = feature_adapter("protection.anti_raid").unwrap();
+        let raid_effects = raid.simulate(
+            &serde_json::json!({"joinThreshold": 4, "windowSeconds": 12, "alertOnly": true}),
+            &serde_json::json!({"join_count": 4}),
+        );
+        assert!(raid_effects[0].contains("Monitor the burst"));
+        assert!(raid_effects[0].contains("4/4 joins in 12s"));
+
+        let gate = feature_adapter("protection.join_gate").unwrap();
+        let gate_effects = gate.simulate(
+            &serde_json::json!({"minimumAccountDays": 7, "requireAvatar": true, "blockedNamePatterns": ["raid"]}),
+            &serde_json::json!({"account_age_days": 1, "has_avatar": false, "display_name": "raid account"}),
+        );
+        assert!(gate_effects[0].contains("join-gate action"));
+
+        let starboard = feature_adapter("community.starboard").unwrap();
+        let starboard_effects = starboard.simulate(
+            &serde_json::json!({"threshold": 5}),
+            &serde_json::json!({"reaction_count": 3}),
+        );
+        assert!(starboard_effects[0].contains("below the board threshold (3/5"));
     }
 
     #[test]

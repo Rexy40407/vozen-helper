@@ -17,10 +17,8 @@ use helper_contracts::{
     RankCardConfig, SessionClaims, SimulationResult, ValidationIssue,
 };
 use helper_core::{
-    Capability, FEATURE_SCHEMA_VERSION, JoinGateObservation, JoinGatePolicy, StarboardObservation,
-    anti_raid_policy_from_json, anti_spam_policy_from_json, evaluate_anti_raid, evaluate_anti_spam,
-    evaluate_join_gate, evaluate_scam, evaluate_starboard, feature_adapter, feature_maturity,
-    is_known_feature, quota_limit, scam_policy_from_json, starboard_policy_from_json,
+    Capability, FEATURE_SCHEMA_VERSION, anti_spam_policy_from_json, evaluate_anti_spam,
+    feature_adapter, feature_maturity, is_known_feature, quota_limit,
 };
 use helper_modules::{
     BlueskyClient, CoinGeckoClient, EntitlementClient, EthereumRpcClient, GasClient,
@@ -7540,153 +7538,24 @@ async fn test_feature(
                 vec!["The anti-spam adapter could not produce a preview.".into()]
             })
         }
-        "protection.antiscam" => {
-            let content = test
-                .content
-                .as_deref()
-                .unwrap_or("Claim your free Nitro at https://discord.gg/example");
-            let channel_id = test.channel_id.as_deref().unwrap_or("preview-channel");
-            let decision = evaluate_scam(&scam_policy_from_json(&test.config), channel_id, content);
-            if decision.ignored {
-                vec!["Ignore the message because this channel is exempt.".into()]
-            } else if decision.matched.is_empty() {
-                vec!["No scam pattern matched; keep the message.".into()]
-            } else if decision.should_act {
-                vec![format!(
-                    "Match {} and apply the configured action (timeout: {}s).",
-                    decision.matched.join(", "),
-                    decision.timeout_seconds
-                )]
-            } else {
-                vec![format!(
-                    "Match {} in monitor-only mode; do not modify the message.",
-                    decision.matched.join(", ")
-                )]
-            }
-        }
-        "protection.anti_raid" => {
-            let policy = anti_raid_policy_from_json(&test.config);
-            let joins = test.join_count.unwrap_or(policy.join_threshold as u64);
-            let decision = evaluate_anti_raid(&policy, joins as u32, policy.alert_only);
-            if decision.armed {
-                vec![format!(
-                    "{} ({}/{} joins in {}s; containment {} for {} minutes).",
-                    if decision.shadow_mode {
-                        "Monitor the burst without automatic containment"
-                    } else {
-                        "Contain the join burst"
-                    },
-                    decision.joins,
-                    policy.join_threshold,
-                    policy.window_seconds,
-                    if decision.shadow_mode {
-                        "disabled"
-                    } else {
-                        "enabled"
-                    },
-                    decision.incident_minutes
-                )]
-            } else {
-                vec![format!(
-                    "Keep monitoring: {}/{} joins in the current {}s window.",
-                    decision.joins, policy.join_threshold, policy.window_seconds
-                )]
-            }
-        }
-        "protection.join_gate" => {
-            let object = test.config.as_object();
-            let policy = JoinGatePolicy {
-                minimum_account_days: object
-                    .and_then(|values| values.get("minimumAccountDays"))
-                    .and_then(serde_json::Value::as_i64)
-                    .unwrap_or(0),
-                require_avatar: object
-                    .and_then(|values| values.get("requireAvatar"))
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false),
-                blocked_name_patterns: object
-                    .and_then(|values| values.get("blockedNamePatterns"))
-                    .and_then(serde_json::Value::as_array)
-                    .map(|values| {
-                        values
-                            .iter()
-                            .filter_map(serde_json::Value::as_str)
-                            .map(str::to_owned)
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                action: object
-                    .and_then(|values| values.get("action"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("quarantine")
-                    .to_owned(),
-            };
-            let decision = evaluate_join_gate(
-                &policy,
-                &JoinGateObservation {
-                    account_age_days: test.account_age_days.unwrap_or(30),
-                    has_avatar: test.has_avatar.unwrap_or(true),
-                    display_name: test
-                        .display_name
-                        .clone()
-                        .unwrap_or_else(|| "Preview member".into()),
-                },
-            );
-            if !decision.blocked {
-                vec!["Allow the member and apply the configured auto-role, if any.".into()]
-            } else {
-                vec![format!(
-                    "Apply the {} join-gate action because {}.",
-                    decision.action,
-                    decision.reasons.join("; ")
-                )]
-            }
-        }
+        "protection.antiscam" => adapter_effects
+            .clone()
+            .unwrap_or_else(|| vec!["The anti-scam adapter could not produce a preview.".into()]),
+        "protection.anti_raid" => adapter_effects
+            .clone()
+            .unwrap_or_else(|| vec!["The anti-raid adapter could not produce a preview.".into()]),
+        "protection.join_gate" => adapter_effects
+            .clone()
+            .unwrap_or_else(|| vec!["The join-gate adapter could not produce a preview.".into()]),
         "community.levels" => adapter_effects
             .clone()
             .unwrap_or_else(|| vec!["Atribuir XP e verificar uma recompensa de nível".into()]),
         "support.tickets" => adapter_effects.clone().unwrap_or_else(|| {
             vec!["Criar um ticket privado com as permissões configuradas".into()]
         }),
-        "community.starboard" => {
-            let policy = starboard_policy_from_json(&test.config);
-            let reactor_ids = if test.reactor_ids.is_empty() {
-                (0..test.reaction_count.unwrap_or(5))
-                    .map(|index| format!("preview-reactor-{index}"))
-                    .collect()
-            } else {
-                test.reactor_ids.clone()
-            };
-            let decision = evaluate_starboard(
-                &policy,
-                &StarboardObservation {
-                    source_channel_id: test
-                        .channel_id
-                        .clone()
-                        .unwrap_or_else(|| "preview-channel".into()),
-                    author_id: test
-                        .author_id
-                        .clone()
-                        .unwrap_or_else(|| "preview-author".into()),
-                    reactor_ids,
-                    author_role_ids: test.author_role_ids.clone(),
-                    has_attachments: test.has_attachments.unwrap_or(false),
-                },
-            );
-            if decision.should_publish {
-                vec![format!(
-                    "Create or update the starboard mirror ({}/{} reactions). {}",
-                    decision.count, decision.threshold, decision.reason
-                )]
-            } else if decision.ignored {
-                vec![format!("Do not mirror this message. {}", decision.reason)]
-            } else {
-                vec![format!(
-                    "Keep the original message below the board threshold ({}/{} reactions). {}",
-                    decision.count, decision.threshold, decision.reason
-                )]
-            }
-        }
+        "community.starboard" => adapter_effects
+            .clone()
+            .unwrap_or_else(|| vec!["The starboard adapter could not produce a preview.".into()]),
         "management.workflows" => adapter_effects.clone().unwrap_or_else(|| {
             vec!["Executar o fluxo em modo dry-run e registar o resultado".into()]
         }),
