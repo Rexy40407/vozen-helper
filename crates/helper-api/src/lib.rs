@@ -8633,6 +8633,10 @@ struct FeatureTestRequest {
     selected_role_ids: Vec<String>,
     #[serde(default, rename = "clickedRoleId")]
     clicked_role_id: Option<String>,
+    #[serde(default, rename = "activeTempRooms")]
+    active_temp_rooms: Option<u64>,
+    #[serde(default, rename = "userName")]
+    user_name: Option<String>,
     #[serde(default, rename = "reminderDelayMs")]
     reminder_delay_ms: Option<i64>,
     #[serde(default, rename = "reminderText")]
@@ -8803,6 +8807,8 @@ async fn test_feature(
         "leaderboardEntries": test.leaderboard_entries.clone(),
         "selectedRoleIds": test.selected_role_ids.clone(),
         "clickedRoleId": test.clicked_role_id.clone(),
+        "activeTempRooms": test.active_temp_rooms,
+        "userName": test.user_name.clone(),
         "delayMs": test.reminder_delay_ms,
         "reminderText": test.reminder_text.clone().or_else(|| test.content.clone()),
         "repeat": test.reminder_repeat.clone(),
@@ -11334,6 +11340,15 @@ mod tests {
                     "clickedRoleId": "222222222222222222"
                 }),
                 "assign role 222222222222222222",
+            ),
+            (
+                "utility.temp_channels",
+                serde_json::json!({
+                    "config": {"nameTemplate":"{user} lounge", "maxActive":2},
+                    "userName": "Rexy",
+                    "activeTempRooms": 2
+                }),
+                "active_limit_reached",
             ),
         ];
         for (key, payload, expected) in cases {

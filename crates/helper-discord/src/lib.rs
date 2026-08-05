@@ -9,8 +9,8 @@ use helper_core::{
     RolePanelObservation, StarboardObservation, WorkflowObservation, WorkflowPolicy,
     anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
     evaluate_join_gate, evaluate_leaderboard, evaluate_moderation, evaluate_reminder,
-    evaluate_role_panel, evaluate_scam_with_roles, evaluate_starboard, evaluate_workflow,
-    feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
+    evaluate_role_panel, evaluate_scam_with_roles, evaluate_starboard, evaluate_temp_channel,
+    evaluate_workflow, feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
     parse_utc_offset_minutes, quota_limit, render_member_message, scam_policy_from_json,
     starboard_policy_from_json,
 };
@@ -7025,14 +7025,6 @@ impl Handler {
                 )
                 .clamp(1, 50) as i64;
                 let active = self.store.active_temp_channels(&guild_text)?;
-                if active >= max_active {
-                    return respond(
-                        ctx,
-                        command,
-                        "This server has reached its temporary room limit. Try again after one is cleaned up.",
-                    )
-                    .await;
-                }
                 let template = setting_string(
                     &self.store,
                     &guild_text,
@@ -7040,18 +7032,20 @@ impl Handler {
                 )
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "{user}'s room".to_string());
-                let display_name = command.user.name.trim();
-                let room_name = template
-                    .replace("{user}", display_name)
-                    .chars()
-                    .filter(|character| !character.is_control())
-                    .take(100)
-                    .collect::<String>();
-                let room_name = if room_name.trim().is_empty() {
-                    format!("{}'s room", display_name)
-                } else {
-                    room_name
-                };
+                let decision = evaluate_temp_channel(
+                    &template,
+                    command.user.name.as_str(),
+                    active.max(0) as u64,
+                    max_active as u64,
+                );
+                if !decision.allowed {
+                    return respond(
+                        ctx,
+                        command,
+                        "This server has reached its temporary room limit. Try again after one is cleaned up.",
+                    )
+                    .await;
+                }
                 let category_id = setting_string(
                     &self.store,
                     &guild_text,
@@ -7059,7 +7053,7 @@ impl Handler {
                 )
                 .and_then(|value| value.parse::<u64>().ok())
                 .map(serenity::all::ChannelId::new);
-                let mut create = CreateChannel::new(room_name)
+                let mut create = CreateChannel::new(decision.room_name)
                     .kind(serenity::all::ChannelType::Voice);
                 if let Some(category_id) = category_id {
                     create = create.category(category_id);

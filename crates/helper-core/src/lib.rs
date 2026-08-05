@@ -1960,6 +1960,71 @@ impl TempChannelsAdapter {
     pub const SOURCE: &'static str = "temp_channels_adapter_v2";
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TempChannelDecision {
+    pub allowed: bool,
+    pub room_name: String,
+    pub active_rooms: u64,
+    pub max_active: u64,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+/// Bound temporary-channel creation before it reaches Discord.  The command
+/// and the API preview share the same cap and template rendering rules.
+pub fn evaluate_temp_channel(
+    template: &str,
+    display_name: &str,
+    active_rooms: u64,
+    max_active: u64,
+) -> TempChannelDecision {
+    let max_active = max_active.clamp(1, 50);
+    if active_rooms >= max_active {
+        return TempChannelDecision {
+            allowed: false,
+            room_name: String::new(),
+            active_rooms,
+            max_active,
+            reason_code: "active_limit_reached",
+            explanation: format!(
+                "The server already has {active_rooms} active temporary rooms (limit {max_active})."
+            ),
+        };
+    }
+    let display_name = display_name.trim();
+    let fallback_name = if display_name.is_empty() {
+        "member's room".to_owned()
+    } else {
+        format!("{display_name}'s room")
+    };
+    let room_name = template
+        .replace(
+            "{user}",
+            if display_name.is_empty() {
+                "member"
+            } else {
+                display_name
+            },
+        )
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(100)
+        .collect::<String>();
+    let room_name = if room_name.trim().is_empty() {
+        fallback_name
+    } else {
+        room_name
+    };
+    TempChannelDecision {
+        allowed: true,
+        room_name,
+        active_rooms,
+        max_active,
+        reason_code: "room_allowed",
+        explanation: "The temporary room is below the configured active-room limit.".into(),
+    }
+}
+
 impl FeatureAdapter for TempChannelsAdapter {
     fn descriptor(&self) -> FeatureAdapterDescriptor {
         FeatureAdapterDescriptor {
@@ -2061,6 +2126,45 @@ impl FeatureAdapter for TempChannelsAdapter {
             pairs.push(("utility.temp_channels.max_active".into(), value.to_string()));
         }
         pairs
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let template = config
+            .get("nameTemplate")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("{user}'s room");
+        let display_name = fixture
+            .get("userName")
+            .or_else(|| fixture.get("user_name"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Preview member");
+        let active_rooms = fixture
+            .get("activeTempRooms")
+            .or_else(|| fixture.get("active_temp_rooms"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let max_active = config
+            .get("maxActive")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(10);
+        let decision = evaluate_temp_channel(template, display_name, active_rooms, max_active);
+        let mut effects = if decision.allowed {
+            vec![format!(
+                "Create the temporary voice room `{}` ({}/{} active rooms).",
+                decision.room_name, decision.active_rooms, decision.max_active
+            )]
+        } else {
+            vec![format!(
+                "Temporary room rejected ({}): {}",
+                decision.reason_code, decision.explanation
+            )]
+        };
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
@@ -10456,6 +10560,35 @@ mod tests {
         assert!(effects[0].contains("Remove first: 11"));
         assert!(effects.iter().any(|effect| {
             effect.contains("community.role_panels.selection_mode") && effect.contains("unique")
+        }));
+    }
+
+    #[test]
+    fn temporary_channel_evaluator_matches_limit_and_name_template() {
+        let allowed = evaluate_temp_channel("{user} hangout", "Rexy", 2, 3);
+        assert!(allowed.allowed);
+        assert_eq!(allowed.room_name, "Rexy hangout");
+
+        let limited = evaluate_temp_channel("{user}'s room", "Rexy", 3, 3);
+        assert!(!limited.allowed);
+        assert_eq!(limited.reason_code, "active_limit_reached");
+
+        let fallback = evaluate_temp_channel("\u{0000}", "Rexy", 0, 0);
+        assert!(fallback.allowed);
+        assert_eq!(fallback.max_active, 1);
+        assert_eq!(fallback.room_name, "Rexy's room");
+    }
+
+    #[test]
+    fn temporary_channel_simulation_uses_the_shared_limit_decision() {
+        let adapter = feature_adapter("utility.temp_channels").expect("temp channel adapter");
+        let effects = adapter.simulate(
+            &serde_json::json!({"nameTemplate":"{user} lounge", "maxActive":2}),
+            &serde_json::json!({"userName":"Rexy", "activeTempRooms":2}),
+        );
+        assert!(effects[0].contains("active_limit_reached"));
+        assert!(effects.iter().any(|effect| {
+            effect.contains("utility.temp_channels.max_active") && effect.contains("2")
         }));
     }
 
