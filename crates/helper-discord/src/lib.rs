@@ -2056,6 +2056,12 @@ impl EventHandler for Handler {
                     "security.anti_raid.alert_only",
                     false,
                 ),
+                pause_invites: setting_bool(
+                    &self.store,
+                    &guild_text,
+                    "security.anti_raid.pause_invites",
+                    true,
+                ),
             };
             let armed = evaluate_anti_raid(&anti_raid_policy, join_count as u32, false).armed;
             if armed {
@@ -2075,8 +2081,9 @@ impl EventHandler for Handler {
                     evaluate_anti_raid(&anti_raid_policy, join_count as u32, shadow_mode);
                 let shadow_mode = raid_decision.shadow_mode;
                 // Bounded response: latch the existing gate and alert moderators.
-                // Shadow mode records and alerts but deliberately does not contain.
-                if !shadow_mode {
+                // Shadow mode and an explicit alert-only policy record/alert but
+                // deliberately leave the gate unchanged.
+                if raid_decision.should_contain {
                     raid_latched = true;
                     let gate_was_enabled = setting_bool(
                         &self.store,
@@ -2107,8 +2114,10 @@ impl EventHandler for Handler {
                     "Anti-raid: {threshold} joins within {window_seconds}s; {}",
                     if shadow_mode {
                         "shadow mode, no automatic containment"
-                    } else {
+                    } else if raid_decision.should_contain {
                         "join gate enabled"
+                    } else {
+                        "alert only; join gate unchanged"
                     }
                 );
                 let _ = self.store.record_case(

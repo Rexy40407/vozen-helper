@@ -396,6 +396,10 @@ pub struct AntiRaidPolicy {
     pub incident_minutes: u64,
     pub verification: String,
     pub alert_only: bool,
+    /// When enabled, an armed incident temporarily enables the join gate.
+    /// Discord does not expose a safe global "pause invites" switch; the
+    /// gate is the bounded equivalent that can be restored after expiry.
+    pub pause_invites: bool,
 }
 
 impl Default for AntiRaidPolicy {
@@ -406,6 +410,7 @@ impl Default for AntiRaidPolicy {
             incident_minutes: 10,
             verification: "high".into(),
             alert_only: false,
+            pause_invites: true,
         }
     }
 }
@@ -443,6 +448,12 @@ pub fn anti_raid_policy_from_json(value: &serde_json::Value) -> AntiRaidPolicy {
     if let Some(value) = object.get("alertOnly").and_then(serde_json::Value::as_bool) {
         policy.alert_only = value;
     }
+    if let Some(value) = object
+        .get("pauseInvites")
+        .and_then(serde_json::Value::as_bool)
+    {
+        policy.pause_invites = value;
+    }
     policy
 }
 
@@ -451,6 +462,7 @@ pub struct AntiRaidDecision {
     pub joins: u32,
     pub armed: bool,
     pub shadow_mode: bool,
+    pub should_contain: bool,
     pub incident_minutes: u64,
     pub reason: String,
 }
@@ -463,16 +475,20 @@ pub fn evaluate_anti_raid(
     let joins = joins.min(100_000);
     let armed = joins >= policy.join_threshold;
     let shadow_mode = shadow_mode || policy.alert_only;
+    let should_contain = armed && !shadow_mode && policy.pause_invites;
     AntiRaidDecision {
         joins,
         armed,
         shadow_mode,
+        should_contain,
         incident_minutes: policy.incident_minutes,
         reason: if armed {
             if shadow_mode {
                 "join_burst_detected_shadow".into()
-            } else {
+            } else if policy.pause_invites {
                 "join_burst_detected_contain".into()
+            } else {
+                "join_burst_detected_alert".into()
             }
         } else {
             "join_burst_below_threshold".into()
@@ -5391,6 +5407,7 @@ impl FeatureAdapter for AntiRaidAdapter {
                         {"key":"windowSeconds","label":"Window (seconds)","kind":"number","min":3,"max":60},
                         {"key":"incidentMinutes","label":"Containment duration (minutes)","kind":"number","min":1,"max":120},
                         {"key":"verification","label":"Verification level","kind":"select","options":[["medium","Medium"],["high","High"],["very_high","Very high"]]},
+                        {"key":"pauseInvites","label":"Pause invite entry during an incident","kind":"toggle","help":"Uses the join gate temporarily and restores it when containment expires."},
                         {"key":"alertChannel","label":"Alert channel","kind":"channel","advanced":true},
                         {"key":"alertOnly","label":"Monitor only","kind":"toggle","advanced":true}
                     ]
@@ -5401,6 +5418,7 @@ impl FeatureAdapter for AntiRaidAdapter {
                 "windowSeconds": 10,
                 "incidentMinutes": 10,
                 "verification": "high",
+                "pauseInvites": true,
                 "alertChannel": "",
                 "alertOnly": false
             }),
@@ -5457,6 +5475,17 @@ impl FeatureAdapter for AntiRaidAdapter {
                 severity: "error".into(),
             });
         }
+        if object
+            .get("pauseInvites")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "pauseInvites".into(),
+                code: "boolean_required".into(),
+                message: "Pause invite entry must be true or false.".into(),
+                severity: "error".into(),
+            });
+        }
         if object.get("verification").is_some_and(|value| {
             !value
                 .as_str()
@@ -5496,6 +5525,12 @@ impl FeatureAdapter for AntiRaidAdapter {
             pairs.push(("security.anti_raid.alert_only".into(), value.to_string()));
         }
         if let Some(value) = object
+            .get("pauseInvites")
+            .and_then(serde_json::Value::as_bool)
+        {
+            pairs.push(("security.anti_raid.pause_invites".into(), value.to_string()));
+        }
+        if let Some(value) = object
             .get("verification")
             .and_then(serde_json::Value::as_str)
         {
@@ -5516,7 +5551,7 @@ impl FeatureAdapter for AntiRaidAdapter {
         let mut effects = if decision.armed {
             vec![format!(
                 "{} ({}/{} joins in {}s; containment {} for {} minutes).",
-                if decision.shadow_mode {
+                if decision.shadow_mode || !decision.should_contain {
                     "Monitor the burst without automatic containment"
                 } else {
                     "Contain the join burst"
@@ -5524,7 +5559,7 @@ impl FeatureAdapter for AntiRaidAdapter {
                 decision.joins,
                 policy.join_threshold,
                 policy.window_seconds,
-                if decision.shadow_mode {
+                if decision.shadow_mode || !decision.should_contain {
                     "disabled"
                 } else {
                     "enabled"
@@ -8115,6 +8150,7 @@ mod tests {
                 "windowSeconds": 15,
                 "incidentMinutes": 30,
                 "verification": "very_high",
+                "pauseInvites": false,
                 "alertOnly": true
             }))
             .contains(&("security.anti_raid.joins".into(), "20".into()))
@@ -8130,6 +8166,10 @@ mod tests {
                 &serde_json::json!({"incidentMinutes": 30, "verification": "very_high"})
             )
             .contains(&("security.anti_raid.verification".into(), "very_high".into()))
+        );
+        assert!(
+            raid.runtime_projection(&serde_json::json!({"pauseInvites": false}))
+                .contains(&("security.anti_raid.pause_invites".into(), "false".into()))
         );
         let gate = feature_adapter("protection.join_gate").expect("join gate adapter");
         assert_eq!(gate.descriptor().source, "join_gate_adapter_v1");
@@ -8374,7 +8414,8 @@ mod tests {
             "joinThreshold": 5,
             "windowSeconds": 12,
             "incidentMinutes": 20,
-            "alertOnly": false
+            "alertOnly": false,
+            "pauseInvites": true
         }));
         let below = evaluate_anti_raid(&policy, 4, false);
         assert!(!below.armed);
@@ -8383,12 +8424,24 @@ mod tests {
         let contained = evaluate_anti_raid(&policy, 5, false);
         assert!(contained.armed);
         assert!(!contained.shadow_mode);
+        assert!(contained.should_contain);
         assert_eq!(contained.incident_minutes, 20);
 
         let shadow = evaluate_anti_raid(&policy, 5, true);
         assert!(shadow.armed);
         assert!(shadow.shadow_mode);
+        assert!(!shadow.should_contain);
         assert_eq!(shadow.reason, "join_burst_detected_shadow");
+
+        let alert_only = anti_raid_policy_from_json(&serde_json::json!({
+            "joinThreshold": 5,
+            "pauseInvites": false
+        }));
+        let alert = evaluate_anti_raid(&alert_only, 5, false);
+        assert!(alert.armed);
+        assert!(!alert.shadow_mode);
+        assert!(!alert.should_contain);
+        assert_eq!(alert.reason, "join_burst_detected_alert");
     }
 
     #[test]
