@@ -11495,12 +11495,6 @@ async fn deliver_birthday_announcements(
         let local = now.with_timezone(&offset);
         let (year, month, day) = (local.year(), local.month(), local.day());
         let birthdays = store.due_birthdays_for_guild(&setting.guild_id, month, day, year, 500)?;
-        let _legacy_template = config
-            .get("message")
-            .and_then(serde_json::Value::as_str)
-            .map(ToOwned::to_owned)
-            .or_else(|| setting_string(store, &setting.guild_id, "community.birthdays.message"))
-            .unwrap_or_else(|| "Happy birthday, {user}! 🎉".to_string());
         for birthday in birthdays {
             let decision = evaluate_birthday(&config, &birthday.user_id, month, day);
             if !decision.allowed {
