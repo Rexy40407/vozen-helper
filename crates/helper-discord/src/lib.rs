@@ -8,11 +8,11 @@ use helper_core::{
     LeaderboardEntry, ModerationObservation, ModerationPolicy, ReminderObservation, ReminderPolicy,
     RolePanelObservation, StarboardObservation, WorkflowObservation, WorkflowPolicy,
     anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
-    evaluate_join_gate, evaluate_leaderboard, evaluate_moderation, evaluate_reminder,
-    evaluate_role_panel, evaluate_scam_with_roles, evaluate_starboard, evaluate_temp_channel,
-    evaluate_workflow, feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
-    parse_utc_offset_minutes, quota_limit, render_member_message, scam_policy_from_json,
-    starboard_policy_from_json,
+    evaluate_embed, evaluate_join_gate, evaluate_leaderboard, evaluate_moderation,
+    evaluate_reminder, evaluate_role_panel, evaluate_scam_with_roles, evaluate_starboard,
+    evaluate_temp_channel, evaluate_workflow, feature_is_configurable, feature_maturity,
+    leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit, render_member_message,
+    scam_policy_from_json, starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -5745,60 +5745,44 @@ impl Handler {
                 )
                 .await;
             }
-            let title = option_string(command, "title")
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            let max_description = setting_u64(
-                &self.store,
-                &guild_text,
-                "utility.embeds.max_description",
-                2_000,
-            )
-            .clamp(1, 4_000) as usize;
-            let description = option_string(command, "description")
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            if title.is_empty()
-                || title.chars().count() > 256
-                || description.is_empty()
-                || description.chars().count() > max_description
-            {
-                return respond(
-                    ctx,
-                    command,
-                    "The title or description is outside the configured limits.",
+            let config = serde_json::json!({
+                "maxDescription": setting_u64(
+                    &self.store,
+                    &guild_text,
+                    "utility.embeds.max_description",
+                    2_000,
+                ),
+                "defaultColor": setting_string(
+                    &self.store,
+                    &guild_text,
+                    "utility.embeds.default_color",
                 )
-                .await;
+                .unwrap_or_default(),
+                "defaultFooter": setting_string(
+                    &self.store,
+                    &guild_text,
+                    "utility.embeds.default_footer",
+                )
+                .unwrap_or_default(),
+            });
+            let decision = evaluate_embed(
+                &config,
+                option_string(command, "title").unwrap_or_default(),
+                option_string(command, "description").unwrap_or_default(),
+                option_string(command, "color"),
+                option_string(command, "footer"),
+            );
+            if !decision.allowed {
+                return respond(ctx, command, &decision.explanation).await;
             }
-            let configured_color =
-                setting_string(&self.store, &guild_text, "utility.embeds.default_color")
-                    .unwrap_or_default();
-            let color_text = option_string(command, "color")
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(configured_color.trim());
-            let parsed_color = parse_embed_colour(color_text);
-            if !color_text.is_empty() && parsed_color.is_none() {
-                return respond(ctx, command, "Colour must be a #RRGGBB value.").await;
-            }
-            let configured_footer =
-                setting_string(&self.store, &guild_text, "utility.embeds.default_footer")
-                    .unwrap_or_default();
-            let footer_text = option_string(command, "footer")
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(configured_footer.trim());
-            if footer_text.chars().count() > 2_048 {
-                return respond(ctx, command, "Footer must be at most 2048 characters.").await;
-            }
-            let mut embed = CreateEmbed::new().title(title).description(description);
-            if let Some(color) = parsed_color {
+            let mut embed = CreateEmbed::new()
+                .title(decision.title)
+                .description(decision.description);
+            if let Some(color) = decision.color.as_deref().and_then(parse_embed_colour) {
                 embed = embed.colour(color);
             }
-            if !footer_text.is_empty() {
-                embed = embed.footer(CreateEmbedFooter::new(footer_text));
+            if !decision.footer.is_empty() {
+                embed = embed.footer(CreateEmbedFooter::new(decision.footer));
             }
             command
                 .channel_id

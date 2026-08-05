@@ -7849,6 +7849,112 @@ static TWITCH_ADAPTER: AlertSubscriptionAdapter = AlertSubscriptionAdapter {
     ],
 };
 
+/// The bounded decision shared by the HTTP preview and the Discord `/embed`
+/// command.  Keeping the rendered values here prevents a valid-looking draft
+/// from diverging from what the runtime will actually publish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbedDecision {
+    pub allowed: bool,
+    pub title: String,
+    pub description: String,
+    pub color: Option<String>,
+    pub footer: String,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+fn bounded_text(value: &str, max_chars: usize) -> String {
+    value.trim().chars().take(max_chars).collect()
+}
+
+fn valid_embed_color(value: &str) -> bool {
+    value.is_empty()
+        || (value.len() == 7
+            && value.starts_with('#')
+            && value[1..]
+                .chars()
+                .all(|character| character.is_ascii_hexdigit()))
+}
+
+/// Validate and render the same embed payload used by the production command.
+/// Mentions are deliberately not part of the returned payload; the Discord
+/// handler always disables them when publishing.
+pub fn evaluate_embed(
+    config: &serde_json::Value,
+    title: &str,
+    description: &str,
+    requested_color: Option<&str>,
+    requested_footer: Option<&str>,
+) -> EmbedDecision {
+    let max_description = config
+        .get("maxDescription")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(2_000)
+        .clamp(1, 4_000) as usize;
+    let title = bounded_text(title, 256);
+    let description = bounded_text(description, max_description);
+    let configured_color = config
+        .get("defaultColor")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let color = requested_color
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(configured_color);
+    if title.is_empty() || description.is_empty() {
+        return EmbedDecision {
+            allowed: false,
+            title,
+            description,
+            color: None,
+            footer: String::new(),
+            reason_code: "title_description_required",
+            explanation: "An embed needs a non-empty title and description.".into(),
+        };
+    }
+    if !valid_embed_color(color) {
+        return EmbedDecision {
+            allowed: false,
+            title,
+            description,
+            color: None,
+            footer: String::new(),
+            reason_code: "invalid_color",
+            explanation: "Colour must be empty or a #RRGGBB value.".into(),
+        };
+    }
+    let configured_footer = config
+        .get("defaultFooter")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let footer = requested_footer
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(configured_footer);
+    if footer.chars().count() > 2_048 {
+        return EmbedDecision {
+            allowed: false,
+            title,
+            description,
+            color: None,
+            footer: String::new(),
+            reason_code: "footer_too_long",
+            explanation: "Footer must be at most 2048 characters.".into(),
+        };
+    }
+    EmbedDecision {
+        allowed: true,
+        title,
+        description,
+        color: (!color.is_empty()).then(|| color.to_owned()),
+        footer: footer.to_owned(),
+        reason_code: "embed_ready",
+        explanation: "The bounded embed can be published with mentions disabled.".into(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EmbedsAdapter;
 
@@ -7955,6 +8061,50 @@ impl FeatureAdapter for EmbedsAdapter {
             projection.push(("utility.embeds.default_footer".into(), footer.into()));
         }
         projection
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let title = fixture
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Preview embed");
+        let description = fixture
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| fixture.get("content").and_then(serde_json::Value::as_str))
+            .unwrap_or("Preview description");
+        let requested_color = fixture.get("color").and_then(serde_json::Value::as_str);
+        let requested_footer = fixture.get("footer").and_then(serde_json::Value::as_str);
+        let decision = evaluate_embed(
+            config,
+            title,
+            description,
+            requested_color,
+            requested_footer,
+        );
+        let mut effects = if decision.allowed {
+            vec![format!(
+                "Publish embed `{}` with {} characters, mentions disabled{}.",
+                decision.title,
+                decision.description.chars().count(),
+                decision
+                    .color
+                    .as_deref()
+                    .map(|color| format!(" and colour {color}"))
+                    .unwrap_or_default()
+            )]
+        } else {
+            vec![format!(
+                "Embed rejected ({}): {}",
+                decision.reason_code, decision.explanation
+            )]
+        };
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
@@ -10621,5 +10771,35 @@ mod tests {
             "utility.embeds.default_footer".into(),
             "Vozen Helper".into()
         )));
+    }
+
+    #[test]
+    fn embed_evaluator_matches_runtime_limits_and_defaults() {
+        let config = serde_json::json!({
+            "maxDescription": 12,
+            "defaultColor": "#5865F2",
+            "defaultFooter": "Vozen"
+        });
+        let ready = evaluate_embed(&config, "  Title  ", "a bounded description", None, None);
+        assert!(ready.allowed);
+        assert_eq!(ready.title, "Title");
+        assert_eq!(ready.description, "a bounded de");
+        assert_eq!(ready.color.as_deref(), Some("#5865F2"));
+        assert_eq!(ready.footer, "Vozen");
+
+        let invalid = evaluate_embed(&config, "Title", "Description", Some("blue"), None);
+        assert!(!invalid.allowed);
+        assert_eq!(invalid.reason_code, "invalid_color");
+
+        let adapter = feature_adapter("utility.embeds").expect("embeds adapter");
+        let effects = adapter.simulate(
+            &config,
+            &serde_json::json!({
+                "title": "Title",
+                "description": "Description",
+                "color": "blue"
+            }),
+        );
+        assert!(effects[0].contains("invalid_color"));
     }
 }
