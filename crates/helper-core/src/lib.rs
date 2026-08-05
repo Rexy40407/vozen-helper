@@ -4002,6 +4002,160 @@ impl ReminderAdapter {
     }
 }
 
+/// Runtime policy shared by the reminder command and the dashboard
+/// simulation. Keeping the bounds here prevents a saved setting from being
+/// interpreted differently by the scheduler and by the preview endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReminderPolicy {
+    pub max_delay_hours: u64,
+    pub max_text_length: usize,
+    pub timezone: String,
+    pub notify_user: bool,
+    pub allow_recurring: bool,
+    pub max_recurrences: u64,
+}
+
+impl Default for ReminderPolicy {
+    fn default() -> Self {
+        Self {
+            max_delay_hours: 168,
+            max_text_length: 500,
+            timezone: "UTC".into(),
+            notify_user: true,
+            allow_recurring: false,
+            max_recurrences: 12,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReminderObservation {
+    pub delay_ms: i64,
+    pub text: String,
+    pub repeat: Option<String>,
+    pub timezone: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReminderDecision {
+    pub allowed: bool,
+    pub reason_code: &'static str,
+    pub explanation: String,
+    pub delay_ms: i64,
+    pub repeat: Option<String>,
+    pub remaining: u64,
+}
+
+pub fn reminder_policy_from_json(config: &serde_json::Value) -> ReminderPolicy {
+    let object = config.as_object();
+    ReminderPolicy {
+        max_delay_hours: object
+            .and_then(|value| value.get("maxDelayHours"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(168)
+            .clamp(1, 8_760),
+        max_text_length: object
+            .and_then(|value| value.get("maxTextLength"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(500)
+            .clamp(50, 500) as usize,
+        timezone: object
+            .and_then(|value| value.get("timezone"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("UTC")
+            .to_owned(),
+        notify_user: object
+            .and_then(|value| value.get("notifyUser"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+        allow_recurring: object
+            .and_then(|value| value.get("allowRecurring"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        max_recurrences: object
+            .and_then(|value| value.get("maxRecurrences"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(12)
+            .clamp(1, 52),
+    }
+}
+
+/// Evaluate one reminder request. This is deliberately pure and bounded so
+/// that `POST .../simulate` and the Discord slash command cannot drift apart.
+pub fn evaluate_reminder(
+    policy: &ReminderPolicy,
+    observation: &ReminderObservation,
+) -> ReminderDecision {
+    let max_delay_ms = policy
+        .max_delay_hours
+        .saturating_mul(3_600_000)
+        .min(i64::MAX as u64) as i64;
+    let reject = |reason_code: &'static str, explanation: String| ReminderDecision {
+        allowed: false,
+        reason_code,
+        explanation,
+        delay_ms: observation.delay_ms,
+        repeat: observation.repeat.clone(),
+        remaining: policy.max_recurrences,
+    };
+    if parse_utc_offset_minutes(&observation.timezone).is_none() {
+        return reject(
+            "invalid_timezone",
+            "The reminder timezone must be UTC or a fixed offset between -14:00 and +14:00.".into(),
+        );
+    }
+    if observation.delay_ms <= 0 {
+        return reject(
+            "invalid_delay",
+            "The reminder time must be in the future.".into(),
+        );
+    }
+    if observation.delay_ms > max_delay_ms {
+        return reject(
+            "delay_exceeds_limit",
+            format!(
+                "The reminder is beyond the configured {} hour limit.",
+                policy.max_delay_hours
+            ),
+        );
+    }
+    if observation.text.len() > policy.max_text_length {
+        return reject(
+            "text_exceeds_limit",
+            format!(
+                "The reminder is longer than the configured {} character limit.",
+                policy.max_text_length
+            ),
+        );
+    }
+    if let Some(repeat) = observation.repeat.as_deref() {
+        if !policy.allow_recurring {
+            return reject(
+                "recurring_disabled",
+                "Recurring reminders are disabled in this server's dashboard.".into(),
+            );
+        }
+        if !matches!(repeat, "daily" | "weekly") {
+            return reject(
+                "invalid_repeat",
+                "Choose daily or weekly for a recurring reminder.".into(),
+            );
+        }
+    }
+    ReminderDecision {
+        allowed: true,
+        reason_code: "accepted",
+        explanation: "The reminder is within the server limits and can be scheduled.".into(),
+        delay_ms: observation.delay_ms,
+        repeat: observation.repeat.clone(),
+        remaining: if observation.repeat.is_some() {
+            policy.max_recurrences
+        } else {
+            0
+        },
+    }
+}
+
 impl FeatureAdapter for ReminderAdapter {
     fn descriptor(&self) -> FeatureAdapterDescriptor {
         FeatureAdapterDescriptor {
@@ -4169,6 +4323,52 @@ impl FeatureAdapter for ReminderAdapter {
             ));
         }
         projection
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let policy = reminder_policy_from_json(config);
+        let observation = ReminderObservation {
+            delay_ms: fixture
+                .get("delayMs")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(600_000),
+            text: fixture
+                .get("reminderText")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Preview reminder")
+                .to_owned(),
+            repeat: fixture
+                .get("repeat")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            timezone: fixture
+                .get("timezone")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(policy.timezone.as_str())
+                .to_owned(),
+        };
+        let decision = evaluate_reminder(&policy, &observation);
+        if decision.allowed {
+            let mention = if policy.notify_user {
+                " with a member mention"
+            } else {
+                " quietly"
+            };
+            let recurrence = decision
+                .repeat
+                .as_deref()
+                .map(|repeat| format!(" and repeat {repeat} up to {} time(s)", decision.remaining))
+                .unwrap_or_default();
+            vec![format!(
+                "Schedule the bounded reminder{}{} (delay: {} ms).",
+                mention, recurrence, decision.delay_ms
+            )]
+        } else {
+            vec![format!(
+                "Reminder rejected ({}): {}",
+                decision.reason_code, decision.explanation
+            )]
+        }
     }
 }
 
@@ -7846,6 +8046,76 @@ mod tests {
     #[test]
     fn unknown_quota_is_closed() {
         assert_eq!(quota_limit(&Plan::Free, "unknown"), 0);
+    }
+
+    #[test]
+    fn reminder_evaluator_applies_delay_length_and_repeat_policy() {
+        let policy = ReminderPolicy {
+            max_delay_hours: 1,
+            max_text_length: 20,
+            timezone: "UTC".into(),
+            notify_user: true,
+            allow_recurring: true,
+            max_recurrences: 3,
+        };
+        let accepted = evaluate_reminder(
+            &policy,
+            &ReminderObservation {
+                delay_ms: 30 * 60 * 1_000,
+                text: "check the queue".into(),
+                repeat: Some("daily".into()),
+                timezone: "UTC".into(),
+            },
+        );
+        assert!(accepted.allowed);
+        assert_eq!(accepted.remaining, 3);
+
+        let too_long = evaluate_reminder(
+            &policy,
+            &ReminderObservation {
+                delay_ms: 1_000,
+                text: "this reminder is deliberately too long".into(),
+                repeat: None,
+                timezone: "UTC".into(),
+            },
+        );
+        assert_eq!(too_long.reason_code, "text_exceeds_limit");
+
+        let invalid_repeat = evaluate_reminder(
+            &policy,
+            &ReminderObservation {
+                delay_ms: 1_000,
+                text: "short".into(),
+                repeat: Some("hourly".into()),
+                timezone: "UTC".into(),
+            },
+        );
+        assert_eq!(invalid_repeat.reason_code, "invalid_repeat");
+    }
+
+    #[test]
+    fn reminder_adapter_simulation_uses_runtime_evaluator() {
+        let adapter = ReminderAdapter;
+        let effects = adapter.simulate(
+            &serde_json::json!({
+                "maxDelayHours": 1,
+                "maxTextLength": 20,
+                "timezone": "UTC",
+                "allowRecurring": false,
+                "maxRecurrences": 3,
+            }),
+            &serde_json::json!({
+                "delayMs": 120_000,
+                "reminderText": "short",
+                "repeat": "daily",
+                "timezone": "UTC",
+            }),
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| effect.contains("recurring_disabled"))
+        );
     }
 
     #[test]

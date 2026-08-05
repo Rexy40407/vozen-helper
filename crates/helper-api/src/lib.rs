@@ -17,8 +17,9 @@ use helper_contracts::{
     RankCardConfig, SessionClaims, SimulationResult, ValidationIssue,
 };
 use helper_core::{
-    Capability, FEATURE_SCHEMA_VERSION, LeaderboardEntry, anti_spam_policy_from_json,
-    evaluate_anti_spam, feature_adapter, feature_maturity, is_known_feature, quota_limit,
+    Capability, FEATURE_SCHEMA_VERSION, LeaderboardEntry, ReminderObservation,
+    anti_spam_policy_from_json, evaluate_anti_spam, evaluate_reminder, feature_adapter,
+    feature_maturity, is_known_feature, quota_limit, reminder_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, CoinGeckoClient, EntitlementClient, EthereumRpcClient, GasClient,
@@ -7570,6 +7571,14 @@ struct FeatureTestRequest {
     /// opt-out evaluator used by the Discord command.
     #[serde(default, rename = "leaderboardEntries")]
     leaderboard_entries: Vec<LeaderboardEntry>,
+    #[serde(default, rename = "reminderDelayMs")]
+    reminder_delay_ms: Option<i64>,
+    #[serde(default, rename = "reminderText")]
+    reminder_text: Option<String>,
+    #[serde(default, rename = "reminderRepeat")]
+    reminder_repeat: Option<String>,
+    #[serde(default, rename = "reminderTimezone")]
+    reminder_timezone: Option<String>,
 }
 
 fn generic_feature_effect(key: &str) -> Vec<String> {
@@ -7726,6 +7735,10 @@ async fn test_feature(
         "hasAvatar": test.has_avatar,
         "displayName": test.display_name.clone(),
         "leaderboardEntries": test.leaderboard_entries.clone(),
+        "delayMs": test.reminder_delay_ms,
+        "reminderText": test.reminder_text.clone().or_else(|| test.content.clone()),
+        "repeat": test.reminder_repeat.clone(),
+        "timezone": test.reminder_timezone.clone(),
     });
     let adapter_effects = if maturity == FeatureMaturity::Blocked {
         // A blocked provider must never claim that a JSON draft would be
@@ -7743,6 +7756,7 @@ async fn test_feature(
         feature_adapter(&key).map(|adapter| adapter.simulate(&test.config, &adapter_fixture))
     };
     let mut anti_spam_decision: Option<AntiSpamDecision> = None;
+    let mut reminder_decision = None;
     let effects = match key.as_str() {
         "protection.antispam" => {
             let fixture = anti_spam_fixture.clone();
@@ -7773,6 +7787,27 @@ async fn test_feature(
         "management.workflows" => adapter_effects.clone().unwrap_or_else(|| {
             vec!["Executar o fluxo em modo dry-run e registar o resultado".into()]
         }),
+        "utility.reminders" => {
+            let policy = reminder_policy_from_json(&test.config);
+            let observation = ReminderObservation {
+                delay_ms: test.reminder_delay_ms.unwrap_or(600_000),
+                text: test
+                    .reminder_text
+                    .clone()
+                    .or_else(|| test.content.clone())
+                    .unwrap_or_else(|| "Preview reminder".into()),
+                repeat: test.reminder_repeat.clone(),
+                timezone: test
+                    .reminder_timezone
+                    .clone()
+                    .unwrap_or_else(|| policy.timezone.clone()),
+            };
+            let decision = evaluate_reminder(&policy, &observation);
+            reminder_decision = Some(decision);
+            adapter_effects
+                .clone()
+                .unwrap_or_else(|| vec!["The reminder adapter could not produce a preview.".into()])
+        }
         _ => adapter_effects
             .clone()
             .unwrap_or_else(|| generic_feature_effect(&key)),
@@ -7792,6 +7827,7 @@ async fn test_feature(
         "maturity": maturity,
         "result": result,
         "decision": anti_spam_decision,
+        "reminderDecision": reminder_decision,
         "adapterEffects": adapter_effects,
     })))
 }

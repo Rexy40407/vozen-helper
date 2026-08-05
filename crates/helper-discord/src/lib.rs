@@ -5,13 +5,13 @@ use chrono::{Datelike, Duration as ChronoDuration, TimeZone, Utc};
 use helper_contracts::{AntiSpamObservation, AntiSpamPolicy, Plan};
 use helper_core::{
     AchievementPolicy, AntiRaidPolicy, Config, JoinGateObservation, JoinGatePolicy,
-    LeaderboardEntry, ModerationObservation, ModerationPolicy, StarboardObservation,
-    WorkflowObservation, WorkflowPolicy, anti_spam_policy_from_json, evaluate_achievements,
-    evaluate_anti_raid, evaluate_anti_spam, evaluate_join_gate, evaluate_leaderboard,
-    evaluate_moderation, evaluate_scam_with_roles, evaluate_starboard, evaluate_workflow,
-    feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
-    parse_utc_offset_minutes, quota_limit, render_member_message, scam_policy_from_json,
-    starboard_policy_from_json,
+    LeaderboardEntry, ModerationObservation, ModerationPolicy, ReminderObservation, ReminderPolicy,
+    StarboardObservation, WorkflowObservation, WorkflowPolicy, anti_spam_policy_from_json,
+    evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam, evaluate_join_gate,
+    evaluate_leaderboard, evaluate_moderation, evaluate_reminder, evaluate_scam_with_roles,
+    evaluate_starboard, evaluate_workflow, feature_is_configurable, feature_maturity,
+    leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit, render_member_message,
+    scam_policy_from_json, starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -5985,33 +5985,8 @@ impl Handler {
                 let time = option_string(command, "time").unwrap_or_default();
                 let text = option_string(command, "text").unwrap_or_default();
                 let repeat = option_string(command, "repeat");
-                let timezone = setting_string(
-                    &self.store,
-                    &guild_text,
-                    "utility.reminders.timezone",
-                )
-                .unwrap_or_else(|| "UTC".to_string());
-                if parse_utc_offset_minutes(&timezone).is_none() {
-                    return respond(
-                        ctx,
-                        command,
-                        "The server reminder timezone is invalid; ask an administrator to choose a supported UTC offset.",
-                    )
-                    .await;
-                }
-                if repeat.is_some()
-                    && !setting_bool(&self.store, &guild_text, "utility.reminders.allow_recurring", false)
-                {
-                    return respond(
-                        ctx,
-                        command,
-                        "Recurring reminders are disabled in this server's dashboard.",
-                    )
-                    .await;
-                }
-                if repeat.is_some_and(|value| value != "daily" && value != "weekly") {
-                    return respond(ctx, command, "Choose daily or weekly for repeat.").await;
-                }
+                let policy = reminder_policy_for_store(&self.store, &guild_text);
+                let timezone = policy.timezone.clone();
                 let now_ms = chrono::Utc::now().timestamp_millis();
                 let Some(delay) = parse_reminder_delay(time, &timezone, now_ms) else {
                     return respond(
@@ -6021,53 +5996,33 @@ impl Handler {
                     )
                     .await;
                 };
-                let max_delay_hours = setting_u64(
-                    &self.store,
-                    &guild_text,
-                    "utility.reminders.max_delay_hours",
-                    168,
-                )
-                .clamp(1, 8_760);
-                let max_delay_ms = max_delay_hours
-                    .saturating_mul(3_600_000)
-                    .min(i64::MAX as u64) as i64;
-                if delay > max_delay_ms {
-                    return respond(
-                        ctx,
-                        command,
-                        "That reminder is beyond the server's configured maximum delay.",
-                    )
-                    .await;
+                let decision = evaluate_reminder(
+                    &policy,
+                    &ReminderObservation {
+                        delay_ms: delay,
+                        text: text.to_owned(),
+                        repeat: repeat.map(str::to_owned),
+                        timezone: timezone.clone(),
+                    },
+                );
+                if !decision.allowed {
+                    let message = match decision.reason_code {
+                        "invalid_timezone" => "The server reminder timezone is invalid; ask an administrator to choose a supported UTC offset.",
+                        "recurring_disabled" => "Recurring reminders are disabled in this server's dashboard.",
+                        "invalid_repeat" => "Choose daily or weekly for repeat.",
+                        "delay_exceeds_limit" => "That reminder is beyond the server's configured maximum delay.",
+                        "text_exceeds_limit" => "The reminder is longer than the server's configured limit.",
+                        _ => "That reminder cannot be scheduled with the current server policy.",
+                    };
+                    return respond(ctx, command, message).await;
                 }
-                let max_text_length = setting_u64(
-                    &self.store,
-                    &guild_text,
-                    "utility.reminders.max_text_length",
-                    500,
-                )
-                .clamp(50, 500) as usize;
-                if text.len() > max_text_length {
-                    return respond(
-                        ctx,
-                        command,
-                        "The reminder is longer than the server's configured limit.",
-                    )
-                    .await;
-                }
-                let max_recurrences = setting_u64(
-                    &self.store,
-                    &guild_text,
-                    "utility.reminders.max_recurrences",
-                    12,
-                )
-                .clamp(1, 52);
                 let payload = serde_json::json!({
                     "channel_id": command.channel_id.to_string(),
                     "text": text,
                     "repeat": repeat,
                     "timezone": timezone,
                     "local_time": parse_clock_time(time).map(|(hour, minute)| format!("{hour:02}:{minute:02}")),
-                    "remaining": repeat.as_ref().map(|_| max_recurrences),
+                    "remaining": repeat.as_ref().map(|_| decision.remaining),
                 });
                 let id = self.store.schedule(
                     &guild_text,
@@ -10461,6 +10416,21 @@ fn moderation_decision(
             requested_count,
         },
     )
+}
+
+fn reminder_policy_for_store(store: &Store, guild_id: &str) -> ReminderPolicy {
+    ReminderPolicy {
+        max_delay_hours: setting_u64(store, guild_id, "utility.reminders.max_delay_hours", 168)
+            .clamp(1, 8_760),
+        max_text_length: setting_u64(store, guild_id, "utility.reminders.max_text_length", 500)
+            .clamp(50, 500) as usize,
+        timezone: setting_string(store, guild_id, "utility.reminders.timezone")
+            .unwrap_or_else(|| "UTC".into()),
+        notify_user: setting_bool(store, guild_id, "utility.reminders.notify_user", true),
+        allow_recurring: setting_bool(store, guild_id, "utility.reminders.allow_recurring", false),
+        max_recurrences: setting_u64(store, guild_id, "utility.reminders.max_recurrences", 12)
+            .clamp(1, 52),
+    }
 }
 
 fn anti_spam_policy_for_store(store: &Store, guild_id: &str) -> AntiSpamPolicy {
