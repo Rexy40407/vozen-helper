@@ -1963,6 +1963,18 @@ impl EventHandler for Handler {
                 None,
                 &detail,
             );
+            if let Some(raw_channel) =
+                setting_string(&self.store, &guild_text, "management.audit.log_channel")
+                    .filter(|value| !value.trim().is_empty())
+                && let Ok(log_channel) = raw_channel.parse::<u64>()
+            {
+                let _ = ChannelId::new(log_channel)
+                    .say(
+                        &ctx.http,
+                        format!("Audit: <@{}> joined the server.", new_member.user.id),
+                    )
+                    .await;
+            }
         }
         // Discord's member-add event does not carry an invite code. When the
         // invite tracker is enabled, compare the current usage counters with
@@ -2529,6 +2541,15 @@ impl EventHandler for Handler {
                 None,
                 &detail,
             );
+            if let Some(raw_channel) =
+                setting_string(&self.store, &guild_text, "management.audit.log_channel")
+                    .filter(|value| !value.trim().is_empty())
+                && let Ok(log_channel) = raw_channel.parse::<u64>()
+            {
+                let _ = ChannelId::new(log_channel)
+                    .say(&ctx.http, format!("Audit: <@{}> left the server.", user.id))
+                    .await;
+            }
         }
         if feature_enabled(&self.store, &guild_text, "support.welcome", None) {
             let farewell_template =
