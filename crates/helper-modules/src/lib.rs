@@ -56,6 +56,15 @@ pub struct YouTubeVideo {
     pub channel_title: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct YouTubeSearchResult {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub url: String,
+    pub channel_title: String,
+}
+
 /// Server-side client for public RSS/Atom feeds. URLs are structurally
 /// validated, resolved away from private/link-local addresses and fetched
 /// without following redirects so this cannot become an SSRF proxy.
@@ -1913,6 +1922,16 @@ pub struct TwitchUser {
     pub display_name: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TwitchChannelSearchResult {
+    pub broadcaster_login: String,
+    pub display_name: String,
+    pub game_name: String,
+    pub title: String,
+    pub is_live: bool,
+    pub url: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct TwitchTokenResponse {
     access_token: String,
@@ -1923,6 +1942,24 @@ struct TwitchTokenResponse {
 struct TwitchUsersResponse {
     #[serde(default)]
     data: Vec<TwitchUserPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TwitchSearchChannelsResponse {
+    #[serde(default)]
+    data: Vec<TwitchSearchChannelPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TwitchSearchChannelPayload {
+    broadcaster_login: String,
+    display_name: String,
+    #[serde(default)]
+    game_name: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    is_live: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2035,6 +2072,46 @@ impl TwitchClient {
             login: value.login,
             display_name: value.display_name,
         }))
+    }
+
+    /// Search public channels through Twitch Helix. This uses the existing
+    /// app access token and never scrapes twitch.tv pages.
+    pub async fn search_channels(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> anyhow::Result<Vec<TwitchChannelSearchResult>> {
+        let query = query.trim();
+        if !(1..=128).contains(&query.len()) {
+            anyhow::bail!("invalid_twitch_search_query");
+        }
+        let first = max_results.clamp(1, 5).to_string();
+        let token = self.app_token().await?;
+        let response = self
+            .http
+            .get("https://api.twitch.tv/helix/search/channels")
+            .query(&[("query", query), ("first", first.as_str())])
+            .header("Client-Id", self.client_id.as_ref())
+            .bearer_auth(token)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("twitch_api_error:{status}");
+        }
+        let payload: TwitchSearchChannelsResponse = response.json().await?;
+        Ok(payload
+            .data
+            .into_iter()
+            .map(|item| TwitchChannelSearchResult {
+                url: format!("https://twitch.tv/{}", item.broadcaster_login),
+                broadcaster_login: item.broadcaster_login,
+                display_name: item.display_name,
+                game_name: item.game_name,
+                title: item.title,
+                is_live: item.is_live,
+            })
+            .collect())
     }
 
     /// Ensures a single stream.online EventSub subscription exists for the
@@ -2448,6 +2525,24 @@ struct YouTubeChannelsResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct YouTubeSearchResponse {
+    #[serde(default)]
+    items: Vec<YouTubeSearchItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct YouTubeSearchItem {
+    id: YouTubeSearchId,
+    snippet: YouTubePlaylistSnippet,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct YouTubeSearchId {
+    #[serde(rename = "videoId", default)]
+    video_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct YouTubeChannelItem {
     id: String,
     snippet: YouTubeChannelSnippet,
@@ -2547,6 +2642,52 @@ impl YouTubeClient {
 
     pub fn is_configured(&self) -> bool {
         !self.api_key.is_empty()
+    }
+
+    /// Search public videos through the official YouTube Data API. The
+    /// caller supplies a bounded result count; arbitrary URLs are never
+    /// fetched and non-video resources are excluded from the response.
+    pub async fn search_videos(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> anyhow::Result<Vec<YouTubeSearchResult>> {
+        let query = query.trim();
+        if !(1..=128).contains(&query.len()) {
+            anyhow::bail!("invalid_youtube_search_query");
+        }
+        let max_results = max_results.clamp(1, 5).to_string();
+        let response = self
+            .http
+            .get("https://www.googleapis.com/youtube/v3/search")
+            .query(&[
+                ("part", "snippet"),
+                ("q", query),
+                ("type", "video"),
+                ("maxResults", max_results.as_str()),
+                ("key", self.api_key.as_ref()),
+            ])
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("youtube_api_error:{status}");
+        }
+        let payload: YouTubeSearchResponse = response.json().await?;
+        Ok(payload
+            .items
+            .into_iter()
+            .filter_map(|item| {
+                let id = item.id.video_id?;
+                Some(YouTubeSearchResult {
+                    url: format!("https://www.youtube.com/watch?v={id}"),
+                    id,
+                    title: item.snippet.title,
+                    description: item.snippet.description,
+                    channel_title: item.snippet.channel_title,
+                })
+            })
+            .collect())
     }
 
     /// Resolve one public channel by its stable YouTube channel ID.
@@ -2688,6 +2829,54 @@ mod tests {
         assert_eq!(item.content_details.video_id.as_deref(), Some("abc123"));
         assert_eq!(item.snippet.channel_title, "Vozen");
         assert_eq!(item.snippet.published_at, "2026-08-02T12:00:00Z");
+    }
+
+    #[test]
+    fn official_search_payloads_are_bounded_and_decode_video_channels() {
+        let youtube: YouTubeSearchResponse = serde_json::from_value(serde_json::json!({
+            "items": [{
+                "id": {"kind": "youtube#video", "videoId": "abc123"},
+                "snippet": {
+                    "title": "A video",
+                    "description": "Description",
+                    "publishedAt": "2026-08-02T12:00:00Z",
+                    "channelTitle": "Vozen"
+                }
+            }, {
+                "id": {"kind": "youtube#channel", "channelId": "ignored"},
+                "snippet": {"title": "Not a video"}
+            }]
+        }))
+        .expect("YouTube search payload should decode");
+        let videos = youtube
+            .items
+            .into_iter()
+            .filter_map(|item| {
+                let id = item.id.video_id?;
+                Some(YouTubeSearchResult {
+                    id: id.clone(),
+                    title: item.snippet.title,
+                    description: item.snippet.description,
+                    url: format!("https://www.youtube.com/watch?v={id}"),
+                    channel_title: item.snippet.channel_title,
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0].url, "https://www.youtube.com/watch?v=abc123");
+
+        let twitch: TwitchSearchChannelsResponse = serde_json::from_value(serde_json::json!({
+            "data": [{
+                "broadcaster_login": "vozen",
+                "display_name": "Vozen",
+                "game_name": "Just Chatting",
+                "title": "Welcome",
+                "is_live": true
+            }]
+        }))
+        .expect("Twitch search payload should decode");
+        assert_eq!(twitch.data[0].broadcaster_login, "vozen");
+        assert!(twitch.data[0].is_live);
     }
 
     #[test]

@@ -17,8 +17,9 @@ use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
     EthereumRpcClient, GasClient, GasQuote, InstagramClient, InstagramMedia, KickClient,
     KickStream, OpenSeaClient, OpenSeaCollectionInfo, OpenSeaCollectionStats, OpenSeaSale,
-    RedditClient, RedditPost, RssClient, TikTokClient, TikTokVideo, TwitchClient, XClient, XPost,
-    YouTubeClient, format_rss_message, format_twitch_message, format_youtube_message,
+    RedditClient, RedditPost, RssClient, TikTokClient, TikTokVideo, TwitchChannelSearchResult,
+    TwitchClient, XClient, XPost, YouTubeClient, YouTubeSearchResult, format_rss_message,
+    format_twitch_message, format_youtube_message,
 };
 use helper_store::{
     BlueskySubscriptionRecord, InstagramSubscriptionRecord, KickSubscriptionRecord,
@@ -987,8 +988,10 @@ impl EventHandler for Handler {
                     CreateCommandOption::new(
                         serenity::all::CommandOptionType::String,
                         "provider",
-                        "wikipedia, anilist or bluesky",
+                        "youtube, twitch, wikipedia, anilist or bluesky",
                     )
+                    .add_string_choice("YouTube", "youtube")
+                    .add_string_choice("Twitch", "twitch")
                     .add_string_choice("Wikipedia", "wikipedia")
                     .add_string_choice("AniList", "anilist")
                     .add_string_choice("Bluesky", "bluesky")
@@ -6518,8 +6521,32 @@ impl Handler {
                 let wikipedia = setting_bool(&self.store, &guild_text, "utility.search.allow_wikipedia", true);
                 let anilist = setting_bool(&self.store, &guild_text, "utility.search.allow_anilist", true);
                 let bluesky = setting_bool(&self.store, &guild_text, "utility.search.allow_bluesky", true);
+                let youtube = setting_bool(&self.store, &guild_text, "utility.search.allow_youtube", true);
+                let twitch = setting_bool(&self.store, &guild_text, "utility.search.allow_twitch", true);
                 let http = HttpClient::new();
                 match provider.as_str() {
+                    "youtube" if youtube => {
+                        let Some(client) = self.youtube.as_ref() else {
+                            return respond(ctx, command, "YouTube search is not configured on this Helper.").await;
+                        };
+                        let results = client.search_videos(&query, max_results).await?;
+                        if results.is_empty() {
+                            "No YouTube results were found.".to_string()
+                        } else {
+                            format_youtube_search_results(&results)
+                        }
+                    }
+                    "twitch" if twitch => {
+                        let Some(client) = self.twitch.as_ref() else {
+                            return respond(ctx, command, "Twitch search is not configured on this Helper.").await;
+                        };
+                        let results = client.search_channels(&query, max_results).await?;
+                        if results.is_empty() {
+                            "No Twitch results were found.".to_string()
+                        } else {
+                            format_twitch_search_results(&results)
+                        }
+                    }
                     "wikipedia" if wikipedia => {
                         let response = http
                             .get("https://en.wikipedia.org/w/api.php")
@@ -6631,8 +6658,8 @@ impl Handler {
                             .unwrap_or_default();
                         if rows.is_empty() { "No Bluesky results were found.".to_string() } else { rows.join("\n") }
                     }
-                    "wikipedia" | "anilist" | "bluesky" => "That search provider is disabled in this server's settings.".to_string(),
-                    _ => "Choose an approved provider: `wikipedia`, `anilist` or `bluesky`.".to_string(),
+                    "youtube" | "twitch" | "wikipedia" | "anilist" | "bluesky" => "That search provider is disabled in this server's settings.".to_string(),
+                    _ => "Choose an approved provider: `youtube`, `twitch`, `wikipedia`, `anilist` or `bluesky`.".to_string(),
                 }
             }
             "serverstats" => {
@@ -10904,6 +10931,53 @@ fn is_moderation_command(name: &str) -> bool {
 /// drives gateway handlers and provider workers.  Previously only a handful
 /// of commands checked their toggle, which meant a dashboard owner could
 /// disable a module while its slash commands continued to mutate state.
+fn format_youtube_search_results(results: &[YouTubeSearchResult]) -> String {
+    results
+        .iter()
+        .enumerate()
+        .map(|(index, result)| {
+            format!(
+                "{}. **{}** — {}\n{}",
+                index + 1,
+                sanitize_external_text(&truncate(&result.title, 160)),
+                sanitize_external_text(&truncate(&result.channel_title, 80)),
+                result.url
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_twitch_search_results(results: &[TwitchChannelSearchResult]) -> String {
+    results
+        .iter()
+        .enumerate()
+        .map(|(index, result)| {
+            let status = if result.is_live { "LIVE" } else { "offline" };
+            let details = if result.game_name.is_empty() {
+                status.to_string()
+            } else {
+                format!("{status} · {}", truncate(&result.game_name, 80))
+            };
+            format!(
+                "{}. **{}** — {}\n{} ({})",
+                index + 1,
+                sanitize_external_text(&truncate(&result.display_name, 100)),
+                sanitize_external_text(&truncate(&result.title, 160)),
+                result.url,
+                sanitize_external_text(&details)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn sanitize_external_text(value: &str) -> String {
+    value
+        .replace("@everyone", "@\u{200b}everyone")
+        .replace("@here", "@\u{200b}here")
+}
+
 fn command_feature_key(name: &str) -> Option<&'static str> {
     Some(match name {
         "privacy" => "management.privacy",

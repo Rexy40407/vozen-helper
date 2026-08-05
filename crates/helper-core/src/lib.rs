@@ -7791,7 +7791,9 @@ impl FeatureAdapter for SearchAdapter {
                         {"key":"maxResults","label":"Results per search","kind":"number","min":1,"max":5},
                         {"key":"allowWikipedia","label":"Wikipedia","kind":"toggle"},
                         {"key":"allowAniList","label":"AniList","kind":"toggle"},
-                        {"key":"allowBluesky","label":"Bluesky","kind":"toggle"}
+                        {"key":"allowBluesky","label":"Bluesky","kind":"toggle"},
+                        {"key":"allowYouTube","label":"YouTube","kind":"toggle"},
+                        {"key":"allowTwitch","label":"Twitch","kind":"toggle"}
                     ]
                 }]
             }),
@@ -7799,7 +7801,9 @@ impl FeatureAdapter for SearchAdapter {
                 "maxResults": 5,
                 "allowWikipedia": true,
                 "allowAniList": true,
-                "allowBluesky": true
+                "allowBluesky": true,
+                "allowYouTube": true,
+                "allowTwitch": true
             }),
             dependencies: vec!["outbound_https".into(), "send_messages".into()],
         }
@@ -7825,7 +7829,13 @@ impl FeatureAdapter for SearchAdapter {
                 severity: "error".into(),
             });
         }
-        for key in ["allowWikipedia", "allowAniList", "allowBluesky"] {
+        for key in [
+            "allowWikipedia",
+            "allowAniList",
+            "allowBluesky",
+            "allowYouTube",
+            "allowTwitch",
+        ] {
             if object.get(key).is_some_and(|value| !value.is_boolean()) {
                 issues.push(ValidationIssue {
                     path: key.into(),
@@ -7835,9 +7845,15 @@ impl FeatureAdapter for SearchAdapter {
                 });
             }
         }
-        if ["allowWikipedia", "allowAniList", "allowBluesky"]
-            .iter()
-            .all(|key| object.get(*key).and_then(serde_json::Value::as_bool) == Some(false))
+        if [
+            "allowWikipedia",
+            "allowAniList",
+            "allowBluesky",
+            "allowYouTube",
+            "allowTwitch",
+        ]
+        .iter()
+        .all(|key| object.get(*key).and_then(serde_json::Value::as_bool) == Some(false))
         {
             issues.push(ValidationIssue {
                 path: "providers".into(),
@@ -7874,6 +7890,18 @@ impl FeatureAdapter for SearchAdapter {
             .and_then(serde_json::Value::as_bool)
         {
             projection.push(("utility.search.allow_bluesky".into(), value.to_string()));
+        }
+        if let Some(value) = config
+            .get("allowYouTube")
+            .and_then(serde_json::Value::as_bool)
+        {
+            projection.push(("utility.search.allow_youtube".into(), value.to_string()));
+        }
+        if let Some(value) = config
+            .get("allowTwitch")
+            .and_then(serde_json::Value::as_bool)
+        {
+            projection.push(("utility.search.allow_twitch".into(), value.to_string()));
         }
         projection
     }
@@ -9888,7 +9916,9 @@ mod tests {
                     "maxResults": 5,
                     "allowWikipedia": false,
                     "allowAniList": false,
-                    "allowBluesky": false
+                    "allowBluesky": false,
+                    "allowYouTube": false,
+                    "allowTwitch": false
                 }))
                 .iter()
                 .any(|issue| issue.code == "provider_required")
