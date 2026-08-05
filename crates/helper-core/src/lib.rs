@@ -7359,7 +7359,7 @@ pub struct EmbedsAdapter;
 
 impl EmbedsAdapter {
     pub const KEY: &'static str = "utility.embeds";
-    pub const SOURCE: &'static str = "embeds_adapter_v1";
+    pub const SOURCE: &'static str = "embeds_adapter_v2";
 }
 
 impl FeatureAdapter for EmbedsAdapter {
@@ -7368,8 +7368,8 @@ impl FeatureAdapter for EmbedsAdapter {
             key: Self::KEY.into(),
             source: Self::SOURCE.into(),
             schema_version: FEATURE_SCHEMA_VERSION,
-            schema: serde_json::json!({"version": FEATURE_SCHEMA_VERSION, "source": Self::SOURCE, "sections": [{"title":"Safe embed publishing", "description":"Publish a bounded embed from a slash command; mentions are disabled by default.", "fields":[{"key":"maxDescription","label":"Maximum description length","kind":"number","min":1,"max":4000}]}]}),
-            defaults: serde_json::json!({"maxDescription": 2000}),
+            schema: serde_json::json!({"version": FEATURE_SCHEMA_VERSION, "source": Self::SOURCE, "sections": [{"title":"Safe embed publishing", "description":"Publish a bounded embed from a slash command; mentions are disabled by default.", "fields":[{"key":"maxDescription","label":"Maximum description length","kind":"number","min":1,"max":4000},{"key":"defaultColor","label":"Default colour (hex)","kind":"text","maxLength":7,"placeholder":"#5865F2"},{"key":"defaultFooter","label":"Default footer","kind":"text","maxLength":2048}]}]}),
+            defaults: serde_json::json!({"maxDescription": 2000, "defaultColor":"", "defaultFooter":""}),
             dependencies: vec!["send_messages".into(), "embed_links".into()],
         }
     }
@@ -7383,6 +7383,7 @@ impl FeatureAdapter for EmbedsAdapter {
                 severity: "error".into(),
             }];
         };
+        let mut issues = Vec::new();
         match object.get("maxDescription") {
             Some(value)
                 if value
@@ -7405,14 +7406,60 @@ impl FeatureAdapter for EmbedsAdapter {
             }],
             None => Vec::new(),
         }
+        .into_iter()
+        .for_each(|issue| issues.push(issue));
+        if let Some(value) = object.get("defaultColor") {
+            let valid = value.as_str().is_some_and(|color| {
+                color.is_empty()
+                    || (color.len() == 7
+                        && color.starts_with('#')
+                        && color[1..]
+                            .chars()
+                            .all(|character| character.is_ascii_hexdigit()))
+            });
+            if !valid {
+                issues.push(ValidationIssue {
+                    path: "defaultColor".into(),
+                    code: "hex_color_required".into(),
+                    message: "Default colour must be empty or a #RRGGBB value.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if let Some(value) = object.get("defaultFooter")
+            && value
+                .as_str()
+                .is_none_or(|footer| footer.chars().count() > 2_048)
+        {
+            issues.push(ValidationIssue {
+                path: "defaultFooter".into(),
+                code: "text_too_long".into(),
+                message: "Default footer must be at most 2048 characters.".into(),
+                severity: "error".into(),
+            });
+        }
+        issues
     }
 
     fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
-        config
+        let mut projection = config
             .get("maxDescription")
             .and_then(serde_json::Value::as_i64)
             .map(|value| vec![("utility.embeds.max_description".into(), value.to_string())])
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Some(color) = config
+            .get("defaultColor")
+            .and_then(serde_json::Value::as_str)
+        {
+            projection.push(("utility.embeds.default_color".into(), color.into()));
+        }
+        if let Some(footer) = config
+            .get("defaultFooter")
+            .and_then(serde_json::Value::as_str)
+        {
+            projection.push(("utility.embeds.default_footer".into(), footer.into()));
+        }
+        projection
     }
 }
 
@@ -9805,5 +9852,36 @@ mod tests {
                 .iter()
                 .any(|issue| issue.code == "invalid_selection_mode")
         );
+    }
+
+    #[test]
+    fn embeds_adapter_projects_safe_visual_defaults() {
+        let adapter = feature_adapter("utility.embeds").expect("embeds adapter");
+        assert_eq!(adapter.descriptor().source, "embeds_adapter_v2");
+        assert!(
+            adapter
+                .validate(&serde_json::json!({
+                    "maxDescription": 1200,
+                    "defaultColor": "#5865F2",
+                    "defaultFooter": "Vozen Helper"
+                }))
+                .is_empty()
+        );
+        assert!(
+            adapter
+                .validate(&serde_json::json!({"defaultColor": "blue"}))
+                .iter()
+                .any(|issue| issue.path == "defaultColor")
+        );
+        let projection = adapter.runtime_projection(&serde_json::json!({
+            "maxDescription": 1200,
+            "defaultColor": "#5865F2",
+            "defaultFooter": "Vozen Helper"
+        }));
+        assert!(projection.contains(&("utility.embeds.default_color".into(), "#5865F2".into())));
+        assert!(projection.contains(&(
+            "utility.embeds.default_footer".into(),
+            "Vozen Helper".into()
+        )));
     }
 }

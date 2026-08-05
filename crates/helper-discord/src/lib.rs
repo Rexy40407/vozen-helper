@@ -29,12 +29,13 @@ use rand::seq::SliceRandom;
 use reqwest::Client as HttpClient;
 use serenity::{
     all::{
-        ButtonStyle, ChannelId, ChannelType, Client, Command, CommandDataOptionValue,
+        ButtonStyle, ChannelId, ChannelType, Client, Colour, Command, CommandDataOptionValue,
         CommandInteraction, Context, CreateActionRow, CreateAllowedMentions, CreateAttachment,
         CreateButton, CreateChannel, CreateCommand, CreateCommandOption, CreateEmbed,
-        CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, EditChannel,
-        EditMessage, EventHandler, GatewayIntents, Interaction, MessageId, MessageUpdateEvent,
-        PermissionOverwrite, PermissionOverwriteType, Permissions, Ready, RoleId,
+        CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage,
+        CreateMessage, EditChannel, EditMessage, EventHandler, GatewayIntents, Interaction,
+        MessageId, MessageUpdateEvent, PermissionOverwrite, PermissionOverwriteType, Permissions,
+        Ready, RoleId,
     },
     async_trait,
 };
@@ -995,6 +996,22 @@ impl EventHandler for Handler {
                         "Embed description",
                     )
                     .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "color",
+                        "Optional #RRGGBB accent colour",
+                    )
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "footer",
+                        "Optional footer text",
+                    )
+                    .required(false),
                 ),
             CreateCommand::new("starboard-set")
                 .description("Configure the starboard channel (staff)")
@@ -5627,12 +5644,41 @@ impl Handler {
                 )
                 .await;
             }
+            let configured_color =
+                setting_string(&self.store, &guild_text, "utility.embeds.default_color")
+                    .unwrap_or_default();
+            let color_text = option_string(command, "color")
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(configured_color.trim());
+            let parsed_color = parse_embed_colour(color_text);
+            if !color_text.is_empty() && parsed_color.is_none() {
+                return respond(ctx, command, "Colour must be a #RRGGBB value.").await;
+            }
+            let configured_footer =
+                setting_string(&self.store, &guild_text, "utility.embeds.default_footer")
+                    .unwrap_or_default();
+            let footer_text = option_string(command, "footer")
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(configured_footer.trim());
+            if footer_text.chars().count() > 2_048 {
+                return respond(ctx, command, "Footer must be at most 2048 characters.").await;
+            }
+            let mut embed = CreateEmbed::new().title(title).description(description);
+            if let Some(color) = parsed_color {
+                embed = embed.colour(color);
+            }
+            if !footer_text.is_empty() {
+                embed = embed.footer(CreateEmbedFooter::new(footer_text));
+            }
             command
                 .channel_id
                 .send_message(
                     &ctx.http,
                     CreateMessage::new()
-                        .embed(CreateEmbed::new().title(title).description(description)),
+                        .embed(embed)
+                        .allowed_mentions(CreateAllowedMentions::new()),
                 )
                 .await?;
             return respond(ctx, command, "Embed published.").await;
@@ -9813,6 +9859,14 @@ fn option_string<'a>(command: &'a CommandInteraction, name: &str) -> Option<&'a 
             _ => return None,
         })
     })
+}
+
+fn parse_embed_colour(value: &str) -> Option<Colour> {
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    (hex.len() == 6 && hex.chars().all(|character| character.is_ascii_hexdigit()))
+        .then(|| u32::from_str_radix(hex, 16).ok())
+        .flatten()
+        .map(Colour::new)
 }
 
 fn option_i64(command: &CommandInteraction, name: &str) -> Option<i64> {
