@@ -5115,6 +5115,13 @@ fn dependency_requires_role_management(dependency: &str) -> bool {
     dependency_permission(dependency).is_some_and(|(_, label)| label == "Manage Roles")
 }
 
+fn internal_feature_dependency(dependency: &str) -> Option<&'static str> {
+    match dependency {
+        "levels" => Some("community.levels"),
+        _ => None,
+    }
+}
+
 fn collect_configured_resources(
     value: &serde_json::Value,
     path: &str,
@@ -5236,6 +5243,19 @@ async fn generic_feature_preflight(
 
     if let Some(descriptor) = &descriptor {
         for dependency in &descriptor.dependencies {
+            if request.enabled
+                && let Some(required_feature) = internal_feature_dependency(dependency)
+                && required_feature != key
+                && !feature_enabled(&state, &claims.guild_id, required_feature)
+            {
+                add_dependency_issue(
+                    &mut issues,
+                    format!("dependencies.features.{required_feature}"),
+                    "feature_dependency_disabled",
+                    format!("Enable {required_feature} first; this feature uses its runtime data."),
+                    "error",
+                );
+            }
             if let Some((bit, label)) = dependency_permission(dependency) {
                 required_permissions.push(label);
                 let user_has = permission_bit(&guild_permissions, bit);
@@ -11449,6 +11469,11 @@ mod tests {
         assert!(dependency_requires_role_management("manage_roles"));
         assert!(dependency_requires_role_management("Manage Roles"));
         assert!(!dependency_requires_role_management("Manage Messages"));
+        assert_eq!(
+            internal_feature_dependency("levels"),
+            Some("community.levels")
+        );
+        assert_eq!(internal_feature_dependency("scheduler"), None);
     }
 
     #[tokio::test]
