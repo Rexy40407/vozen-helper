@@ -341,7 +341,10 @@ impl EventHandler for Handler {
             let store = self.store.clone();
             let http = ctx.http.clone();
             tokio::spawn(async move {
-                let mut last_birthday_day: Option<(i32, u32, u32)> = None;
+                // Birthday policies can use different UTC offsets.  Check once
+                // per minute instead of once per UTC day so a guild at UTC-14
+                // or UTC+14 is still announced on its own local day.
+                let mut last_birthday_minute: Option<i64> = None;
                 loop {
                     if let Ok(actions) =
                         store.due_scheduled_actions(chrono::Utc::now().timestamp_millis(), 100)
@@ -360,14 +363,10 @@ impl EventHandler for Handler {
                         }
                     }
                     let birthday_now = chrono::Utc::now();
-                    let birthday_day = (
-                        birthday_now.year(),
-                        birthday_now.month(),
-                        birthday_now.day(),
-                    );
-                    if last_birthday_day != Some(birthday_day) {
+                    let birthday_minute = birthday_now.timestamp().div_euclid(60);
+                    if last_birthday_minute != Some(birthday_minute) {
                         let _ = deliver_birthday_announcements(&http, &store, birthday_now).await;
-                        last_birthday_day = Some(birthday_day);
+                        last_birthday_minute = Some(birthday_minute);
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
