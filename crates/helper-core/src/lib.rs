@@ -252,6 +252,7 @@ pub struct ScamPolicy {
     pub blocked_domains: Vec<String>,
     pub blocked_keywords: Vec<String>,
     pub ignored_channels: Vec<String>,
+    pub ignored_roles: Vec<String>,
     pub alert_only: bool,
     pub timeout_seconds: u64,
 }
@@ -268,6 +269,7 @@ impl Default for ScamPolicy {
                 "verify your wallet".into(),
             ],
             ignored_channels: Vec::new(),
+            ignored_roles: Vec::new(),
             alert_only: false,
             timeout_seconds: 300,
         }
@@ -320,6 +322,19 @@ pub fn scam_policy_from_json(value: &serde_json::Value) -> ScamPolicy {
             .take(100)
             .collect();
     }
+    if let Some(value) = object
+        .get("ignoredRoles")
+        .and_then(serde_json::Value::as_array)
+    {
+        policy.ignored_roles = value
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|role| !role.is_empty())
+            .take(100)
+            .map(str::to_owned)
+            .collect();
+    }
     if let Some(value) = object.get("alertOnly").and_then(serde_json::Value::as_bool) {
         policy.alert_only = value;
     }
@@ -342,7 +357,23 @@ pub struct ScamDecision {
 }
 
 pub fn evaluate_scam(policy: &ScamPolicy, channel_id: &str, content: &str) -> ScamDecision {
-    if policy.ignored_channels.iter().any(|id| id == channel_id) {
+    evaluate_scam_with_roles(policy, channel_id, &[], content)
+}
+
+/// Evaluate scam policy with the member's roles. Keeping this pure makes the
+/// API simulator and the Discord gateway share exactly the same exemptions
+/// and matching rules.
+pub fn evaluate_scam_with_roles(
+    policy: &ScamPolicy,
+    channel_id: &str,
+    role_ids: &[String],
+    content: &str,
+) -> ScamDecision {
+    if policy.ignored_channels.iter().any(|id| id == channel_id)
+        || role_ids
+            .iter()
+            .any(|role| policy.ignored_roles.iter().any(|ignored| ignored == role))
+    {
         return ScamDecision {
             ignored: true,
             matched: Vec::new(),
@@ -353,13 +384,11 @@ pub fn evaluate_scam(policy: &ScamPolicy, channel_id: &str, content: &str) -> Sc
     }
     let lower = content.to_ascii_lowercase();
     let mut matched = Vec::new();
-    if policy.block_invites
-        && (lower.contains("discord.gg/") || lower.contains("discord.com/invite/"))
-    {
+    if policy.block_invites && contains_invite_link(&lower) {
         matched.push("discord_invite".into());
     }
     for domain in &policy.blocked_domains {
-        if lower.contains(domain) {
+        if contains_blocked_domain(&lower, domain) {
             matched.push(format!("domain:{domain}"));
         }
     }
@@ -384,6 +413,56 @@ pub fn evaluate_scam(policy: &ScamPolicy, channel_id: &str, content: &str) -> Sc
             "scam_pattern_monitoring".into()
         },
     }
+}
+
+fn contains_invite_link(content: &str) -> bool {
+    content.split_whitespace().any(|token| {
+        let host = normalize_host(token);
+        (host == "discord.gg" && token.contains("discord.gg/"))
+            || (host == "discord.com" && token.contains("discord.com/invite/"))
+    })
+}
+
+/// Match a blocked host without treating `example.com.evil.test` as
+/// `example.com`. Subdomains of a blocked domain remain blocked. Inputs are
+/// intentionally ASCII-bounded so look-alike Unicode hosts cannot silently
+/// bypass an administrator's domain list.
+fn contains_blocked_domain(content: &str, configured: &str) -> bool {
+    let domain = normalize_host(configured);
+    if domain.is_empty() || !domain.contains('.') {
+        return false;
+    }
+    content.split_whitespace().any(|token| {
+        let host = normalize_host(token);
+        !host.is_empty() && (host == domain || host.ends_with(&format!(".{domain}")))
+    })
+}
+
+fn normalize_host(value: &str) -> String {
+    let trimmed = value
+        .trim()
+        .trim_matches(|character: char| "<>[](){}\"'`,;!?".contains(character));
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    let without_www = without_scheme
+        .strip_prefix("www.")
+        .unwrap_or(without_scheme);
+    let host = without_www
+        .split(['/', '?', '#', ':'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if host.is_empty()
+        || !host.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '.'
+        })
+    {
+        return String::new();
+    }
+    host
 }
 
 /// Bounded anti-raid policy shared by the API simulator and the Discord
@@ -4397,6 +4476,7 @@ impl FeatureAdapter for AntiScamAdapter {
                         {"key":"blockedDomains","label":"Blocked domains","kind":"tags","max":100,"advanced":true},
                         {"key":"blockedKeywords","label":"Blocked phrases","kind":"tags","max":100,"advanced":true},
                         {"key":"ignoredChannels","label":"Ignored channels","kind":"channels","max":100,"advanced":true},
+                        {"key":"ignoredRoles","label":"Ignored roles","kind":"roles","max":100,"advanced":true},
                         {"key":"logChannel","label":"Log channel","kind":"channel","advanced":true},
                         {"key":"timeoutSeconds","label":"Timeout (seconds)","kind":"number","min":0,"max":86400,"advanced":true},
                         {"key":"alertOnly","label":"Monitor only","kind":"toggle","advanced":true}
@@ -4408,6 +4488,7 @@ impl FeatureAdapter for AntiScamAdapter {
                 "blockedDomains": [],
                 "blockedKeywords": ["free nitro", "steam gift", "claim your prize", "verify your wallet"],
                 "ignoredChannels": [],
+                "ignoredRoles": [],
                 "logChannel": "",
                 "timeoutSeconds": 300,
                 "alertOnly": false
@@ -4440,6 +4521,7 @@ impl FeatureAdapter for AntiScamAdapter {
             ("blockedDomains", 100_usize, true),
             ("blockedKeywords", 100, false),
             ("ignoredChannels", 100, false),
+            ("ignoredRoles", 100, false),
         ] {
             if let Some(value) = object.get(field) {
                 let valid = value.as_array().is_some_and(|items| {
@@ -4459,6 +4541,24 @@ impl FeatureAdapter for AntiScamAdapter {
                         path: field.into(),
                         code: "invalid_list".into(),
                         message: "Use a bounded list of non-empty values.".into(),
+                        severity: "error".into(),
+                    });
+                }
+            }
+        }
+        for field in ["ignoredChannels", "ignoredRoles"] {
+            if let Some(value) = object.get(field) {
+                let valid_ids = value.as_array().is_some_and(|items| {
+                    items.iter().all(|item| {
+                        item.as_str()
+                            .is_some_and(|id| id.trim().parse::<u64>().is_ok())
+                    })
+                });
+                if !valid_ids {
+                    issues.push(ValidationIssue {
+                        path: field.into(),
+                        code: "invalid_discord_ids".into(),
+                        message: "Choose valid Discord channel or role IDs.".into(),
                         severity: "error".into(),
                     });
                 }
@@ -4521,6 +4621,7 @@ impl FeatureAdapter for AntiScamAdapter {
             ("blockedDomains", "security.antiscam.blocked_domains"),
             ("blockedKeywords", "security.antiscam.blocked_keywords"),
             ("ignoredChannels", "security.antiscam.ignored_channels"),
+            ("ignoredRoles", "security.antiscam.ignored_roles"),
         ] {
             if let Some(values) = object.get(field).and_then(serde_json::Value::as_array) {
                 pairs.push((
@@ -4538,13 +4639,31 @@ impl FeatureAdapter for AntiScamAdapter {
 
     fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
         let channel_id = fixture_string(fixture, "channelId", "channel_id", "preview-channel");
+        let role_ids = fixture
+            .get("roleIds")
+            .or_else(|| fixture.get("role_ids"))
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .take(100)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let content = fixture_string(
             fixture,
             "content",
             "content",
             "Claim your free Nitro at https://discord.gg/example",
         );
-        let decision = evaluate_scam(&scam_policy_from_json(config), channel_id, content);
+        let decision = evaluate_scam_with_roles(
+            &scam_policy_from_json(config),
+            channel_id,
+            &role_ids,
+            content,
+        );
         let mut effects = if decision.ignored {
             vec!["Ignore the message because this channel is exempt.".into()]
         } else if decision.matched.is_empty() {
@@ -7995,10 +8114,17 @@ mod tests {
                 .iter()
                 .any(|issue| issue.path == "blockedDomains")
         );
+        assert!(
+            adapter
+                .validate(&serde_json::json!({"ignoredRoles": ["staff"]}))
+                .iter()
+                .any(|issue| issue.path == "ignoredRoles")
+        );
         let policy = scam_policy_from_json(&serde_json::json!({
             "blockInvites": true,
             "blockedDomains": ["example.invalid"],
             "blockedKeywords": ["free coins"],
+            "ignoredRoles": ["777"],
             "timeoutSeconds": 60
         }));
         let decision = evaluate_scam(
@@ -8015,6 +8141,16 @@ mod tests {
         );
         assert_eq!(decision.timeout_seconds, 60);
         assert!(evaluate_scam(&policy, "123", "https://discord.gg/example").should_act);
+        assert!(
+            evaluate_scam(&policy, "123", "https://example.invalid.evil.test/landing")
+                .matched
+                .iter()
+                .all(|value| !value.starts_with("domain:"))
+        );
+        assert!(
+            evaluate_scam_with_roles(&policy, "123", &["777".into()], "https://example.invalid")
+                .ignored
+        );
         assert!(evaluate_scam(&policy, "123", "hello").matched.is_empty());
     }
 

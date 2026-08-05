@@ -6,7 +6,7 @@ use helper_contracts::{AntiSpamObservation, AntiSpamPolicy, Plan};
 use helper_core::{
     AntiRaidPolicy, Config, JoinGateObservation, JoinGatePolicy, LeaderboardEntry,
     StarboardObservation, anti_spam_policy_from_json, evaluate_anti_raid, evaluate_anti_spam,
-    evaluate_join_gate, evaluate_leaderboard, evaluate_scam, evaluate_starboard,
+    evaluate_join_gate, evaluate_leaderboard, evaluate_scam_with_roles, evaluate_starboard,
     feature_is_configurable, feature_maturity, leaderboard_policy_from_json, quota_limit,
     scam_policy_from_json, starboard_policy_from_json,
 };
@@ -3043,7 +3043,23 @@ impl EventHandler for Handler {
             return;
         }
         let policy = scam_policy_for_store(&self.store, &guild_text);
-        let decision = evaluate_scam(&policy, &event.channel_id.to_string(), content);
+        let edit_role_ids = new
+            .as_ref()
+            .and_then(|message| message.member.as_ref())
+            .map(|member| {
+                member
+                    .roles
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let decision = evaluate_scam_with_roles(
+            &policy,
+            &event.channel_id.to_string(),
+            &edit_role_ids,
+            content,
+        );
         if decision.ignored || decision.matched.is_empty() {
             return;
         }
@@ -3338,8 +3354,23 @@ impl EventHandler for Handler {
         }
         if feature_enabled(&self.store, &guild_text, "protection.antiscam", None) {
             let policy = scam_policy_for_store(&self.store, &guild_text);
-            let decision =
-                evaluate_scam(&policy, &message.channel_id.to_string(), &message.content);
+            let role_ids = message
+                .member
+                .as_ref()
+                .map(|member| {
+                    member
+                        .roles
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let decision = evaluate_scam_with_roles(
+                &policy,
+                &message.channel_id.to_string(),
+                &role_ids,
+                &message.content,
+            );
             if !decision.ignored && !decision.matched.is_empty() {
                 let reason = format!("Scam protection matched: {}", decision.matched.join(", "));
                 let _ = self.store.record_case(
@@ -10281,6 +10312,7 @@ fn scam_policy_for_store(store: &Store, guild_id: &str) -> helper_core::ScamPoli
         "blockedDomains": list("security.antiscam.blocked_domains"),
         "blockedKeywords": list("security.antiscam.blocked_keywords"),
         "ignoredChannels": list("security.antiscam.ignored_channels"),
+        "ignoredRoles": list("security.antiscam.ignored_roles"),
         "logChannel": setting_string(store, guild_id, "security.antiscam.log_channel").unwrap_or_default(),
         "timeoutSeconds": setting_u64(store, guild_id, "security.antiscam.timeout_seconds", 300),
         "alertOnly": setting_bool(store, guild_id, "security.antiscam.alert_only", false),
