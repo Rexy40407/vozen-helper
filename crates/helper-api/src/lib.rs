@@ -1,5 +1,7 @@
 //! Versioned API and compatibility routes for the existing panel.
 
+#![recursion_limit = "256"]
+
 use anyhow::Result;
 use axum::{
     Json, Router,
@@ -8678,6 +8680,14 @@ struct FeatureTestRequest {
     winners: Option<i64>,
     #[serde(default, rename = "requiredRole")]
     required_role: Option<String>,
+    /// Bounded birthday fixture values used by the same calendar and
+    /// delivery evaluator as the scheduled Discord worker.
+    #[serde(default, rename = "month")]
+    month: Option<u32>,
+    #[serde(default, rename = "day")]
+    day: Option<u32>,
+    #[serde(default, rename = "memberId")]
+    member_id: Option<String>,
 }
 
 fn generic_feature_effect(key: &str) -> Vec<String> {
@@ -8861,6 +8871,9 @@ async fn test_feature(
         "prize": test.prize.clone(),
         "winners": test.winners,
         "requiredRole": test.required_role.clone(),
+        "month": test.month,
+        "day": test.day,
+        "memberId": test.member_id.clone(),
     });
     let adapter_effects = if maturity == FeatureMaturity::Blocked {
         // A blocked provider must never claim that a JSON draft would be

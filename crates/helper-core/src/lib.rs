@@ -1730,6 +1730,89 @@ pub fn evaluate_suggestion(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BirthdayDecision {
+    pub allowed: bool,
+    pub message: String,
+    pub channel_id: String,
+    pub timezone: String,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+/// Validate the privacy-preserving birthday delivery contract. Only day and
+/// month are accepted; the year is deliberately absent from the decision.
+pub fn evaluate_birthday(
+    config: &serde_json::Value,
+    member_id: &str,
+    month: u32,
+    day: u32,
+) -> BirthdayDecision {
+    let object = config.as_object();
+    let valid_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => (1..=31).contains(&day),
+        4 | 6 | 9 | 11 => (1..=30).contains(&day),
+        2 => (1..=29).contains(&day),
+        _ => false,
+    };
+    if !valid_day {
+        return BirthdayDecision {
+            allowed: false,
+            message: String::new(),
+            channel_id: String::new(),
+            timezone: String::new(),
+            reason_code: "invalid_date",
+            explanation: "Choose a real calendar day and month for the birthday.".into(),
+        };
+    }
+    let channel_id = object
+        .and_then(|values| values.get("channel"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| value.parse::<u64>().is_ok())
+        .unwrap_or_default()
+        .to_owned();
+    if channel_id.is_empty() {
+        return BirthdayDecision {
+            allowed: false,
+            message: String::new(),
+            channel_id,
+            timezone: String::new(),
+            reason_code: "channel_required",
+            explanation: "Choose a real announcement channel before enabling birthdays.".into(),
+        };
+    }
+    let message = object
+        .and_then(|values| values.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("Happy birthday, {user}! 🎉")
+        .trim();
+    if !(1..=1_000).contains(&message.chars().count()) {
+        return BirthdayDecision {
+            allowed: false,
+            message: message.into(),
+            channel_id,
+            timezone: String::new(),
+            reason_code: "message_length_invalid",
+            explanation: "The birthday message must contain between 1 and 1000 characters.".into(),
+        };
+    }
+    let timezone = object
+        .and_then(|values| values.get("timezone"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| parse_utc_offset_minutes(value).is_some())
+        .unwrap_or("UTC")
+        .to_owned();
+    BirthdayDecision {
+        allowed: true,
+        message: message.replace("{user}", &format!("<@{member_id}>")),
+        channel_id,
+        timezone,
+        reason_code: "birthday_ready",
+        explanation:
+            "Birthday delivery is bounded to the configured channel, timezone and day/month.".into(),
+    }
+}
+
 /// Evaluate a single role-panel click without touching Discord.  Keeping
 /// this transition in `helper-core` means the API preview and the Serenity
 /// interaction handler cannot drift on unique/multiple or toggle-off rules.
@@ -2150,6 +2233,29 @@ impl FeatureAdapter for CommunityInteractionAdapter {
     }
 
     fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        if self.key == "community.birthdays" {
+            let member_id = fixture_string(fixture, "memberId", "member_id", "1234567890");
+            let month = fixture_u64(fixture, "month", "month", 1) as u32;
+            let day = fixture_u64(fixture, "day", "day", 1) as u32;
+            let decision = evaluate_birthday(config, member_id, month, day);
+            let mut effects = if !decision.allowed {
+                vec![format!(
+                    "Birthday delivery rejected ({}): {}",
+                    decision.reason_code, decision.explanation
+                )]
+            } else {
+                vec![format!(
+                    "Announce birthday in <#{}> using {}: {}",
+                    decision.channel_id, decision.timezone, decision.message
+                )]
+            };
+            effects.extend(
+                self.runtime_projection(config)
+                    .into_iter()
+                    .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+            );
+            return effects;
+        }
         if self.key == "community.suggestions" {
             let text = fixture_string(
                 fixture,
@@ -3251,6 +3357,30 @@ impl FeatureAdapter for BirthdaysAdapter {
             }
         }
         issues
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let member_id = fixture_string(fixture, "memberId", "member_id", "1234567890");
+        let month = fixture_u64(fixture, "month", "month", 1) as u32;
+        let day = fixture_u64(fixture, "day", "day", 1) as u32;
+        let decision = evaluate_birthday(config, member_id, month, day);
+        let mut effects = if !decision.allowed {
+            vec![format!(
+                "Birthday delivery rejected ({}): {}",
+                decision.reason_code, decision.explanation
+            )]
+        } else {
+            vec![format!(
+                "Announce birthday in <#{}> using {}: {}",
+                decision.channel_id, decision.timezone, decision.message
+            )]
+        };
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 
     fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
@@ -10958,6 +11088,32 @@ mod tests {
             &serde_json::json!({"memberMention": "<@42>"}),
         );
         assert!(preview[0].contains("step button(s)"));
+    }
+
+    #[test]
+    fn birthdays_adapter_preview_uses_the_scheduled_delivery_evaluator() {
+        let adapter = feature_adapter("community.birthdays").expect("birthdays adapter");
+        let config = serde_json::json!({
+            "channel": "123",
+            "message": "Happy birthday, {user}!",
+            "timezone": "UTC+01:00"
+        });
+        assert_eq!(adapter.descriptor().source, "birthdays_adapter_v1");
+        let preview = adapter.simulate(
+            &config,
+            &serde_json::json!({"memberId": "42", "month": 2, "day": 29}),
+        );
+        assert!(preview[0].contains("Announce birthday in <#123> using UTC+01:00"));
+        assert!(preview[0].contains("<@42>"));
+        assert!(preview.iter().any(|effect| effect.contains("channel_id")));
+
+        let invalid = adapter.simulate(
+            &config,
+            &serde_json::json!({"memberId": "42", "month": 2, "day": 31}),
+        );
+        assert!(invalid[0].contains("invalid_date"));
+        assert!(evaluate_birthday(&config, "42", 2, 29).allowed);
+        assert!(!evaluate_birthday(&config, "42", 2, 31).allowed);
     }
 
     #[test]

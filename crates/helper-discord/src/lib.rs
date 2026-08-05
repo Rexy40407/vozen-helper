@@ -8,12 +8,13 @@ use helper_core::{
     LeaderboardEntry, ModerationObservation, ModerationPolicy, ReminderObservation, ReminderPolicy,
     RolePanelObservation, StarboardObservation, WorkflowObservation, WorkflowPolicy,
     anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
-    evaluate_custom_command, evaluate_embed, evaluate_giveaway, evaluate_join_gate,
-    evaluate_leaderboard, evaluate_moderation, evaluate_poll, evaluate_reminder,
-    evaluate_role_panel, evaluate_scam_with_roles, evaluate_starboard, evaluate_suggestion,
-    evaluate_temp_channel, evaluate_welcome_channel, evaluate_workflow, feature_is_configurable,
-    feature_maturity, leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit,
-    render_member_message, scam_policy_from_json, starboard_policy_from_json,
+    evaluate_birthday, evaluate_custom_command, evaluate_embed, evaluate_giveaway,
+    evaluate_join_gate, evaluate_leaderboard, evaluate_moderation, evaluate_poll,
+    evaluate_reminder, evaluate_role_panel, evaluate_scam_with_roles, evaluate_starboard,
+    evaluate_suggestion, evaluate_temp_channel, evaluate_welcome_channel, evaluate_workflow,
+    feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
+    parse_utc_offset_minutes, quota_limit, render_member_message, scam_policy_from_json,
+    starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -6347,8 +6348,14 @@ impl Handler {
                 }
                 let month = option_i64(command, "month").unwrap_or_default();
                 let day = option_i64(command, "day").unwrap_or_default();
-                if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-                    return respond(ctx, command, "Use a month from 1-12 and a day from 1-31.").await;
+                let valid_day = match month {
+                    1 | 3 | 5 | 7 | 8 | 10 | 12 => (1..=31).contains(&day),
+                    4 | 6 | 9 | 11 => (1..=30).contains(&day),
+                    2 => (1..=29).contains(&day),
+                    _ => false,
+                };
+                if !valid_day {
+                    return respond(ctx, command, "Use a real calendar day and month for the birthday.").await;
                 }
                 self.store.set_birthday(&guild_text, &command.user.id.to_string(), month as u32, day as u32)?;
                 "Birthday saved privately as day and month. You can remove it at any time.".to_string()
@@ -11453,14 +11460,31 @@ async fn deliver_birthday_announcements(
     now: DateTime<Utc>,
 ) -> Result<()> {
     for setting in store.enabled_feature_settings("community.birthdays")? {
-        let config: serde_json::Value =
+        let mut config: serde_json::Value =
             serde_json::from_str(&setting.config_json).unwrap_or_default();
+        // Read legacy projections during the rolling migration, then pass a
+        // single effective config to the same evaluator used by previews.
+        if !config.is_object() {
+            config = serde_json::json!({});
+        }
+        if let Some(object) = config.as_object_mut() {
+            for (field, projection_key) in [
+                ("channel", "community.birthdays.channel_id"),
+                ("message", "community.birthdays.message"),
+                ("timezone", "community.birthdays.timezone"),
+            ] {
+                if !object.contains_key(field)
+                    && let Some(value) = setting_string(store, &setting.guild_id, projection_key)
+                {
+                    object.insert(field.into(), serde_json::Value::String(value));
+                }
+            }
+        }
         let timezone = config
             .get("timezone")
             .and_then(serde_json::Value::as_str)
-            .map(ToOwned::to_owned)
-            .or_else(|| setting_string(store, &setting.guild_id, "community.birthdays.timezone"))
-            .unwrap_or_else(|| "UTC".to_string());
+            .unwrap_or("UTC")
+            .to_string();
         let Some(offset_minutes) = parse_utc_offset_minutes(&timezone) else {
             warn!(guild_id = %setting.guild_id, timezone, "skipping birthdays with invalid timezone");
             continue;
@@ -11471,32 +11495,37 @@ async fn deliver_birthday_announcements(
         let local = now.with_timezone(&offset);
         let (year, month, day) = (local.year(), local.month(), local.day());
         let birthdays = store.due_birthdays_for_guild(&setting.guild_id, month, day, year, 500)?;
-        let Some(channel_id) = config
-            .get("channel")
-            .and_then(serde_json::Value::as_str)
-            .map(ToOwned::to_owned)
-            .or_else(|| setting_string(store, &setting.guild_id, "community.birthdays.channel_id"))
-            .and_then(|value| value.parse::<u64>().ok())
-        else {
-            continue;
-        };
-        let template = config
+        let _legacy_template = config
             .get("message")
             .and_then(serde_json::Value::as_str)
             .map(ToOwned::to_owned)
             .or_else(|| setting_string(store, &setting.guild_id, "community.birthdays.message"))
             .unwrap_or_else(|| "Happy birthday, {user}! 🎉".to_string());
         for birthday in birthdays {
-            let content = template.replace("{user}", &format!("<@{}>", birthday.user_id));
+            let decision = evaluate_birthday(&config, &birthday.user_id, month, day);
+            if !decision.allowed {
+                warn!(
+                    guild_id = %setting.guild_id,
+                    user_id = %birthday.user_id,
+                    reason = decision.reason_code,
+                    "skipping birthday with invalid delivery configuration"
+                );
+                continue;
+            }
+            let Ok(channel_id) = decision.channel_id.parse::<u64>() else {
+                continue;
+            };
+            let Ok(user_id) = birthday.user_id.parse::<u64>() else {
+                warn!(guild_id = %setting.guild_id, user_id = %birthday.user_id, "skipping birthday with invalid member id");
+                continue;
+            };
+            let message = CreateMessage::new()
+                .content(decision.message)
+                .allowed_mentions(
+                    CreateAllowedMentions::new().users([serenity::all::UserId::new(user_id)]),
+                );
             if ChannelId::new(channel_id)
-                .send_message(
-                    http,
-                    CreateMessage::new().content(content).allowed_mentions(
-                        CreateAllowedMentions::new().users([serenity::all::UserId::new(
-                            birthday.user_id.parse().unwrap_or_default(),
-                        )]),
-                    ),
-                )
+                .send_message(http, message)
                 .await
                 .is_ok()
             {
