@@ -8716,14 +8716,18 @@ async fn test_feature(
     // A provider can expose a real adapter and therefore deserve a setup page
     // in the catalogue, while still being unable to execute until its official
     // credentials/approval are present. Keep that distinction explicit in the
-    // simulation: it must never report a blocked provider as applicable.
-    if maturity == FeatureMaturity::Blocked {
+    // simulation: it must never report a blocked or not-yet-ready provider as
+    // applicable. This mirrors publish preflight instead of claiming that a
+    // valid JSON draft can already run in Discord.
+    if maturity == FeatureMaturity::Blocked
+        || (provider_needs_runtime_ready(&key) && !provider_runtime_ready(&state, &key))
+    {
         let message = lifecycle_issues(&key, maturity)
             .into_iter()
             .find(|issue| issue.severity == "error")
             .map(|issue| issue.message)
             .unwrap_or_else(|| {
-                "This provider is blocked until its official dependencies are ready.".into()
+                "The official provider is not ready in this running Helper. Configure its server-side credentials and restart the Helper before enabling it.".into()
             });
         issues.push(ValidationIssue {
             path: "feature.provider".into(),
@@ -11349,6 +11353,50 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("Apply runtime setting")
+        );
+    }
+
+    #[tokio::test]
+    async fn beta_provider_simulation_never_claims_runtime_application_without_client() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        let response = router(state(store))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/config/features/social.rss/simulate")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "config": {
+                                "feedUrl": "https://example.com/feed.xml",
+                                "targetChannelId": "123456789012345678",
+                                "intervalSeconds": 300,
+                                "messageTemplate": "{title}"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                .unwrap();
+        assert_eq!(body["ok"], false);
+        assert!(
+            body["result"]["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|issue| {
+                    issue["code"] == "provider_not_ready" && issue["path"] == "feature.provider"
+                })
         );
     }
 
