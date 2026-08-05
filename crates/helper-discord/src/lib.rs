@@ -10073,7 +10073,8 @@ mod tests {
         adapter::{DiscordAdapter, Effect, FakeDiscordAdapter},
         command_feature_key, english_bot_text, feature_enabled, feature_title,
         format_nft_collection, is_destructive_audit_action, join_burst_armed, parse_duration,
-        parse_scheduled_event_window, scheduled_action_feature, shadow_mode_enabled,
+        parse_scheduled_event_window, reminder_repeat_interval_ms, scheduled_action_feature,
+        shadow_mode_enabled,
         should_cleanup_temp_channel, template_message,
     };
     use helper_store::Store;
