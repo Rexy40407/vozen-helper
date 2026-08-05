@@ -8688,6 +8688,20 @@ struct FeatureTestRequest {
     day: Option<u32>,
     #[serde(default, rename = "memberId")]
     member_id: Option<String>,
+    /// Bounded native-event fixture fields used by the same schedule
+    /// evaluator as the Discord event command.
+    #[serde(default, rename = "eventName")]
+    event_name: Option<String>,
+    #[serde(default, rename = "eventLocation")]
+    event_location: Option<String>,
+    #[serde(default, rename = "eventStartUnix")]
+    event_start_unix: Option<i64>,
+    #[serde(default, rename = "eventEndUnix")]
+    event_end_unix: Option<i64>,
+    #[serde(default, rename = "eventNowUnix")]
+    event_now_unix: Option<i64>,
+    #[serde(default, rename = "eventCapacity")]
+    event_capacity: Option<i64>,
 }
 
 fn generic_feature_effect(key: &str) -> Vec<String> {
@@ -8874,6 +8888,12 @@ async fn test_feature(
         "month": test.month,
         "day": test.day,
         "memberId": test.member_id.clone(),
+        "name": test.event_name.clone(),
+        "location": test.event_location.clone(),
+        "startUnix": test.event_start_unix,
+        "endUnix": test.event_end_unix,
+        "nowUnix": test.event_now_unix,
+        "capacity": test.event_capacity,
     });
     let adapter_effects = if maturity == FeatureMaturity::Blocked {
         // A blocked provider must never claim that a JSON draft would be

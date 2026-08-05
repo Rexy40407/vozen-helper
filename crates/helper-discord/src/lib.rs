@@ -8,7 +8,7 @@ use helper_core::{
     LeaderboardEntry, ModerationObservation, ModerationPolicy, ReminderObservation, ReminderPolicy,
     RolePanelObservation, StarboardObservation, WorkflowObservation, WorkflowPolicy,
     anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
-    evaluate_birthday, evaluate_custom_command, evaluate_embed, evaluate_giveaway,
+    evaluate_birthday, evaluate_custom_command, evaluate_embed, evaluate_event, evaluate_giveaway,
     evaluate_join_gate, evaluate_leaderboard, evaluate_moderation, evaluate_poll,
     evaluate_reminder, evaluate_role_panel, evaluate_scam_with_roles, evaluate_starboard,
     evaluate_suggestion, evaluate_temp_channel, evaluate_welcome_channel, evaluate_workflow,
@@ -7642,6 +7642,39 @@ impl Handler {
                         .map_err(|_| anyhow::anyhow!("event duration is invalid"))?;
                     (start, end)
                 };
+                let event_config = serde_json::json!({
+                    "defaultCapacity": default_capacity,
+                    "announcementChannel": setting_string(
+                        &self.store,
+                        &guild_id.to_string(),
+                        "community.events.announcement_channel_id",
+                    ).unwrap_or_default(),
+                    "reminders": setting_bool(
+                        &self.store,
+                        &guild_id.to_string(),
+                        "community.events.reminders",
+                        true,
+                    ),
+                    "reminderHours": setting_u64(
+                        &self.store,
+                        &guild_id.to_string(),
+                        "community.events.reminder_hours",
+                        1,
+                    ),
+                });
+                let decision = evaluate_event(
+                    &event_config,
+                    name,
+                    location,
+                    description,
+                    start.unix_timestamp(),
+                    end.unix_timestamp(),
+                    capacity,
+                    now_seconds,
+                );
+                if !decision.allowed {
+                    return respond(ctx, command, &decision.explanation).await;
+                }
                 let mut builder = serenity::all::CreateScheduledEvent::new(
                     serenity::all::ScheduledEventType::External,
                     name.to_string(),

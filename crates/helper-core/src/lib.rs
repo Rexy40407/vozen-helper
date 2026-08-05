@@ -1559,6 +1559,152 @@ pub struct GiveawayDecision {
     pub explanation: String,
 }
 
+/// The bounded decision used when creating a native Discord scheduled event.
+/// Both dashboard previews and the gateway command use this value so defaults
+/// such as capacity, destination and reminders cannot drift apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventDecision {
+    pub allowed: bool,
+    pub name: String,
+    pub location: String,
+    pub description: String,
+    pub start_unix: i64,
+    pub end_unix: i64,
+    pub capacity: Option<i64>,
+    pub announcement_channel_id: Option<String>,
+    pub reminders: bool,
+    pub reminder_hours: i64,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+/// Validate and resolve event defaults without talking to Discord.  The
+/// caller still performs the Discord permission/hierarchy preflight, while
+/// this pure decision owns all bounded input and scheduling rules.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_event(
+    config: &serde_json::Value,
+    name: &str,
+    location: &str,
+    description: &str,
+    start_unix: i64,
+    end_unix: i64,
+    capacity_override: Option<i64>,
+    now_unix: i64,
+) -> EventDecision {
+    let object = config.as_object();
+    let name = name.trim().to_owned();
+    let location = location.trim().to_owned();
+    let description = description.trim().to_owned();
+    let empty = || EventDecision {
+        allowed: false,
+        name: name.clone(),
+        location: location.clone(),
+        description: description.clone(),
+        start_unix,
+        end_unix,
+        capacity: None,
+        announcement_channel_id: None,
+        reminders: false,
+        reminder_hours: 1,
+        reason_code: "invalid_event",
+        explanation: String::new(),
+    };
+    if !(1..=100).contains(&name.chars().count()) {
+        let mut decision = empty();
+        decision.reason_code = "invalid_name";
+        decision.explanation = "The event name must be between 1 and 100 characters.".into();
+        return decision;
+    }
+    if !(1..=100).contains(&location.chars().count()) {
+        let mut decision = empty();
+        decision.reason_code = "invalid_location";
+        decision.explanation = "The event location must be between 1 and 100 characters.".into();
+        return decision;
+    }
+    if description.chars().count() > 1_000 {
+        let mut decision = empty();
+        decision.reason_code = "description_too_long";
+        decision.explanation = "The event description must be 1,000 characters or fewer.".into();
+        return decision;
+    }
+    if start_unix <= now_unix {
+        let mut decision = empty();
+        decision.reason_code = "start_must_be_in_future";
+        decision.explanation = "The event start must be in the future.".into();
+        return decision;
+    }
+    if end_unix <= start_unix {
+        let mut decision = empty();
+        decision.reason_code = "end_must_follow_start";
+        decision.explanation = "The event end must be after its start.".into();
+        return decision;
+    }
+    if end_unix.saturating_sub(start_unix) > 365 * 86_400 {
+        let mut decision = empty();
+        decision.reason_code = "event_too_long";
+        decision.explanation = "The event cannot last longer than 365 days.".into();
+        return decision;
+    }
+    let capacity = capacity_override
+        .or_else(|| {
+            object
+                .and_then(|values| values.get("defaultCapacity"))
+                .and_then(serde_json::Value::as_i64)
+        })
+        .unwrap_or(0);
+    if !(0..=100_000).contains(&capacity) {
+        let mut decision = empty();
+        decision.reason_code = "invalid_capacity";
+        decision.explanation = "Capacity must be between 1 and 100,000, or 0 for unlimited.".into();
+        return decision;
+    }
+    let announcement_channel_id = object
+        .and_then(|values| values.get("announcementChannel"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::trim)
+        .map(str::to_owned);
+    if announcement_channel_id
+        .as_deref()
+        .is_some_and(|value| value.parse::<u64>().is_err())
+    {
+        let mut decision = empty();
+        decision.reason_code = "invalid_announcement_channel";
+        decision.explanation = "Choose a valid Discord announcement channel.".into();
+        return decision;
+    }
+    let reminders = object
+        .and_then(|values| values.get("reminders"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let reminder_hours = object
+        .and_then(|values| values.get("reminderHours"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(1);
+    if !(1..=168).contains(&reminder_hours) {
+        let mut decision = empty();
+        decision.reason_code = "invalid_reminder_hours";
+        decision.explanation = "Reminder time must be between 1 and 168 hours.".into();
+        return decision;
+    }
+    EventDecision {
+        allowed: true,
+        name,
+        location,
+        description,
+        start_unix,
+        end_unix,
+        capacity: (capacity > 0).then_some(capacity),
+        announcement_channel_id,
+        reminders,
+        reminder_hours,
+        reason_code: "event_ready",
+        explanation: "The event satisfies Discord's bounded name, schedule and capacity limits."
+            .into(),
+    }
+}
+
 /// Bound giveaway creation before a durable draw is scheduled.  The API
 /// preview and the Discord command use the same prize, winner, duration and
 /// eligibility rules.
@@ -2370,6 +2516,71 @@ impl FeatureAdapter for CommunityInteractionAdapter {
                     decision.winners,
                     decision.duration_ms / 3_600_000,
                     role
+                )]
+            };
+            effects.extend(
+                self.runtime_projection(config)
+                    .into_iter()
+                    .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+            );
+            return effects;
+        }
+        if self.key == "community.events" {
+            let now_unix = fixture_u64(fixture, "nowUnix", "now_unix", 1_700_000_000) as i64;
+            let start_unix = fixture_u64(
+                fixture,
+                "startUnix",
+                "start_unix",
+                (now_unix as u64).saturating_add(3_600),
+            ) as i64;
+            let end_unix = fixture_u64(
+                fixture,
+                "endUnix",
+                "end_unix",
+                (start_unix as u64).saturating_add(7_200),
+            ) as i64;
+            let capacity_override = fixture
+                .get("capacity")
+                .or_else(|| fixture.get("capacityOverride"))
+                .and_then(serde_json::Value::as_i64);
+            let decision = evaluate_event(
+                config,
+                fixture_string(fixture, "name", "name", "Preview event"),
+                fixture_string(fixture, "location", "location", "Preview room"),
+                fixture_string(
+                    fixture,
+                    "description",
+                    "description",
+                    "A bounded event preview.",
+                ),
+                start_unix,
+                end_unix,
+                capacity_override,
+                now_unix,
+            );
+            let mut effects = if !decision.allowed {
+                vec![format!(
+                    "Event rejected ({}): {}",
+                    decision.reason_code, decision.explanation
+                )]
+            } else {
+                let capacity = decision
+                    .capacity
+                    .map(|value| format!(" with capacity {value}"))
+                    .unwrap_or_default();
+                let reminder = if decision.reminders {
+                    format!(" and a {}-hour reminder", decision.reminder_hours)
+                } else {
+                    String::from(" with reminders disabled")
+                };
+                let announcement = decision
+                    .announcement_channel_id
+                    .as_deref()
+                    .map(|value| format!("; announce in <#{value}>"))
+                    .unwrap_or_default();
+                vec![format!(
+                    "Create native Discord event `{}` from <t:{}:F> to <t:{}:F>{capacity}{reminder}{announcement}.",
+                    decision.name, decision.start_unix, decision.end_unix
                 )]
             };
             effects.extend(
@@ -10390,6 +10601,37 @@ mod tests {
             &serde_json::json!({"prize": "No role", "requiredRole": "not-a-role"}),
         );
         assert!(rejected[0].contains("invalid_required_role"));
+
+        let events = feature_adapter("community.events").expect("events adapter");
+        let event_preview = events.simulate(
+            &serde_json::json!({
+                "defaultCapacity": 50,
+                "announcementChannel": "789",
+                "reminders": true,
+                "reminderHours": 2
+            }),
+            &serde_json::json!({
+                "name": "Community meetup",
+                "location": "Main stage",
+                "nowUnix": 1_700_000_000,
+                "startUnix": 1_700_003_600,
+                "endUnix": 1_700_010_800
+            }),
+        );
+        assert!(event_preview[0].contains("Create native Discord event"));
+        assert!(event_preview[0].contains("capacity 50"));
+        assert!(event_preview[0].contains("2-hour reminder"));
+        let rejected = events.simulate(
+            &serde_json::json!({"announcementChannel": "not-a-channel"}),
+            &serde_json::json!({
+                "name": "Community meetup",
+                "location": "Main stage",
+                "nowUnix": 1_700_000_000,
+                "startUnix": 1_700_003_600,
+                "endUnix": 1_700_010_800
+            }),
+        );
+        assert!(rejected[0].contains("invalid_announcement_channel"));
     }
 
     #[test]
