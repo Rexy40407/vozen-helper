@@ -8,13 +8,14 @@ use helper_core::{
     LeaderboardEntry, ModerationObservation, ModerationPolicy, ReminderObservation, ReminderPolicy,
     RolePanelObservation, StarboardObservation, WorkflowObservation, WorkflowPolicy,
     anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
-    evaluate_audit, evaluate_birthday, evaluate_custom_command, evaluate_embed, evaluate_event,
-    evaluate_giveaway, evaluate_join_gate, evaluate_leaderboard, evaluate_levels,
+    evaluate_audit, evaluate_birthday, evaluate_custom_command, evaluate_economy, evaluate_embed,
+    evaluate_event, evaluate_giveaway, evaluate_join_gate, evaluate_leaderboard, evaluate_levels,
     evaluate_moderation, evaluate_nickname, evaluate_poll, evaluate_reminder, evaluate_role_panel,
-    evaluate_scam_with_roles, evaluate_starboard, evaluate_suggestion, evaluate_temp_channel,
-    evaluate_tickets, evaluate_welcome_channel, evaluate_workflow, feature_is_configurable,
-    feature_maturity, leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit,
-    render_member_message, scam_policy_from_json, starboard_policy_from_json,
+    evaluate_scam_with_roles, evaluate_starboard, evaluate_stats, evaluate_suggestion,
+    evaluate_temp_channel, evaluate_tickets, evaluate_welcome_channel, evaluate_workflow,
+    feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
+    parse_utc_offset_minutes, quota_limit, render_member_message, scam_policy_from_json,
+    starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -4664,20 +4665,23 @@ async fn run_stats_channel_worker(http: Arc<serenity::http::Http>, store: Store)
                             .map(ToOwned::to_owned)
                     })
                     .unwrap_or_else(|| "messages-{messages}".to_owned());
-            let name = template
-                .replace("{messages}", &messages.to_string())
-                .replace("{joins}", &joins.to_string())
-                .replace("{leaves}", &leaves.to_string())
-                .replace("{days}", &window_days.to_string())
-                .chars()
-                .filter(|character| !character.is_control())
-                .take(100)
-                .collect::<String>();
-            if name.trim().is_empty() {
+            let stats_config = serde_json::json!({
+                "windowDays": window_days,
+                "channelId": channel_id.to_string(),
+                "nameTemplate": template,
+            });
+            let decision = evaluate_stats(
+                &stats_config,
+                Some(&channel_id.to_string()),
+                messages,
+                joins,
+                leaves,
+            );
+            if !decision.allowed {
                 continue;
             }
             if let Err(error) = serenity::all::ChannelId::new(channel_id)
-                .edit(&http, serenity::all::EditChannel::new().name(name))
+                .edit(&http, serenity::all::EditChannel::new().name(decision.name))
                 .await
             {
                 tracing::warn!(%error, guild_id = %setting.guild_id, channel_id, "stats channel update failed");
@@ -7005,7 +7009,13 @@ impl Handler {
                 if !feature_enabled(&self.store, &guild_text, "community.economy", None) {
                     return respond(ctx, command, "Economy is disabled in this server. Enable it in the dashboard.").await;
                 }
-                let reward = setting_u64(&self.store, &guild_text, "community.economy.daily_reward", 100).clamp(1, 10_000) as i64;
+                let account = self.store.economy_account(&guild_text, &command.user.id.to_string())?;
+                let economy_config = economy_config_for_store(&self.store, &guild_text);
+                let decision = evaluate_economy(&economy_config, "daily", account.balance, true);
+                if !decision.allowed {
+                    return respond(ctx, command, &decision.explanation).await;
+                }
+                let reward = decision.amount;
                 let currency = setting_string(&self.store, &guild_text, "community.economy.currency_name")
                     .unwrap_or_else(|| "credits".to_string());
                 match self.store.claim_daily(&guild_text, &command.user.id.to_string(), reward)? {
@@ -7021,8 +7031,14 @@ impl Handler {
                 if !feature_enabled(&self.store, &guild_text, "community.economy", None) {
                     return respond(ctx, command, "Economy is disabled in this server. Enable it in the dashboard.").await;
                 }
-                let reward = setting_u64(&self.store, &guild_text, "community.economy.work_reward", 50).clamp(1, 10_000) as i64;
-                let cooldown = setting_u64(&self.store, &guild_text, "community.economy.work_cooldown_ms", 3_600_000).clamp(5 * 60_000, 7 * 86_400_000);
+                let account = self.store.economy_account(&guild_text, &command.user.id.to_string())?;
+                let economy_config = economy_config_for_store(&self.store, &guild_text);
+                let decision = evaluate_economy(&economy_config, "work", account.balance, true);
+                if !decision.allowed {
+                    return respond(ctx, command, &decision.explanation).await;
+                }
+                let reward = decision.amount;
+                let cooldown = decision.cooldown_ms as u64;
                 let currency = setting_string(&self.store, &guild_text, "community.economy.currency_name")
                     .unwrap_or_else(|| "credits".to_string());
                 match self.store.claim_economy_reward(&guild_text, &command.user.id.to_string(), "work", reward, cooldown as i64)? {
@@ -11368,6 +11384,22 @@ fn levels_config_for_store(store: &Store, guild_id: &str) -> serde_json::Value {
         "stackRoles": setting_bool(store, guild_id, "community.levels.stack_roles", true),
         "announceChannel": setting_string(store, guild_id, "community.levels.announce_channel").unwrap_or_default(),
         "announceTemplate": setting_string(store, guild_id, "community.levels.announce_template").unwrap_or_else(|| "{member} reached level {level}!".into()),
+    })
+}
+
+fn economy_config_for_store(store: &Store, guild_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "currencyName": setting_string(store, guild_id, "community.economy.currency_name")
+            .unwrap_or_else(|| "credits".into()),
+        "dailyReward": setting_i64(store, guild_id, "community.economy.daily_reward", 100),
+        "workReward": setting_i64(store, guild_id, "community.economy.work_reward", 50),
+        "workCooldownMinutes": setting_u64(
+            store,
+            guild_id,
+            "community.economy.work_cooldown_ms",
+            3_600_000,
+        )
+        .saturating_div(60_000),
     })
 }
 

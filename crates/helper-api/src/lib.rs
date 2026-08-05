@@ -8718,6 +8718,22 @@ struct FeatureTestRequest {
     duration_minutes: Option<u64>,
     #[serde(default, rename = "currentXp")]
     current_xp: Option<i64>,
+    /// Bounded economy fixture values used by the same reward evaluator as
+    /// the Discord economy commands.
+    #[serde(default, rename = "economyAction")]
+    economy_action: Option<String>,
+    #[serde(default, rename = "currentBalance")]
+    current_balance: Option<i64>,
+    #[serde(default, rename = "rewardCooldownReady")]
+    reward_cooldown_ready: Option<bool>,
+    /// Bounded server-stat fixtures used by the same channel-name evaluator
+    /// as the live statistics worker.
+    #[serde(default, rename = "statsMessages")]
+    stats_messages: Option<i64>,
+    #[serde(default, rename = "statsJoins")]
+    stats_joins: Option<i64>,
+    #[serde(default, rename = "statsLeaves")]
+    stats_leaves: Option<i64>,
 }
 
 fn generic_feature_effect(key: &str) -> Vec<String> {
@@ -8917,6 +8933,12 @@ async fn test_feature(
         "cooldownReady": test.cooldown_ready,
         "durationMinutes": test.duration_minutes,
         "currentXp": test.current_xp,
+        "economyAction": test.economy_action.clone(),
+        "currentBalance": test.current_balance,
+        "rewardCooldownReady": test.reward_cooldown_ready,
+        "statsMessages": test.stats_messages,
+        "statsJoins": test.stats_joins,
+        "statsLeaves": test.stats_leaves,
     });
     let adapter_effects = if maturity == FeatureMaturity::Blocked {
         // A blocked provider must never claim that a JSON draft would be

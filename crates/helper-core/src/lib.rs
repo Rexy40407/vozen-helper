@@ -6714,6 +6714,105 @@ impl StatsAdapter {
     pub const SOURCE: &'static str = "stats_adapter_v1";
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatsDecision {
+    pub allowed: bool,
+    pub channel_id: Option<String>,
+    pub window_days: i64,
+    pub name: String,
+    pub messages: i64,
+    pub joins: i64,
+    pub leaves: i64,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+/// Build the exact bounded channel-name mutation used by the stats worker.
+/// Keeping the template expansion here makes the dashboard preview useful
+/// even before a guild has a live statistics channel.
+pub fn evaluate_stats(
+    config: &serde_json::Value,
+    channel_id: Option<&str>,
+    messages: i64,
+    joins: i64,
+    leaves: i64,
+) -> StatsDecision {
+    let object = config.as_object();
+    let window_days = object
+        .and_then(|value| value.get("windowDays"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(7)
+        .clamp(1, 30);
+    let channel_id = channel_id
+        .or_else(|| object.and_then(|value| value.get("channelId"))?.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let Some(channel_id) = channel_id else {
+        return StatsDecision {
+            allowed: false,
+            channel_id: None,
+            window_days,
+            name: String::new(),
+            messages,
+            joins,
+            leaves,
+            reason_code: "channel_required",
+            explanation: "Choose a real Discord channel before enabling live statistics.".into(),
+        };
+    };
+    if channel_id.parse::<u64>().is_err() {
+        return StatsDecision {
+            allowed: false,
+            channel_id: Some(channel_id),
+            window_days,
+            name: String::new(),
+            messages,
+            joins,
+            leaves,
+            reason_code: "invalid_channel",
+            explanation: "The statistics channel must be a Discord channel ID.".into(),
+        };
+    }
+    let template = object
+        .and_then(|value| value.get("nameTemplate"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("messages-{messages}");
+    let name = template
+        .replace("{messages}", &messages.to_string())
+        .replace("{joins}", &joins.to_string())
+        .replace("{leaves}", &leaves.to_string())
+        .replace("{days}", &window_days.to_string())
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(100)
+        .collect::<String>();
+    if name.trim().is_empty() {
+        return StatsDecision {
+            allowed: false,
+            channel_id: Some(channel_id),
+            window_days,
+            name,
+            messages,
+            joins,
+            leaves,
+            reason_code: "empty_name",
+            explanation: "The statistics template produced an empty channel name.".into(),
+        };
+    }
+    StatsDecision {
+        allowed: true,
+        channel_id: Some(channel_id),
+        window_days,
+        name: name.clone(),
+        messages,
+        joins,
+        leaves,
+        reason_code: "channel_update_ready",
+        explanation: format!("Rename the statistics channel to `{name}`."),
+    }
+}
+
 impl FeatureAdapter for StatsAdapter {
     fn descriptor(&self) -> FeatureAdapterDescriptor {
         FeatureAdapterDescriptor {
@@ -6855,6 +6954,54 @@ impl FeatureAdapter for StatsAdapter {
             projection.push(("insights.stats.name_template".into(), value.to_string()));
         }
         projection
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let channel = fixture
+            .get("channelId")
+            .or_else(|| fixture.get("channel_id"))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| config.get("channelId").and_then(serde_json::Value::as_str));
+        let messages = fixture
+            .get("statsMessages")
+            .or_else(|| fixture.get("stats_messages"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(128)
+            .max(0);
+        let joins = fixture
+            .get("statsJoins")
+            .or_else(|| fixture.get("stats_joins"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(12)
+            .max(0);
+        let leaves = fixture
+            .get("statsLeaves")
+            .or_else(|| fixture.get("stats_leaves"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(3)
+            .max(0);
+        let decision = evaluate_stats(config, channel, messages, joins, leaves);
+        let mut effects = vec![if decision.allowed {
+            format!(
+                "{} ({}, {} joins, {} leaves over {} days).",
+                decision.explanation,
+                decision.messages,
+                decision.joins,
+                decision.leaves,
+                decision.window_days
+            )
+        } else {
+            format!(
+                "Statistics preview rejected ({}): {}",
+                decision.reason_code, decision.explanation
+            )
+        }];
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
@@ -9625,6 +9772,116 @@ impl EconomyAdapter {
     pub const SOURCE: &'static str = "economy_adapter_v1";
 }
 
+/// The bounded economy decision shared by dashboard previews and Discord
+/// commands. The store remains authoritative for the atomic ledger write and
+/// cooldown race; this evaluator owns the amount, action and limits so the UI
+/// cannot preview a reward different from the one the runtime requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EconomyDecision {
+    pub allowed: bool,
+    pub action: String,
+    pub amount: i64,
+    pub cooldown_ms: i64,
+    pub resulting_balance: i64,
+    pub currency_name: String,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+pub fn evaluate_economy(
+    config: &serde_json::Value,
+    action: &str,
+    current_balance: i64,
+    cooldown_ready: bool,
+) -> EconomyDecision {
+    let object = config.as_object();
+    let currency_name = object
+        .and_then(|value| value.get("currencyName"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("credits")
+        .chars()
+        .take(24)
+        .collect::<String>();
+    let action = action.trim().to_ascii_lowercase();
+    let (amount, cooldown_ms, requires_cooldown) = match action.as_str() {
+        "balance" => (0_i64, 0_i64, false),
+        "daily" => (
+            object
+                .and_then(|value| value.get("dailyReward"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(100)
+                .clamp(1, 10_000),
+            86_400_000,
+            true,
+        ),
+        "work" => {
+            let reward = object
+                .and_then(|value| value.get("workReward"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(50)
+                .clamp(1, 10_000);
+            let cooldown = object
+                .and_then(|value| value.get("workCooldownMinutes"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(60)
+                .clamp(5, 1_440)
+                .saturating_mul(60_000);
+            (reward, cooldown, true)
+        }
+        "top" | "leaderboard" => (0_i64, 0_i64, false),
+        _ => {
+            return EconomyDecision {
+                allowed: false,
+                action,
+                amount: 0,
+                cooldown_ms: 0,
+                resulting_balance: current_balance,
+                currency_name,
+                reason_code: "unknown_action",
+                explanation: "Choose balance, daily, work or top for the economy preview.".into(),
+            };
+        }
+    };
+    if requires_cooldown && !cooldown_ready {
+        return EconomyDecision {
+            allowed: false,
+            action: action.clone(),
+            amount,
+            cooldown_ms,
+            resulting_balance: current_balance,
+            currency_name: currency_name.clone(),
+            reason_code: "cooldown_active",
+            explanation: format!(
+                "The `{}` reward is still on cooldown; no ledger entry will be created.",
+                action
+            ),
+        };
+    }
+    EconomyDecision {
+        allowed: true,
+        action: action.clone(),
+        amount,
+        cooldown_ms,
+        resulting_balance: current_balance.saturating_add(amount),
+        currency_name: currency_name.clone(),
+        reason_code: if amount > 0 {
+            "reward_ready"
+        } else {
+            "read_only"
+        },
+        explanation: if amount > 0 {
+            format!(
+                "The `{action}` action may append {} {currency_name} to the ledger.",
+                amount
+            )
+        } else {
+            format!("The `{action}` action reads the current economy state without changing it.")
+        },
+    }
+}
+
 impl FeatureAdapter for EconomyAdapter {
     fn descriptor(&self) -> FeatureAdapterDescriptor {
         FeatureAdapterDescriptor {
@@ -9717,6 +9974,39 @@ impl FeatureAdapter for EconomyAdapter {
             ));
         }
         projection
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let action = fixture_string(fixture, "economyAction", "economy_action", "daily");
+        let current_balance = fixture
+            .get("currentBalance")
+            .or_else(|| fixture.get("current_balance"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        let cooldown_ready = fixture_bool(
+            fixture,
+            "rewardCooldownReady",
+            "reward_cooldown_ready",
+            true,
+        );
+        let decision = evaluate_economy(config, action, current_balance, cooldown_ready);
+        let mut effects = vec![if decision.allowed {
+            format!(
+                "{} Balance preview: {} {}.",
+                decision.explanation, decision.resulting_balance, decision.currency_name
+            )
+        } else {
+            format!(
+                "Economy action rejected ({}): {}",
+                decision.reason_code, decision.explanation
+            )
+        }];
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
@@ -12277,6 +12567,63 @@ mod tests {
         assert!(!alert.shadow_mode);
         assert!(!alert.should_contain);
         assert_eq!(alert.reason, "join_burst_detected_alert");
+    }
+
+    #[test]
+    fn economy_simulation_uses_the_same_bounded_reward_evaluator() {
+        let config = serde_json::json!({
+            "currencyName": "coins",
+            "dailyReward": 120,
+            "workReward": 40,
+            "workCooldownMinutes": 30
+        });
+        let ready = evaluate_economy(&config, "work", 10, true);
+        assert!(ready.allowed);
+        assert_eq!(ready.amount, 40);
+        assert_eq!(ready.cooldown_ms, 1_800_000);
+        assert_eq!(ready.resulting_balance, 50);
+
+        let blocked = evaluate_economy(&config, "work", 10, false);
+        assert!(!blocked.allowed);
+        assert_eq!(blocked.reason_code, "cooldown_active");
+
+        let adapter = feature_adapter("community.economy").expect("economy adapter");
+        let effects = adapter.simulate(
+            &config,
+            &serde_json::json!({
+                "economyAction": "work",
+                "currentBalance": 10,
+                "rewardCooldownReady": true
+            }),
+        );
+        assert!(effects[0].contains("40 coins"));
+        assert!(effects[0].contains("50 coins"));
+    }
+
+    #[test]
+    fn stats_simulation_uses_the_same_channel_name_evaluator() {
+        let config = serde_json::json!({
+            "windowDays": 14,
+            "channelId": "123456789012345678",
+            "nameTemplate": "chat-{messages}-j{joins}-s{leaves}"
+        });
+        let decision = evaluate_stats(&config, Some("123456789012345678"), 20, 4, 2);
+        assert!(decision.allowed);
+        assert_eq!(decision.name, "chat-20-j4-s2");
+
+        let adapter = feature_adapter("insights.stats").expect("stats adapter");
+        let effects = adapter.simulate(
+            &config,
+            &serde_json::json!({
+                "statsMessages": 20,
+                "statsJoins": 4,
+                "statsLeaves": 2
+            }),
+        );
+        assert!(effects[0].contains("chat-20-j4-s2"));
+        assert!(effects.iter().any(|effect| {
+            effect.contains("insights.stats.window_days") && effect.contains("14")
+        }));
     }
 
     #[test]
