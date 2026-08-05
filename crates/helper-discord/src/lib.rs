@@ -10,9 +10,10 @@ use helper_core::{
     anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
     evaluate_custom_command, evaluate_embed, evaluate_join_gate, evaluate_leaderboard,
     evaluate_moderation, evaluate_reminder, evaluate_role_panel, evaluate_scam_with_roles,
-    evaluate_starboard, evaluate_temp_channel, evaluate_workflow, feature_is_configurable,
-    feature_maturity, leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit,
-    render_member_message, scam_policy_from_json, starboard_policy_from_json,
+    evaluate_starboard, evaluate_temp_channel, evaluate_welcome_channel, evaluate_workflow,
+    feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
+    parse_utc_offset_minutes, quota_limit, render_member_message, scam_policy_from_json,
+    starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -2477,22 +2478,46 @@ impl EventHandler for Handler {
                 "support.welcome_channel.template_id",
                 "welcomeChannel",
                 guide,
-            )
-            .replace("{member}", &member_mention)
-            .replace("{server}", "this server");
-            let guide = render_member_message(&guide_template, &member_mention, "this server");
+            );
             let configured_steps =
                 setting_string(&self.store, &guild_text, "support.welcome_channel.steps")
                     .unwrap_or_else(|| "rules,introductions,channels".to_string());
             let steps = configured_steps
                 .split(',')
-                .filter(|step| matches!(*step, "rules" | "introductions" | "channels" | "help"))
-                .take(4)
+                .map(str::trim)
+                .filter(|step| !step.is_empty())
+                .map(str::to_owned)
                 .collect::<Vec<_>>();
-            let buttons = steps
+            let decision = evaluate_welcome_channel(
+                &serde_json::json!({
+                    "channelId": channel_id.to_string(),
+                    "message": guide_template,
+                    "steps": steps,
+                }),
+                &member_mention,
+                "this server",
+            );
+            if !decision.allowed {
+                let _ = self.store.record_activity(
+                    &guild_text,
+                    "welcome_channel_delivery_failed",
+                    &new_member.user.id.to_string(),
+                    Some(&new_member.user.name),
+                    Some(&channel_id.to_string()),
+                    &serde_json::json!({
+                        "channelId": channel_id,
+                        "outcome": "invalid_configuration",
+                        "reason": decision.reason_code,
+                    })
+                    .to_string(),
+                );
+                return;
+            }
+            let buttons = decision
+                .steps
                 .iter()
                 .map(|step| {
-                    let label = match *step {
+                    let label = match step.as_str() {
                         "rules" => "Read the rules",
                         "introductions" => "Introduce yourself",
                         "channels" => "Explore channels",
@@ -2504,7 +2529,7 @@ impl EventHandler for Handler {
                         .style(ButtonStyle::Secondary)
                 })
                 .collect::<Vec<_>>();
-            let mut message = CreateMessage::new().content(guide);
+            let mut message = CreateMessage::new().content(decision.message);
             if !buttons.is_empty() {
                 message = message.components(vec![CreateActionRow::Buttons(buttons)]);
             }

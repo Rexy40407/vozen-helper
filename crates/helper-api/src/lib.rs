@@ -8639,6 +8639,8 @@ struct FeatureTestRequest {
     user_id: Option<String>,
     #[serde(default, rename = "serverName")]
     server_name: Option<String>,
+    #[serde(default, rename = "memberMention")]
+    member_mention: Option<String>,
     /// Optional bounded rows for the leaderboard simulator. Keeping this in
     /// the shared test request lets the API exercise the same ordering and
     /// opt-out evaluator used by the Discord command.
@@ -8829,6 +8831,7 @@ async fn test_feature(
         "tagContent": test.tag_content.clone(),
         "userId": test.user_id.clone(),
         "serverName": test.server_name.clone(),
+        "memberMention": test.member_mention.clone(),
         "leaderboardEntries": test.leaderboard_entries.clone(),
         "selectedRoleIds": test.selected_role_ids.clone(),
         "clickedRoleId": test.clicked_role_id.clone(),

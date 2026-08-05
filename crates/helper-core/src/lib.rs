@@ -6146,6 +6146,82 @@ impl FeatureAdapter for AntiScamAdapter {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WelcomeChannelAdapter;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WelcomeChannelDecision {
+    pub allowed: bool,
+    pub message: String,
+    pub steps: Vec<String>,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+/// Resolve the guided welcome payload used after a member joins. The Discord
+/// handler supplies any template-expanded message, so this function remains
+/// deterministic for both legacy settings and API previews.
+pub fn evaluate_welcome_channel(
+    config: &serde_json::Value,
+    member: &str,
+    server: &str,
+) -> WelcomeChannelDecision {
+    let channel_id = config
+        .get("channelId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if channel_id.parse::<u64>().is_err() || channel_id == "0" {
+        return WelcomeChannelDecision {
+            allowed: false,
+            message: String::new(),
+            steps: Vec::new(),
+            reason_code: "missing_channel",
+            explanation: "Choose a valid welcome channel before publishing the guide.".into(),
+        };
+    }
+    let template = config
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let message = render_member_message(template, member, server);
+    if message.trim().is_empty() {
+        return WelcomeChannelDecision {
+            allowed: false,
+            message,
+            steps: Vec::new(),
+            reason_code: "empty_message",
+            explanation: "The guided welcome message cannot be empty.".into(),
+        };
+    }
+    let steps = config
+        .get("steps")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|step| matches!(*step, "rules" | "introductions" | "channels" | "help"))
+                .map(str::to_owned)
+                .take(4)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if steps.is_empty() {
+        return WelcomeChannelDecision {
+            allowed: false,
+            message,
+            steps,
+            reason_code: "no_steps",
+            explanation: "Choose at least one guided welcome step.".into(),
+        };
+    }
+    WelcomeChannelDecision {
+        allowed: true,
+        message,
+        steps,
+        reason_code: "welcome_channel_ready",
+        explanation: "The guided welcome message and bounded steps can be published.".into(),
+    }
+}
+
 impl WelcomeChannelAdapter {
     pub const KEY: &'static str = "support.welcome_channel";
     pub const SOURCE: &'static str = "welcome_channel_adapter_v1";
@@ -6318,6 +6394,38 @@ impl FeatureAdapter for WelcomeChannelAdapter {
             pairs.push(("support.welcome_channel.template_id".into(), value.into()));
         }
         pairs
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let decision = evaluate_welcome_channel(
+            config,
+            fixture
+                .get("memberMention")
+                .or_else(|| fixture.get("displayName"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<@preview-user>"),
+            fixture
+                .get("serverName")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("this server"),
+        );
+        let mut effects = if decision.allowed {
+            vec![format!(
+                "Publish the guided welcome message with {} step button(s), mentions disabled.",
+                decision.steps.len()
+            )]
+        } else {
+            vec![format!(
+                "Guided welcome rejected ({}): {}",
+                decision.reason_code, decision.explanation
+            )]
+        };
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
@@ -10371,6 +10479,27 @@ mod tests {
         assert!(
             projection.contains(&("support.welcome_channel.rules_channel".into(), "456".into()))
         );
+        let decision = evaluate_welcome_channel(
+            &serde_json::json!({
+                "channelId": "123",
+                "message": "Welcome {member} to {server}! @everyone",
+                "steps": ["rules", "help"]
+            }),
+            "<@42>",
+            "Vozen",
+        );
+        assert!(decision.allowed);
+        assert_eq!(decision.steps, vec!["rules", "help"]);
+        assert!(decision.message.contains("@\u{200b}everyone"));
+        let preview = adapter.simulate(
+            &serde_json::json!({
+                "channelId": "123",
+                "message": "Welcome {member}!",
+                "steps": ["rules"]
+            }),
+            &serde_json::json!({"memberMention": "<@42>"}),
+        );
+        assert!(preview[0].contains("step button(s)"));
     }
 
     #[test]
