@@ -3584,15 +3584,16 @@ impl FeatureAdapter for TicketsAdapter {
                 "source": Self::SOURCE,
                 "sections": [{
                     "title": "Support workflow",
-                    "description": "Choose the real role, transcript channel and SLA used by ticket interactions.",
+                    "description": "Choose the real category, support role, transcript channel and SLA used by ticket interactions.",
                     "fields": [
+                        {"key":"categoryId","label":"Ticket category","kind":"category","help":"New ticket channels are created inside this category."},
                         {"key":"staffRole","label":"Support team role","kind":"role","help":"This role can claim, close and reopen tickets."},
                         {"key":"transcriptChannel","label":"Transcript channel","kind":"channel","help":"Closed ticket transcripts are sent here."},
                         {"key":"closeAfterHours","label":"SLA reminder (hours)","kind":"number","min":1,"max":168,"help":"The Helper records an overdue ticket job after this period."}
                     ]
                 }]
             }),
-            defaults: serde_json::json!({"staffRole":"","transcriptChannel":"","closeAfterHours":1}),
+            defaults: serde_json::json!({"categoryId":"","staffRole":"","transcriptChannel":"","closeAfterHours":1}),
             dependencies: vec![
                 "manage_channels".into(),
                 "send_messages".into(),
@@ -3611,7 +3612,7 @@ impl FeatureAdapter for TicketsAdapter {
             }];
         };
         let mut issues = Vec::new();
-        for field in ["staffRole", "transcriptChannel"] {
+        for field in ["categoryId", "staffRole", "transcriptChannel"] {
             if let Some(value) = object.get(field)
                 && !(value
                     .as_str()
@@ -3620,7 +3621,7 @@ impl FeatureAdapter for TicketsAdapter {
                 issues.push(ValidationIssue {
                     path: field.into(),
                     code: "invalid_discord_id".into(),
-                    message: "Choose a real Discord role or channel.".into(),
+                    message: "Choose a real Discord category, role or channel.".into(),
                     severity: "error".into(),
                 });
             }
@@ -3645,6 +3646,9 @@ impl FeatureAdapter for TicketsAdapter {
             return Vec::new();
         };
         let mut pairs = Vec::new();
+        if let Some(value) = object.get("categoryId").and_then(serde_json::Value::as_str) {
+            pairs.push(("support.ticket.category_id".into(), value.into()));
+        }
         if let Some(value) = object.get("staffRole").and_then(serde_json::Value::as_str) {
             pairs.push(("support.ticket.staff_role_id".into(), value.into()));
         }
@@ -8702,6 +8706,17 @@ mod tests {
         assert!(
             tickets
                 .runtime_projection(&serde_json::json!({
+                    "categoryId": "789",
+                    "staffRole": "123",
+                    "transcriptChannel": "456",
+                    "closeAfterHours": 2
+                }))
+                .contains(&("support.ticket.category_id".into(), "789".into()))
+        );
+        assert!(
+            tickets
+                .runtime_projection(&serde_json::json!({
+                    "categoryId": "789",
                     "staffRole": "123",
                     "transcriptChannel": "456",
                     "closeAfterHours": 2

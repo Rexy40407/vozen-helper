@@ -8446,13 +8446,17 @@ impl Handler {
                         kind: PermissionOverwriteType::Role(RoleId::new(role_id)),
                     });
                 }
-                let channel = guild_id
-                    .create_channel(
-                        &ctx.http,
-                        CreateChannel::new(format!("ticket-{}", component.user.name))
-                            .permissions(overwrites),
-                    )
-                    .await?;
+                let category_id = self
+                    .store
+                    .get_setting(&guild_id.to_string(), "support.ticket.category_id")?
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .map(ChannelId::new);
+                let mut create = CreateChannel::new(format!("ticket-{}", component.user.name))
+                    .permissions(overwrites);
+                if let Some(category_id) = category_id {
+                    create = create.category(category_id);
+                }
+                let channel = guild_id.create_channel(&ctx.http, create).await?;
                 self.store.open_ticket(
                     &guild_id.to_string(),
                     &component.user.id.to_string(),
