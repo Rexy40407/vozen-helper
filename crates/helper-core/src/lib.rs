@@ -6112,6 +6112,17 @@ impl FeatureAdapter for AntiSpamAdapter {
                 });
             }
         }
+        if config
+            .get("alertOnly")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "alertOnly".into(),
+                code: "boolean_required".into(),
+                message: "Apenas alertar tem de ser verdadeiro ou falso.".into(),
+                severity: "error".into(),
+            });
+        }
         for field in ["ignoredChannels", "ignoredRoles"] {
             if let Some(value) = config.get(field) {
                 let valid = value.as_array().is_some_and(|items| {
@@ -7770,11 +7781,13 @@ mod tests {
         let issues = adapter.validate(&serde_json::json!({
             "floodCount": 2,
             "ignoredChannels": [""],
-            "logChannel": "not-a-discord-id"
+            "logChannel": "not-a-discord-id",
+            "alertOnly": "true"
         }));
         assert!(issues.iter().any(|issue| issue.path == "floodCount"));
         assert!(issues.iter().any(|issue| issue.path == "ignoredChannels"));
         assert!(issues.iter().any(|issue| issue.path == "logChannel"));
+        assert!(issues.iter().any(|issue| issue.path == "alertOnly"));
         let projection = adapter.runtime_projection(&serde_json::json!({
             "floodCount": 8,
             "ignoredChannels": ["123"],
