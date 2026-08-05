@@ -2789,22 +2789,7 @@ impl EventHandler for Handler {
             }
             return;
         }
-        let content = format!(
-            "⭐ **{} stars** on <@{}>\n{}\n{}",
-            count, original.author.id, original.content, link
-        );
-        let attachment_links = original
-            .attachments
-            .iter()
-            .take(4)
-            .map(|attachment| attachment.url.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let content = if attachment_links.is_empty() {
-            content
-        } else {
-            format!("{content}\n{attachment_links}")
-        };
+        let content = starboard_message_content(&policy, count, &original, &link);
         if let Ok(Some(entry)) = self
             .store
             .star_entry(&guild_id.to_string(), &reaction.message_id.to_string())
@@ -3037,6 +3022,9 @@ impl EventHandler for Handler {
                     .await;
             }
         }
+
+        self.reconcile_starboard_entry(&ctx, guild_id, event.channel_id, event.id, new.as_ref())
+            .await;
 
         // Edited messages must pass the same scam evaluator as new messages.
         // Discord may omit the content from the gateway event, so only act
@@ -5233,6 +5221,119 @@ fn achievement_policy_for_store(store: &Store, guild_id: &str) -> AchievementPol
 }
 
 impl Handler {
+    /// Reconcile an existing starboard entry after the source message changes.
+    /// Reaction events are not emitted for edits, so without this pass the
+    /// board would keep stale text/attachments until the next reaction.
+    async fn reconcile_starboard_entry(
+        &self,
+        ctx: &Context,
+        guild_id: serenity::all::GuildId,
+        channel_id: ChannelId,
+        message_id: serenity::all::MessageId,
+        message: Option<&serenity::all::Message>,
+    ) {
+        let guild_text = guild_id.to_string();
+        if !feature_enabled(
+            &self.store,
+            &guild_text,
+            "community.starboard",
+            Some("feature.community.starboard"),
+        ) {
+            return;
+        }
+        let Ok(Some(entry)) = self.store.star_entry(&guild_text, &message_id.to_string()) else {
+            return;
+        };
+        let Some(board_id) =
+            setting_string(&self.store, &guild_text, "community.starboard.channel_id")
+                .and_then(|value| value.parse::<u64>().ok())
+        else {
+            return;
+        };
+        if board_id == channel_id.get() {
+            return;
+        }
+        let original = if let Some(message) = message {
+            message.clone()
+        } else {
+            match channel_id.message(&ctx.http, message_id).await {
+                Ok(message) => message,
+                Err(_) => return,
+            }
+        };
+        let configured_emoji =
+            setting_string(&self.store, &guild_text, "community.starboard.emoji")
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "⭐".to_string());
+        let Ok(users) = channel_id
+            .reaction_users(
+                &ctx.http,
+                message_id,
+                serenity::all::ReactionType::Unicode(configured_emoji),
+                Some(100),
+                None,
+            )
+            .await
+        else {
+            return;
+        };
+        let author_role_ids = guild_id
+            .member(&ctx.http, original.author.id)
+            .await
+            .map(|member| {
+                member
+                    .roles
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let policy = starboard_policy_for_store(&self.store, &guild_text);
+        let decision = evaluate_starboard(
+            &policy,
+            &StarboardObservation {
+                source_channel_id: channel_id.to_string(),
+                author_id: original.author.id.to_string(),
+                reactor_ids: users.iter().map(|user| user.id.to_string()).collect(),
+                author_role_ids,
+                has_attachments: !original.attachments.is_empty(),
+            },
+        );
+        let board = ChannelId::new(board_id);
+        if !decision.should_publish {
+            if let Ok(starboard_message_id) = entry.starboard_message_id.parse::<u64>() {
+                let _ = board
+                    .delete_message(&ctx.http, MessageId::new(starboard_message_id))
+                    .await;
+            }
+            let _ = self
+                .store
+                .delete_star_entry(&guild_text, &message_id.to_string());
+            return;
+        }
+        let count = decision.count as i64;
+        let link = format!(
+            "https://discord.com/channels/{}/{}/{}",
+            guild_id, channel_id, message_id
+        );
+        let content = starboard_message_content(&policy, count, &original, &link);
+        if let Ok(starboard_message_id) = entry.starboard_message_id.parse::<u64>() {
+            let _ = board
+                .edit_message(
+                    &ctx.http,
+                    MessageId::new(starboard_message_id),
+                    serenity::all::EditMessage::new().content(content),
+                )
+                .await;
+            let _ = self.store.upsert_star_entry(
+                &guild_text,
+                &message_id.to_string(),
+                &entry.starboard_message_id,
+                count,
+            );
+        }
+    }
+
     /// Persist milestone unlocks before announcing them.  This keeps the
     /// message and voice XP paths idempotent across gateway retries and makes
     /// `/achievements` a real history instead of a recalculated display.
@@ -10494,6 +10595,32 @@ fn starboard_policy_for_store(store: &Store, guild_id: &str) -> helper_core::Sta
         "ignoredChannels": csv("community.starboard.ignored_channels"),
         "ignoredRoles": csv("community.starboard.ignored_roles"),
     }))
+}
+
+fn starboard_message_content(
+    policy: &helper_core::StarboardPolicy,
+    count: i64,
+    original: &serenity::all::Message,
+    link: &str,
+) -> String {
+    let mut content = format!(
+        "⭐ **{} stars** on <@{}>\n{}\n{}",
+        count, original.author.id, original.content, link
+    );
+    if policy.include_images {
+        let attachment_links = original
+            .attachments
+            .iter()
+            .take(4)
+            .map(|attachment| attachment.url.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !attachment_links.is_empty() {
+            content.push('\n');
+            content.push_str(&attachment_links);
+        }
+    }
+    content
 }
 
 fn permission_passport_message() -> String {
