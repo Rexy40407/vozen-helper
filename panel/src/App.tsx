@@ -614,6 +614,35 @@ const additionalFeatures: Feature[] = [
     enabled: false,
   },
 ];
+
+// A disconnected production panel must never fall back to the demo catalogue
+// with "available" or "active" states.  The Rust API is the source of truth;
+// when it cannot be reached we keep the topics visible for navigation, but
+// explicitly mark every one as blocked until the live guild state is loaded.
+function unavailableFeatureCatalogue(): Feature[] {
+  return demoFeatures.concat(additionalFeatures).map((feature) => ({
+    ...feature,
+    available: false,
+    enabled: false,
+    maturity: 'blocked',
+    configurable: false,
+    health: {
+      operational: false,
+      status: 'dependency_down',
+      adapter: null,
+      dependencies: ['Rust API'],
+    },
+    issues: [
+      {
+        path: '',
+        code: 'feature_catalog_unavailable',
+        message: 'Feature state unavailable until the Rust API reconnects.',
+        severity: 'error',
+      },
+    ],
+  }));
+}
+
 const featureCopy: Record<string, Pick<Feature, 'label' | 'description'>> = {
   'protection.antispam': {
     label: 'Proteção contra spam',
@@ -1890,7 +1919,7 @@ function App() {
   const [quickSetup, setQuickSetup] = useState<QuickSetupState | null>(null);
   const [quickSetupDefaults, setQuickSetupDefaults] = useState<QuickSetupFeatureDefaults>({});
   const [features, setFeatures] = useState<Feature[]>(() =>
-    demoFeatures.concat(additionalFeatures).map(presentFeature),
+    localPreviewMode ? demoFeatures.concat(additionalFeatures).map(presentFeature) : [],
   );
   const [cases, setCases] = useState<CaseRecord[]>([]);
   const [audit, setAudit] = useState<AuditRecord[]>([]);
@@ -1943,9 +1972,13 @@ function App() {
     void Promise.all([
       api.me(),
       api.guilds().catch(() => ({ guilds: demoGuilds })),
-      api
-        .features()
-        .catch(() => ({ guildId: '', features: demoFeatures.concat(additionalFeatures) })),
+      api.features().catch(() => {
+        // Do not present stale/demo state as the real guild catalogue.  Keep
+        // the topics discoverable, but make every state explicitly blocked so
+        // a failed API request cannot lead to a misleading publish action.
+        setMessage('Feature state is unavailable until the Rust API reconnects.');
+        return { guildId: '', features: unavailableFeatureCatalogue() };
+      }),
       api.stats().catch(() => ({ totalCases: 0, guildId: '' })),
       api.cases().catch(() => ({ cases: [] })),
       api.audit().catch(() => ({ events: [] })),
