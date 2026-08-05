@@ -25,6 +25,7 @@ use helper_modules::{
     BlueskyClient, CoinGeckoClient, EntitlementClient, EthereumRpcClient, GasClient,
     InstagramClient, KickClient, OpenSeaClient, RedditClient, RssClient, SiweVerifier,
     StripeConnectClient, TikTokClient, TwitchClient, XClient, YouTubeClient, format_rss_message,
+    format_youtube_message,
 };
 use helper_store::{
     BlueskySubscriptionRecord, BlueskySubscriptionWrite, InstagramSubscriptionRecord,
@@ -107,6 +108,11 @@ pub fn router(state: ApiState) -> Router {
             "/api/config/youtube/{id}",
             put(update_youtube_subscription).delete(delete_youtube_subscription),
         )
+        .route(
+            "/api/config/youtube/{id}/health",
+            get(youtube_subscription_health),
+        )
+        .route("/api/config/youtube/{id}/test", post(test_youtube_delivery))
         .route("/api/providers/rss/preview", get(rss_preview))
         .route(
             "/api/config/rss",
@@ -1238,6 +1244,176 @@ async fn delete_youtube_subscription(
         ));
     }
     Ok(Json(serde_json::json!({"deleted": true, "id": id})))
+}
+
+fn youtube_provider_error_code(error: &str) -> &'static str {
+    if error.starts_with("youtube_api_error:429") {
+        "youtube_rate_limited"
+    } else if error.starts_with("youtube_api_error:404") {
+        "youtube_channel_not_found"
+    } else {
+        "youtube_provider_unavailable"
+    }
+}
+
+/// Read-only health check for one persisted YouTube subscription. It checks
+/// the official uploads endpoint without changing the polling cursor.
+async fn youtube_subscription_health(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let record = state
+        .store
+        .youtube_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .find(|record| record.id == id)
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "youtube_subscription_not_found"))?;
+    let checked_at = Utc::now().timestamp_millis();
+    let Some(client) = state.youtube.as_ref() else {
+        return Ok(Json(serde_json::json!({
+            "provider": "youtube",
+            "subscriptionId": id,
+            "status": "dependency_down",
+            "checkedAt": checked_at,
+            "failureCount": record.failure_count,
+            "lastError": record.last_error,
+            "message": "YouTube is not configured on this server."
+        })));
+    };
+    match client.latest_video(&record.source_channel_id).await {
+        Ok(Some(video)) => Ok(Json(serde_json::json!({
+            "provider": "youtube",
+            "subscriptionId": id,
+            "status": "ready",
+            "checkedAt": checked_at,
+            "failureCount": record.failure_count,
+            "lastError": record.last_error,
+            "channelId": record.source_channel_id,
+            "latestVideo": {
+                "id": video.id,
+                "title": video.title,
+                "url": video.url,
+                "publishedAt": video.published_at,
+                "channelTitle": video.channel_title
+            }
+        }))),
+        Ok(None) => Ok(Json(serde_json::json!({
+            "provider": "youtube",
+            "subscriptionId": id,
+            "status": "degraded",
+            "checkedAt": checked_at,
+            "failureCount": record.failure_count,
+            "lastError": "youtube_no_public_video",
+            "channelId": record.source_channel_id,
+            "message": "The channel is reachable but has no public upload yet."
+        }))),
+        Err(error) => Ok(Json(serde_json::json!({
+            "provider": "youtube",
+            "subscriptionId": id,
+            "status": "degraded",
+            "checkedAt": checked_at,
+            "failureCount": record.failure_count,
+            "lastError": youtube_provider_error_code(&error.to_string()),
+            "channelId": record.source_channel_id,
+            "message": "The YouTube channel could not be checked right now."
+        }))),
+    }
+}
+
+/// Send a real, bounded Discord message for the newest public upload. This is
+/// deliberately a delivery probe: it never advances `last_video_id`.
+async fn test_youtube_delivery(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(input): Json<YouTubeSubscriptionInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let record = state
+        .store
+        .youtube_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .find(|record| record.id == id)
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "youtube_subscription_not_found"))?;
+    let (source, target, template, _mention, _enabled, _interval) =
+        validate_youtube_subscription(input)
+            .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let Some(client) = state.youtube.as_ref() else {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "provider_not_configured",
+        ));
+    };
+    let latest = client.latest_video(&source).await.map_err(|error| {
+        let code = youtube_provider_error_code(&error.to_string());
+        let status = if code == "youtube_channel_not_found" {
+            StatusCode::NOT_FOUND
+        } else if code == "youtube_rate_limited" {
+            StatusCode::TOO_MANY_REQUESTS
+        } else {
+            StatusCode::BAD_GATEWAY
+        };
+        client_error(status, code)
+    })?;
+    let video_id = latest.as_ref().map(|video| video.id.clone());
+    let content = if let Some(video) = latest.as_ref() {
+        let rendered = format_youtube_message(&template, "", video, &source);
+        format!("✅ Vozen YouTube test\n{rendered}")
+    } else {
+        format!(
+            "✅ Vozen YouTube test — connected to channel **{source}**. No public video is currently available."
+        )
+    };
+    let content = content.chars().take(2_000).collect::<String>();
+    discord_send_channel_message(&state.discord_token, &target, &content)
+        .await
+        .map_err(|error| {
+            let status = if error == "discord_http_403" || error == "discord_http_401" {
+                StatusCode::FORBIDDEN
+            } else if error == "discord_http_404" {
+                StatusCode::NOT_FOUND
+            } else if error == "invalid_discord_channel_id" {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            let code = if error == "discord_http_403" || error == "discord_http_401" {
+                "discord_send_messages_forbidden"
+            } else if error == "discord_http_404" {
+                "discord_channel_not_found"
+            } else if error == "invalid_discord_channel_id" {
+                "invalid_discord_channel_id"
+            } else {
+                "discord_delivery_failed"
+            };
+            tracing::warn!(subscription_id = id, %error, "YouTube test delivery failed");
+            client_error(status, code)
+        })?;
+    let _ = state.store.record_activity(
+        &claims.guild_id,
+        "youtube_test_delivery",
+        &claims.user_id,
+        None,
+        Some(&claims.user_id),
+        &serde_json::json!({
+            "subscriptionId": id,
+            "sourceChannelId": source,
+            "videoId": video_id,
+            "mode": "test"
+        })
+        .to_string(),
+    );
+    Ok(Json(serde_json::json!({
+        "provider": "youtube",
+        "subscriptionId": record.id,
+        "delivered": true,
+        "testedAt": Utc::now().timestamp_millis(),
+        "videoId": video_id
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -10310,6 +10486,45 @@ mod tests {
             let response = app.clone().oneshot(request).await.expect("response");
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn youtube_health_and_test_routes_require_a_session() {
+        let store = Store::open(":memory:").expect("in-memory store");
+        let app = router(state(store));
+        for path in ["/api/config/youtube/1/health", "/api/config/youtube/1/test"] {
+            let method = if path.ends_with("/test") {
+                http::Method::POST
+            } else {
+                http::Method::GET
+            };
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"source_channel_id":"UC12345678901234567890","target_channel_id":"123456789012345","message_template":"{title}","mention":"","interval_seconds":300,"enabled":true}"#,
+                ))
+                .expect("request");
+            let response = app.clone().oneshot(request).await.expect("response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+    }
+
+    #[test]
+    fn youtube_test_delivery_maps_provider_errors_without_leaking_bodies() {
+        assert_eq!(
+            super::youtube_provider_error_code("youtube_api_error:429"),
+            "youtube_rate_limited"
+        );
+        assert_eq!(
+            super::youtube_provider_error_code("youtube_api_error:404"),
+            "youtube_channel_not_found"
+        );
+        assert_eq!(
+            super::youtube_provider_error_code("request failed with secret"),
+            "youtube_provider_unavailable"
+        );
     }
 
     #[test]

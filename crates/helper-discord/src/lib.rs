@@ -18,7 +18,7 @@ use helper_modules::{
     EthereumRpcClient, GasClient, GasQuote, InstagramClient, InstagramMedia, KickClient,
     KickStream, OpenSeaClient, OpenSeaCollectionInfo, OpenSeaCollectionStats, OpenSeaSale,
     RedditClient, RedditPost, RssClient, TikTokClient, TikTokVideo, TwitchClient, XClient, XPost,
-    YouTubeClient, YouTubeVideo, format_rss_message,
+    YouTubeClient, format_rss_message, format_youtube_message,
 };
 use helper_store::{
     BlueskySubscriptionRecord, InstagramSubscriptionRecord, KickSubscriptionRecord,
@@ -3726,36 +3726,6 @@ fn provider_error_code(error: &anyhow::Error) -> String {
     } else {
         "provider_request_failed".into()
     }
-}
-
-fn format_youtube_message(
-    template: &str,
-    mention: &str,
-    video: &YouTubeVideo,
-    channel_id: &str,
-) -> String {
-    let rendered = template
-        .replace("{title}", &video.title)
-        .replace("{url}", &video.url)
-        .replace(
-            "{channel}",
-            if video.channel_title.is_empty() {
-                channel_id
-            } else {
-                &video.channel_title
-            },
-        )
-        .replace("{published_at}", &video.published_at)
-        .replace("{description}", &video.description);
-    let rendered = if mention.is_empty() {
-        rendered
-    } else {
-        format!("{mention} {rendered}")
-    };
-    // Discord rejects messages above 2,000 Unicode scalar values. Templates
-    // are bounded in the API, but provider fields such as descriptions are
-    // not, so enforce the platform limit after substitutions as well.
-    rendered.chars().take(2_000).collect()
 }
 
 async fn run_rss_worker(http: Arc<serenity::http::Http>, store: Store, rss: RssClient) {

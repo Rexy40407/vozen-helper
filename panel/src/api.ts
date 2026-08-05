@@ -100,6 +100,23 @@ export type RssSubscriptionHealth = {
     latestTitle?: string | null;
   };
 };
+export type YouTubeSubscriptionHealth = {
+  provider: 'youtube';
+  subscriptionId: number;
+  status: 'ready' | 'degraded' | 'dependency_down';
+  checkedAt: number;
+  failureCount: number;
+  lastError?: string | null;
+  message?: string;
+  channelId?: string;
+  latestVideo?: {
+    id: string;
+    title: string;
+    url: string;
+    publishedAt: string;
+    channelTitle: string;
+  };
+};
 export type TwitchSubscription = {
   id: number;
   sourceLogin: string;
@@ -530,6 +547,37 @@ export const api = {
   ) =>
     request<YouTubeSubscription>(`/api/config/youtube/${id}`, {
       method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source_channel_id: payload.sourceChannelId,
+        target_channel_id: payload.targetChannelId,
+        message_template: payload.messageTemplate,
+        mention: payload.mention,
+        interval_seconds: payload.intervalSeconds,
+        enabled: payload.enabled,
+      }),
+    }),
+  youtubeHealth: (id: number) =>
+    request<YouTubeSubscriptionHealth>(`/api/config/youtube/${id}/health`),
+  testYoutubeDelivery: (
+    id: number,
+    payload: {
+      sourceChannelId: string;
+      targetChannelId: string;
+      messageTemplate: string;
+      mention: string;
+      intervalSeconds: number;
+      enabled: boolean;
+    },
+  ) =>
+    request<{
+      provider: 'youtube';
+      subscriptionId: number;
+      delivered: boolean;
+      testedAt: number;
+      videoId?: string | null;
+    }>(`/api/config/youtube/${id}/test`, {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         source_channel_id: payload.sourceChannelId,

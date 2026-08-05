@@ -100,6 +100,34 @@ pub fn format_rss_message(template: &str, mention: &str, item: &RssItem) -> Stri
     rendered.chars().take(2_000).collect()
 }
 
+/// Render a YouTube alert with the same bounded substitutions used by the
+/// Discord worker and the API test-delivery endpoint. Provider fields are
+/// treated as plain text and the result stays within Discord's message limit.
+pub fn format_youtube_message(
+    template: &str,
+    mention: &str,
+    video: &YouTubeVideo,
+    channel_id: &str,
+) -> String {
+    let channel = if video.channel_title.is_empty() {
+        channel_id
+    } else {
+        video.channel_title.as_str()
+    };
+    let rendered = template
+        .replace("{title}", &video.title)
+        .replace("{url}", &video.url)
+        .replace("{channel}", channel)
+        .replace("{published_at}", &video.published_at)
+        .replace("{description}", &video.description);
+    let rendered = if mention.is_empty() {
+        rendered
+    } else {
+        format!("{mention} {rendered}")
+    };
+    rendered.chars().take(2_000).collect()
+}
+
 /// Client for the public Bluesky AppView API. Alerts only read public posts;
 /// no account token is required. The runtime polls the author's feed with a
 /// bounded page size and stores the last URI for idempotent delivery.
@@ -2864,6 +2892,26 @@ mod tests {
             "Vozen News: A new post — https://example.com/post-1"
         );
         let bounded = format_rss_message(&"x".repeat(3_000), "@everyone", &item);
+        assert_eq!(bounded.chars().count(), 2_000);
+        assert!(bounded.starts_with("@everyone "));
+    }
+
+    #[test]
+    fn youtube_message_renderer_matches_bounded_discord_contract() {
+        let video = YouTubeVideo {
+            id: "video-1".into(),
+            title: "A new video".into(),
+            description: "Details".into(),
+            url: "https://youtube.com/watch?v=video-1".into(),
+            published_at: "2026-08-02T12:00:00Z".into(),
+            channel_title: "Vozen".into(),
+        };
+        let rendered = format_youtube_message("{channel}: {title} — {url}", "", &video, "UC123");
+        assert_eq!(
+            rendered,
+            "Vozen: A new video — https://youtube.com/watch?v=video-1"
+        );
+        let bounded = format_youtube_message(&"x".repeat(3_000), "@everyone", &video, "UC123");
         assert_eq!(bounded.chars().count(), 2_000);
         assert!(bounded.starts_with("@everyone "));
     }

@@ -2399,6 +2399,40 @@ function App() {
   async function testDetail() {
     if (!route.key) return;
     try {
+      if (route.key === 'social.youtube') {
+        const sourceChannelId = String(detailConfig.sourceChannelId ?? '').trim();
+        if (!sourceChannelId) {
+          setMessage('Indica primeiro o ID do canal YouTube.');
+          return;
+        }
+        if (localPreviewMode) {
+          setMessage('A validação do canal YouTube aparece quando o painel estiver ligado à API.');
+          return;
+        }
+        const subscription = youtubeSubscriptions[0];
+        if (!subscription) {
+          setMessage('Guarda primeiro a subscrição para poderes enviar um teste para o Discord.');
+          return;
+        }
+        const result = await api.testYoutubeDelivery(subscription.id, {
+          sourceChannelId,
+          targetChannelId: String(detailConfig.targetChannelId ?? subscription.targetChannelId),
+          messageTemplate: String(
+            detailConfig.messageTemplate ?? subscription.messageTemplate,
+          ),
+          mention: String(detailConfig.mention ?? subscription.mention),
+          intervalSeconds: Number(
+            detailConfig.intervalSeconds ?? subscription.intervalSeconds,
+          ),
+          enabled: Boolean(detailEnabled),
+        });
+        setMessage(
+          result.delivered
+            ? 'Mensagem de teste enviada para o canal Discord configurado. O cursor do YouTube não foi alterado.'
+            : 'O teste não foi entregue.',
+        );
+        return;
+      }
       if (route.key === 'social.rss' || route.key === 'social.podcasts') {
         const feedUrl = String(detailConfig.feedUrl ?? '').trim();
         if (!feedUrl) {
@@ -3902,7 +3936,9 @@ function FeatureDetail({
             </p>
           </div>
           <button className="secondary full" onClick={onTest}>
-            {feature?.key === 'social.rss' || feature?.key === 'social.podcasts'
+            {feature?.key === 'social.youtube' ||
+            feature?.key === 'social.rss' ||
+            feature?.key === 'social.podcasts'
               ? 'Enviar teste para o Discord'
               : 'Simular configuração'}
           </button>
