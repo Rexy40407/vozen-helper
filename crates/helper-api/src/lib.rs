@@ -5085,22 +5085,28 @@ fn permission_bitfield_has(permissions: u64, bit: u8) -> bool {
 
 fn dependency_permission(dependency: &str) -> Option<(u8, &'static str)> {
     Some(match dependency {
-        "manage_channels" => (4, "Manage Channels"),
-        "manage_guild" => (5, "Manage Server"),
-        "manage_messages" => (13, "Manage Messages"),
-        "embed_links" => (14, "Embed Links"),
-        "attach_files" => (15, "Attach Files"),
-        "manage_nicknames" => (27, "Manage Nicknames"),
-        "manage_roles" => (28, "Manage Roles"),
-        "manage_expressions" => (30, "Manage Expressions"),
-        "manage_events" => (33, "Manage Events"),
-        "manage_threads" => (34, "Manage Threads"),
-        "moderate_members" => (40, "Moderate Members"),
-        "send_messages" => (11, "Send Messages"),
-        "view_channel" => (10, "View Channels"),
-        "view_audit_log" => (7, "View Audit Log"),
-        "guild_invites" => (5, "Manage Server"),
-        "voice_channels" => (20, "Connect to Voice"),
+        "manage_channels" | "Manage Channels" => (4, "Manage Channels"),
+        "manage_guild" | "Manage Server" => (5, "Manage Server"),
+        "manage_messages" | "Manage Messages" => (13, "Manage Messages"),
+        "embed_links" | "Embed Links" => (14, "Embed Links"),
+        "attach_files" | "Attach Files" => (15, "Attach Files"),
+        "read_message_history" | "Read Message History" => (16, "Read Message History"),
+        "manage_nicknames" | "Manage Nicknames" => (27, "Manage Nicknames"),
+        "change_nickname" | "Change Nickname" => (26, "Change Nickname"),
+        "manage_roles" | "Manage Roles" => (28, "Manage Roles"),
+        "manage_expressions" | "Manage Expressions" => (30, "Manage Expressions"),
+        "manage_events" | "Manage Events" => (33, "Manage Events"),
+        "manage_threads" | "Manage Threads" => (34, "Manage Threads"),
+        "moderate_members" | "Moderate Members" => (40, "Moderate Members"),
+        "send_messages" | "Send Messages" => (11, "Send Messages"),
+        "send_messages_in_threads" | "Send Messages in Threads" => (38, "Send Messages in Threads"),
+        "view_channel" | "View Channels" => (10, "View Channels"),
+        "view_audit_log" | "View Audit Log" => (7, "View Audit Log"),
+        "guild_invites" | "Manage Invites" => (5, "Manage Server"),
+        "voice_channels" | "Connect to Voice" => (20, "Connect to Voice"),
+        "add_reactions" | "Add Reactions" => (6, "Add Reactions"),
+        "use_external_emojis" | "Use External Emojis" => (18, "Use External Emojis"),
+        "use_application_commands" | "Use Application Commands" => (31, "Use Application Commands"),
         _ => return None,
     })
 }
@@ -7863,6 +7869,7 @@ fn provider_runtime_ready(state: &ApiState, key: &str) -> bool {
             .as_ref()
             .is_some_and(YouTubeClient::is_configured),
         "social.rss" | "social.podcasts" => state.rss.is_some(),
+        "social.bluesky" => state.bluesky.is_some(),
         "social.twitch" => state
             .twitch
             .as_ref()
@@ -7961,6 +7968,7 @@ fn provider_dependencies_ready(state: &ApiState, key: &str) -> bool {
             .as_ref()
             .is_some_and(YouTubeClient::is_configured),
         "social.rss" | "social.podcasts" => state.rss.is_some(),
+        "social.bluesky" => state.bluesky.is_some(),
         "social.twitch" => state
             .twitch
             .as_ref()
@@ -11418,6 +11426,21 @@ mod tests {
                 provider_needs_runtime_ready(key),
                 "{key} must be guarded by provider readiness before it can be enabled"
             );
+        }
+    }
+
+    #[test]
+    fn preflight_accepts_canonical_dependency_keys_and_panel_labels() {
+        for (key, label, bit) in [
+            ("send_messages", "Send Messages", 11),
+            ("read_message_history", "Read Message History", 16),
+            ("add_reactions", "Add Reactions", 6),
+            ("change_nickname", "Change Nickname", 26),
+            ("manage_roles", "Manage Roles", 28),
+            ("use_application_commands", "Use Application Commands", 31),
+        ] {
+            assert_eq!(dependency_permission(key), Some((bit, label)));
+            assert_eq!(dependency_permission(label), Some((bit, label)));
         }
     }
 
