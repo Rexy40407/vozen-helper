@@ -605,6 +605,18 @@ pub struct LevelRecord {
     pub xp: i64,
 }
 
+/// A milestone that has been granted to a member.  The primary key makes
+/// unlocks idempotent when Discord retries a message event or the gateway
+/// reconnects.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AchievementRecord {
+    pub guild_id: String,
+    pub user_id: String,
+    pub achievement_key: String,
+    pub threshold: i64,
+    pub unlocked_at: i64,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VoiceSessionRecord {
     pub guild_id: String,
@@ -766,7 +778,7 @@ impl Store {
                 )?;
             }
         }
-        conn.execute_batch("CREATE TABLE IF NOT EXISTS helper_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS helper_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, guild_id TEXT NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, revoked_at TEXT); CREATE TABLE IF NOT EXISTS helper_session_guilds (session_id TEXT NOT NULL, guild_id TEXT NOT NULL, name TEXT NOT NULL, permissions TEXT, PRIMARY KEY(session_id,guild_id)); CREATE TABLE IF NOT EXISTS helper_oauth_states (state_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, used_at INTEGER); CREATE TABLE IF NOT EXISTS helper_entitlements (subject_id TEXT PRIMARY KEY, payload TEXT NOT NULL, fetched_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS helper_usage (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, quota_key TEXT NOT NULL, period TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,user_id,quota_key,period)); CREATE TABLE IF NOT EXISTS cases (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, type TEXT NOT NULL, target_id TEXT NOT NULL, moderator_id TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', duration_ms INTEGER, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_cases_guild_time ON cases(guild_id, created_at DESC); CREATE TABLE IF NOT EXISTS settings (guild_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(guild_id,key)); CREATE TABLE IF NOT EXISTS activity_log (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, type TEXT NOT NULL, user_id TEXT NOT NULL, user_tag TEXT, actor_id TEXT, detail TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_activity_guild_time ON activity_log(guild_id, created_at DESC); CREATE TABLE IF NOT EXISTS scheduled_actions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, type TEXT NOT NULL, target_id TEXT NOT NULL, execute_at INTEGER NOT NULL, payload TEXT NOT NULL DEFAULT '', case_id INTEGER); CREATE INDEX IF NOT EXISTS idx_scheduled_due ON scheduled_actions(execute_at); CREATE TABLE IF NOT EXISTS infractions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, target_id TEXT NOT NULL, weight INTEGER NOT NULL DEFAULT 1, source TEXT NOT NULL DEFAULT 'manual', created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS afk (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', since INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE TABLE IF NOT EXISTS tags (guild_id TEXT NOT NULL, name TEXT NOT NULL, content TEXT NOT NULL, author_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(guild_id,name)); CREATE TABLE IF NOT EXISTS levels (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, xp INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,user_id)); CREATE TABLE IF NOT EXISTS stats (guild_id TEXT NOT NULL, date TEXT NOT NULL, messages INTEGER NOT NULL DEFAULT 0, joins INTEGER NOT NULL DEFAULT 0, leaves INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,date)); CREATE TABLE IF NOT EXISTS invite_snapshots (guild_id TEXT NOT NULL, code TEXT NOT NULL, uses INTEGER NOT NULL DEFAULT 0, inviter_id TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY(guild_id,code)); CREATE TABLE IF NOT EXISTS invite_attributions (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, code TEXT NOT NULL, inviter_id TEXT, joined_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE INDEX IF NOT EXISTS idx_invite_attributions_guild ON invite_attributions(guild_id,joined_at DESC);")?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS helper_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS helper_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, guild_id TEXT NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, revoked_at TEXT); CREATE TABLE IF NOT EXISTS helper_session_guilds (session_id TEXT NOT NULL, guild_id TEXT NOT NULL, name TEXT NOT NULL, permissions TEXT, PRIMARY KEY(session_id,guild_id)); CREATE TABLE IF NOT EXISTS helper_oauth_states (state_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, used_at INTEGER); CREATE TABLE IF NOT EXISTS helper_entitlements (subject_id TEXT PRIMARY KEY, payload TEXT NOT NULL, fetched_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS helper_usage (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, quota_key TEXT NOT NULL, period TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,user_id,quota_key,period)); CREATE TABLE IF NOT EXISTS cases (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, type TEXT NOT NULL, target_id TEXT NOT NULL, moderator_id TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', duration_ms INTEGER, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_cases_guild_time ON cases(guild_id, created_at DESC); CREATE TABLE IF NOT EXISTS settings (guild_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(guild_id,key)); CREATE TABLE IF NOT EXISTS activity_log (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, type TEXT NOT NULL, user_id TEXT NOT NULL, user_tag TEXT, actor_id TEXT, detail TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_activity_guild_time ON activity_log(guild_id, created_at DESC); CREATE TABLE IF NOT EXISTS scheduled_actions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, type TEXT NOT NULL, target_id TEXT NOT NULL, execute_at INTEGER NOT NULL, payload TEXT NOT NULL DEFAULT '', case_id INTEGER); CREATE INDEX IF NOT EXISTS idx_scheduled_due ON scheduled_actions(execute_at); CREATE TABLE IF NOT EXISTS infractions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, target_id TEXT NOT NULL, weight INTEGER NOT NULL DEFAULT 1, source TEXT NOT NULL DEFAULT 'manual', created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS afk (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', since INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE TABLE IF NOT EXISTS tags (guild_id TEXT NOT NULL, name TEXT NOT NULL, content TEXT NOT NULL, author_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(guild_id,name)); CREATE TABLE IF NOT EXISTS levels (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, xp INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,user_id)); CREATE TABLE IF NOT EXISTS achievements (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, achievement_key TEXT NOT NULL, threshold INTEGER NOT NULL, unlocked_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id,achievement_key)); CREATE INDEX IF NOT EXISTS idx_achievements_guild_user ON achievements(guild_id,user_id,unlocked_at); CREATE TABLE IF NOT EXISTS stats (guild_id TEXT NOT NULL, date TEXT NOT NULL, messages INTEGER NOT NULL DEFAULT 0, joins INTEGER NOT NULL DEFAULT 0, leaves INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,date)); CREATE TABLE IF NOT EXISTS invite_snapshots (guild_id TEXT NOT NULL, code TEXT NOT NULL, uses INTEGER NOT NULL DEFAULT 0, inviter_id TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY(guild_id,code)); CREATE TABLE IF NOT EXISTS invite_attributions (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, code TEXT NOT NULL, inviter_id TEXT, joined_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE INDEX IF NOT EXISTS idx_invite_attributions_guild ON invite_attributions(guild_id,joined_at DESC);")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS birthdays (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, month INTEGER NOT NULL, day INTEGER NOT NULL, last_announced_year INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE INDEX IF NOT EXISTS idx_birthdays_day ON birthdays(month,day,last_announced_year); CREATE TABLE IF NOT EXISTS economy_accounts (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, balance INTEGER NOT NULL DEFAULT 0, last_daily_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE INDEX IF NOT EXISTS idx_economy_guild_balance ON economy_accounts(guild_id,balance DESC); CREATE TABLE IF NOT EXISTS economy_ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, user_id TEXT NOT NULL, amount INTEGER NOT NULL, reason TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_economy_ledger_account ON economy_ledger(guild_id,user_id,created_at DESC); CREATE TABLE IF NOT EXISTS temp_channels (guild_id TEXT NOT NULL, channel_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_temp_channels_guild ON temp_channels(guild_id); CREATE TABLE IF NOT EXISTS voice_sessions (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, channel_id TEXT NOT NULL, started_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE INDEX IF NOT EXISTS idx_voice_sessions_guild ON voice_sessions(guild_id,started_at);")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS economy_cooldowns (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, kind TEXT NOT NULL, last_claim_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id,kind)); CREATE INDEX IF NOT EXISTS idx_economy_cooldowns_kind ON economy_cooldowns(guild_id,kind,last_claim_at);")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS provider_events (provider TEXT NOT NULL, event_id TEXT NOT NULL, payload TEXT NOT NULL, received_at INTEGER NOT NULL, PRIMARY KEY(provider,event_id));")?;
@@ -3884,6 +3896,7 @@ impl Store {
             "DELETE FROM afk WHERE guild_id=?1",
             "DELETE FROM tags WHERE guild_id=?1",
             "DELETE FROM levels WHERE guild_id=?1",
+            "DELETE FROM achievements WHERE guild_id=?1",
             "DELETE FROM voice_sessions WHERE guild_id=?1",
             "DELETE FROM birthdays WHERE guild_id=?1",
             "DELETE FROM economy_accounts WHERE guild_id=?1",
@@ -4134,6 +4147,53 @@ impl Store {
             )
             .optional()?
             .unwrap_or(0))
+    }
+
+    /// Record a milestone exactly once.  Returning `true` only for the first
+    /// insert lets the gateway announce a reward safely when Discord retries
+    /// the same message event.
+    pub fn unlock_achievement(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        achievement_key: &str,
+        threshold: i64,
+        unlocked_at: i64,
+    ) -> Result<bool> {
+        if guild_id.is_empty()
+            || user_id.is_empty()
+            || achievement_key.is_empty()
+            || achievement_key.len() > 96
+        {
+            bail!("achievement identifiers are invalid");
+        }
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let changed = conn.execute(
+            "INSERT OR IGNORE INTO achievements(guild_id,user_id,achievement_key,threshold,unlocked_at) VALUES(?1,?2,?3,?4,?5)",
+            params![guild_id, user_id, achievement_key, threshold.clamp(1, 1_000_000_000), unlocked_at],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn achievements_for(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> Result<Vec<AchievementRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT guild_id,user_id,achievement_key,threshold,unlocked_at FROM achievements WHERE guild_id=?1 AND user_id=?2 ORDER BY unlocked_at ASC, achievement_key ASC",
+        )?;
+        let rows = stmt.query_map(params![guild_id, user_id], |row| {
+            Ok(AchievementRecord {
+                guild_id: row.get(0)?,
+                user_id: row.get(1)?,
+                achievement_key: row.get(2)?,
+                threshold: row.get(3)?,
+                unlocked_at: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn top_levels(&self, guild_id: &str, limit: u32) -> Result<Vec<LevelRecord>> {
@@ -5080,6 +5140,30 @@ mod tests {
         assert_eq!(store.level_rank("g", "other").unwrap(), Some(1));
         assert_eq!(store.level_rank("g", "u").unwrap(), Some(2));
         assert_eq!(store.level_rank("g", "missing").unwrap(), None);
+        assert!(
+            store
+                .unlock_achievement("g", "u", "first_steps", 100, 10)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .unlock_achievement("g", "u", "first_steps", 100, 11)
+                .unwrap()
+        );
+        assert!(
+            store
+                .unlock_achievement("g", "other", "first_steps", 100, 12)
+                .unwrap()
+        );
+        let unlocked = store.achievements_for("g", "u").unwrap();
+        assert_eq!(unlocked.len(), 1);
+        assert_eq!(unlocked[0].achievement_key, "first_steps");
+        assert!(
+            store
+                .achievements_for("other-guild", "u")
+                .unwrap()
+                .is_empty()
+        );
         let id = store
             .schedule("g", "u", 1, r#"{"channel_id":"2","text":"hello"}"#)
             .unwrap();

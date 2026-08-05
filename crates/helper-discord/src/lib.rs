@@ -1793,6 +1793,8 @@ impl EventHandler for Handler {
                             .store
                             .level_for(&guild_text, &user_text)
                             .unwrap_or(before);
+                        self.announce_achievement_unlocks(&ctx, guild_id, &user_text, after, None)
+                            .await;
                         self.apply_level_rewards(&ctx, guild_id, &user_text, after / 100 + 1)
                             .await;
                         if after / 100 > before / 100 {
@@ -3117,6 +3119,14 @@ impl EventHandler for Handler {
                         .store
                         .level_for(&guild_text, &user_text)
                         .unwrap_or(before);
+                    self.announce_achievement_unlocks(
+                        &ctx,
+                        guild_id,
+                        &user_text,
+                        after,
+                        Some(message.channel_id),
+                    )
+                    .await;
                     let before_level = before / 100 + 1;
                     let after_level = after / 100 + 1;
                     if after_level > before_level {
@@ -5099,7 +5109,104 @@ fn format_twitch_message(
     rendered.chars().take(2_000).collect()
 }
 
+fn configured_achievement_milestones(
+    store: &Store,
+    guild_id: &str,
+) -> [(&'static str, &'static str, i64); 3] {
+    [
+        (
+            "first_steps",
+            "First steps",
+            setting_u64(
+                store,
+                guild_id,
+                "community.achievements.first_threshold",
+                100,
+            ) as i64,
+        ),
+        (
+            "regular",
+            "Regular",
+            setting_u64(
+                store,
+                guild_id,
+                "community.achievements.regular_threshold",
+                1_000,
+            ) as i64,
+        ),
+        (
+            "community_pillar",
+            "Community pillar",
+            setting_u64(
+                store,
+                guild_id,
+                "community.achievements.pillar_threshold",
+                10_000,
+            ) as i64,
+        ),
+    ]
+}
+
 impl Handler {
+    /// Persist milestone unlocks before announcing them.  This keeps the
+    /// message and voice XP paths idempotent across gateway retries and makes
+    /// `/achievements` a real history instead of a recalculated display.
+    async fn announce_achievement_unlocks(
+        &self,
+        ctx: &Context,
+        guild_id: serenity::all::GuildId,
+        user_id: &str,
+        xp: i64,
+        source_channel: Option<ChannelId>,
+    ) {
+        if !feature_enabled(
+            &self.store,
+            &guild_id.to_string(),
+            "community.achievements",
+            None,
+        ) {
+            return;
+        }
+        let guild_text = guild_id.to_string();
+        let mut newly_unlocked = Vec::new();
+        for (key, label, threshold) in configured_achievement_milestones(&self.store, &guild_text) {
+            if xp >= threshold
+                && self
+                    .store
+                    .unlock_achievement(
+                        &guild_text,
+                        user_id,
+                        key,
+                        threshold,
+                        Utc::now().timestamp_millis(),
+                    )
+                    .unwrap_or(false)
+            {
+                newly_unlocked.push(format!("{label} ({threshold} XP)"));
+            }
+        }
+        if newly_unlocked.is_empty() {
+            return;
+        }
+        let channel = source_channel.or_else(|| {
+            setting_u64_optional(
+                &self.store,
+                &guild_text,
+                "community.levels.announce_channel",
+            )
+            .map(ChannelId::new)
+        });
+        let Some(channel) = channel else {
+            return;
+        };
+        let _ = channel
+            .say(
+                &ctx.http,
+                format!("🏆 <@{user_id}> unlocked: {}", newly_unlocked.join(", ")),
+            )
+            .await;
+    }
+
     async fn apply_level_rewards(
         &self,
         ctx: &Context,
@@ -5953,17 +6060,34 @@ impl Handler {
                     return respond(ctx, command, "Achievements are disabled in this server. Enable them in the dashboard.").await;
                 }
                 let xp = self.store.level_for(&guild_text, &command.user.id.to_string())?;
-                let mut achievements = Vec::new();
-                let milestones = [
-                    ("community.achievements.first_threshold", "First steps", 100_u64),
-                    ("community.achievements.regular_threshold", "Regular", 1_000_u64),
-                    ("community.achievements.pillar_threshold", "Community pillar", 10_000_u64),
-                ];
-                for (setting, label, fallback) in milestones {
-                    let threshold = setting_u64(&self.store, &guild_text, setting, fallback) as i64;
-                    if xp >= threshold { achievements.push(format!("✅ {label} ({threshold} XP)")); }
+                for (key, _label, threshold) in
+                    configured_achievement_milestones(&self.store, &guild_text)
+                {
+                    if xp >= threshold {
+                        let _ = self.store.unlock_achievement(
+                            &guild_text,
+                            &command.user.id.to_string(),
+                            key,
+                            threshold,
+                            Utc::now().timestamp_millis(),
+                        );
+                    }
                 }
-                if achievements.is_empty() { "No achievements yet. Keep participating to unlock the first one at 100 XP.".to_string() } else { achievements.join("\n") }
+                let unlocked = self
+                    .store
+                    .achievements_for(&guild_text, &command.user.id.to_string())?;
+                let achievements = configured_achievement_milestones(&self.store, &guild_text)
+                    .into_iter()
+                    .map(|(key, label, threshold)| {
+                        let persisted = unlocked.iter().any(|entry| entry.achievement_key == key);
+                        if persisted {
+                            format!("✅ {label} ({threshold} XP)")
+                        } else {
+                            format!("🔒 {label} ({threshold} XP)")
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                format!("Your achievements ({xp} XP):\n{}", achievements.join("\n"))
             }
             "search" => {
                 let Some(guild_id) = command.guild_id else {
@@ -10027,18 +10151,17 @@ async fn deliver_scheduled_action(
             && let Some(repeat) = value.get("repeat").and_then(serde_json::Value::as_str)
             && let Some(remaining) = value.get("remaining").and_then(serde_json::Value::as_u64)
             && remaining > 0
+            && let Some(interval_ms) = reminder_repeat_interval_ms(repeat)
         {
-            if let Some(interval_ms) = reminder_repeat_interval_ms(repeat) {
-                let mut next_payload = value.clone();
-                next_payload["remaining"] = serde_json::json!(remaining - 1);
-                let _ = store.schedule_typed(
-                    guild_id,
-                    "reminder",
-                    target_id,
-                    Utc::now().timestamp_millis() + interval_ms,
-                    &next_payload.to_string(),
-                )?;
-            }
+            let mut next_payload = value.clone();
+            next_payload["remaining"] = serde_json::json!(remaining - 1);
+            let _ = store.schedule_typed(
+                guild_id,
+                "reminder",
+                target_id,
+                Utc::now().timestamp_millis() + interval_ms,
+                &next_payload.to_string(),
+            )?;
         }
     }
     store.delete_scheduled_action(id)?;
