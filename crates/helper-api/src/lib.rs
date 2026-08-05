@@ -8742,6 +8742,10 @@ struct FeatureTestRequest {
     emoji_count: Option<u64>,
     #[serde(default, rename = "animatedEmojiCount")]
     animated_emoji_count: Option<u64>,
+    #[serde(default, rename = "searchProvider")]
+    search_provider: Option<String>,
+    #[serde(default, rename = "searchQuery")]
+    search_query: Option<String>,
 }
 
 fn generic_feature_effect(key: &str) -> Vec<String> {
@@ -8951,6 +8955,8 @@ async fn test_feature(
         "inviteCount": test.invite_count,
         "emojiCount": test.emoji_count,
         "animatedEmojiCount": test.animated_emoji_count,
+        "searchProvider": test.search_provider.clone(),
+        "searchQuery": test.search_query.clone(),
     });
     let adapter_effects = if maturity == FeatureMaturity::Blocked {
         // A blocked provider must never claim that a JSON draft would be

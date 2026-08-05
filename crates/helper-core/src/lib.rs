@@ -10286,6 +10286,93 @@ impl SearchAdapter {
     pub const SOURCE: &'static str = "bounded_search_adapter_v1";
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchDecision {
+    pub allowed: bool,
+    pub provider: String,
+    pub max_results: usize,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+pub fn evaluate_search(
+    config: &serde_json::Value,
+    provider: &str,
+    query_len: usize,
+) -> SearchDecision {
+    let object = config.as_object();
+    let provider = provider.trim().to_ascii_lowercase();
+    let max_results = object
+        .and_then(|value| value.get("maxResults"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(5)
+        .clamp(1, 5) as usize;
+    let enabled = match provider.as_str() {
+        "wikipedia" => object
+            .and_then(|value| value.get("allowWikipedia"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+        "anilist" => object
+            .and_then(|value| value.get("allowAniList"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+        "bluesky" => object
+            .and_then(|value| value.get("allowBluesky"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+        "youtube" => object
+            .and_then(|value| value.get("allowYouTube"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+        "twitch" => object
+            .and_then(|value| value.get("allowTwitch"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+        _ => false,
+    };
+    let (allowed, reason_code, explanation) = if provider.is_empty() {
+        (
+            false,
+            "provider_required",
+            "Choose one approved search provider.".to_owned(),
+        )
+    } else if query_len == 0 || query_len > 128 {
+        (
+            false,
+            "query_out_of_range",
+            "Search text must contain between 1 and 128 characters.".to_owned(),
+        )
+    } else if !matches!(
+        provider.as_str(),
+        "wikipedia" | "anilist" | "bluesky" | "youtube" | "twitch"
+    ) {
+        (
+            false,
+            "provider_not_approved",
+            "Choose Wikipedia, AniList, Bluesky, YouTube or Twitch.".to_owned(),
+        )
+    } else if !enabled {
+        (
+            false,
+            "provider_disabled",
+            "That search provider is disabled in this server's settings.".to_owned(),
+        )
+    } else {
+        (
+            true,
+            "provider_allowed",
+            format!("Search {provider} with at most {max_results} bounded result(s)."),
+        )
+    };
+    SearchDecision {
+        allowed,
+        provider,
+        max_results,
+        reason_code,
+        explanation,
+    }
+}
+
 impl FeatureAdapter for SearchAdapter {
     fn descriptor(&self) -> FeatureAdapterDescriptor {
         FeatureAdapterDescriptor {
@@ -10415,6 +10502,26 @@ impl FeatureAdapter for SearchAdapter {
             projection.push(("utility.search.allow_twitch".into(), value.to_string()));
         }
         projection
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let provider = fixture_string(fixture, "searchProvider", "search_provider", "wikipedia");
+        let query = fixture_string(fixture, "searchQuery", "search_query", "preview");
+        let decision = evaluate_search(config, provider, query.len());
+        let mut effects = vec![if decision.allowed {
+            decision.explanation
+        } else {
+            format!(
+                "Search rejected ({}): {}",
+                decision.reason_code, decision.explanation
+            )
+        }];
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 static EMBEDS_ADAPTER: EmbedsAdapter = EmbedsAdapter;
@@ -13220,5 +13327,29 @@ mod tests {
         assert!(emoji_effects.iter().any(|effect| {
             effect.contains("utility.emojis.animated_only") && effect.contains("true")
         }));
+    }
+
+    #[test]
+    fn search_simulation_uses_the_same_provider_allowlist_as_runtime() {
+        let adapter = feature_adapter("utility.search").expect("search adapter");
+        let config = serde_json::json!({
+            "maxResults": 3,
+            "allowWikipedia": true,
+            "allowAniList": false,
+            "allowBluesky": true,
+            "allowYouTube": false,
+            "allowTwitch": false
+        });
+        let allowed = adapter.simulate(
+            &config,
+            &serde_json::json!({"searchProvider": "wikipedia", "searchQuery": "rust"}),
+        );
+        assert!(allowed[0].contains("Search wikipedia"));
+        assert!(allowed[0].contains("3 bounded result"));
+        let disabled = adapter.simulate(
+            &config,
+            &serde_json::json!({"searchProvider": "youtube", "searchQuery": "rust"}),
+        );
+        assert!(disabled[0].contains("provider_disabled"));
     }
 }

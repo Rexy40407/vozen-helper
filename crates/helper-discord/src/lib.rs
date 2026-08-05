@@ -12,9 +12,9 @@ use helper_core::{
     evaluate_emojis, evaluate_event, evaluate_giveaway, evaluate_help, evaluate_invite_tracker,
     evaluate_join_gate, evaluate_leaderboard, evaluate_levels, evaluate_moderation,
     evaluate_nickname, evaluate_poll, evaluate_privacy, evaluate_reminder, evaluate_role_panel,
-    evaluate_scam_with_roles, evaluate_starboard, evaluate_stats, evaluate_suggestion,
-    evaluate_temp_channel, evaluate_tickets, evaluate_welcome_channel, evaluate_workflow,
-    feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
+    evaluate_scam_with_roles, evaluate_search, evaluate_starboard, evaluate_stats,
+    evaluate_suggestion, evaluate_temp_channel, evaluate_tickets, evaluate_welcome_channel,
+    evaluate_workflow, feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
     parse_utc_offset_minutes, quota_limit, render_member_message, scam_policy_from_json,
     starboard_policy_from_json,
 };
@@ -6619,6 +6619,19 @@ impl Handler {
                 let bluesky = setting_bool(&self.store, &guild_text, "utility.search.allow_bluesky", true);
                 let youtube = setting_bool(&self.store, &guild_text, "utility.search.allow_youtube", true);
                 let twitch = setting_bool(&self.store, &guild_text, "utility.search.allow_twitch", true);
+                let search_config = serde_json::json!({
+                    "maxResults": max_results,
+                    "allowWikipedia": wikipedia,
+                    "allowAniList": anilist,
+                    "allowBluesky": bluesky,
+                    "allowYouTube": youtube,
+                    "allowTwitch": twitch,
+                });
+                let decision = evaluate_search(&search_config, &provider, query.len());
+                if !decision.allowed {
+                    return respond(ctx, command, &decision.explanation).await;
+                }
+                let max_results = decision.max_results;
                 let http = HttpClient::new();
                 match provider.as_str() {
                     "youtube" if youtube => {
