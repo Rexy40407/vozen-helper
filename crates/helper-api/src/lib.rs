@@ -8706,6 +8706,18 @@ struct FeatureTestRequest {
     destructive_actions: Option<u64>,
     #[serde(default, rename = "openTickets")]
     open_tickets: Option<u64>,
+    /// Bounded XP fixture values used by the same message/voice evaluator as
+    /// the Discord levels runtime.
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default, rename = "eventId")]
+    event_id: Option<String>,
+    #[serde(default, rename = "cooldownReady")]
+    cooldown_ready: Option<bool>,
+    #[serde(default, rename = "durationMinutes")]
+    duration_minutes: Option<u64>,
+    #[serde(default, rename = "currentXp")]
+    current_xp: Option<i64>,
 }
 
 fn generic_feature_effect(key: &str) -> Vec<String> {
@@ -8900,6 +8912,11 @@ async fn test_feature(
         "capacity": test.event_capacity,
         "destructiveActions": test.destructive_actions,
         "openTickets": test.open_tickets,
+        "source": test.source.clone(),
+        "eventId": test.event_id.clone(),
+        "cooldownReady": test.cooldown_ready,
+        "durationMinutes": test.duration_minutes,
+        "currentXp": test.current_xp,
     });
     let adapter_effects = if maturity == FeatureMaturity::Blocked {
         // A blocked provider must never claim that a JSON draft would be

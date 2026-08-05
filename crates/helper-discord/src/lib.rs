@@ -9,12 +9,12 @@ use helper_core::{
     RolePanelObservation, StarboardObservation, WorkflowObservation, WorkflowPolicy,
     anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
     evaluate_audit, evaluate_birthday, evaluate_custom_command, evaluate_embed, evaluate_event,
-    evaluate_giveaway, evaluate_join_gate, evaluate_leaderboard, evaluate_moderation,
-    evaluate_poll, evaluate_reminder, evaluate_role_panel, evaluate_scam_with_roles,
-    evaluate_starboard, evaluate_suggestion, evaluate_temp_channel, evaluate_tickets,
-    evaluate_welcome_channel, evaluate_workflow, feature_is_configurable, feature_maturity,
-    leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit, render_member_message,
-    scam_policy_from_json, starboard_policy_from_json,
+    evaluate_giveaway, evaluate_join_gate, evaluate_leaderboard, evaluate_levels,
+    evaluate_moderation, evaluate_poll, evaluate_reminder, evaluate_role_panel,
+    evaluate_scam_with_roles, evaluate_starboard, evaluate_suggestion, evaluate_temp_channel,
+    evaluate_tickets, evaluate_welcome_channel, evaluate_workflow, feature_is_configurable,
+    feature_maturity, leaderboard_policy_from_json, parse_utc_offset_minutes, quota_limit,
+    render_member_message, scam_policy_from_json, starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -1837,38 +1837,36 @@ impl EventHandler for Handler {
                     self.store
                         .finish_voice_session(&guild_text, &user_text, now)
             {
-                let per_minute = setting_i64(
-                    &self.store,
-                    &guild_text,
-                    "community.levels.voice_xp_per_minute",
-                    2,
-                )
-                .clamp(0, 30);
-                let xp = minutes.min(24 * 60).saturating_mul(per_minute);
-                if xp > 0
-                    && !previous_session.as_ref().is_some_and(|session| {
-                        ignored_channels
-                            .split(',')
-                            .map(str::trim)
-                            .any(|ignored| ignored == session.channel_id)
+                let before = self.store.level_for(&guild_text, &user_text).unwrap_or(0);
+                let event_key = previous_session
+                    .as_ref()
+                    .map(|session| {
+                        format!(
+                            "voice:{}:{}:{}",
+                            session.user_id, session.channel_id, session.started_at
+                        )
                     })
-                {
-                    let before = self.store.level_for(&guild_text, &user_text).unwrap_or(0);
-                    let event_key = previous_session
-                        .as_ref()
-                        .map(|session| {
-                            format!(
-                                "voice:{}:{}:{}",
-                                session.user_id, session.channel_id, session.started_at
-                            )
-                        })
-                        .unwrap_or_else(|| format!("voice:{}:{}", user_text, now));
+                    .unwrap_or_else(|| format!("voice:{}:{}", user_text, now));
+                let voice_channel = previous_session
+                    .as_ref()
+                    .map(|session| session.channel_id.as_str())
+                    .unwrap_or_default();
+                let decision = evaluate_levels(
+                    &levels_config_for_store(&self.store, &guild_text),
+                    "voice",
+                    voice_channel,
+                    &event_key,
+                    true,
+                    minutes.max(0) as u64,
+                    before,
+                );
+                if decision.allowed {
                     match self.store.add_xp_event(
                         &guild_text,
                         &user_text,
                         &event_key,
                         "voice",
-                        xp,
+                        decision.amount,
                         now.saturating_mul(1_000),
                     ) {
                         Ok(Some(after)) => {
@@ -1882,7 +1880,7 @@ impl EventHandler for Handler {
                                 info!(
                                     %guild_id,
                                     user = %new.user_id,
-                                    xp,
+                                    xp = decision.amount,
                                     before,
                                     after,
                                     "voice XP awarded with level-up"
@@ -3310,37 +3308,39 @@ impl EventHandler for Handler {
                     ready
                 };
                 if should_award {
-                    let minimum =
-                        setting_i64(&self.store, &guild_text, "community.levels.xp_min", 15)
-                            .clamp(1, 1_000);
-                    let maximum =
-                        setting_i64(&self.store, &guild_text, "community.levels.xp_max", 30)
-                            .clamp(minimum, 2_000);
-                    let span = (maximum - minimum + 1) as u64;
-                    let stable = message.id.to_string().bytes().fold(0_u64, |total, byte| {
-                        total.wrapping_mul(33).wrapping_add(byte as u64)
-                    });
-                    let amount = minimum + (stable % span) as i64;
                     let before = self.store.level_for(&guild_text, &user_text).unwrap_or(0);
                     let event_key = format!("message:{}", message.id);
-                    let award = match self.store.add_xp_event(
-                        &guild_text,
-                        &user_text,
-                        &event_key,
+                    let decision = evaluate_levels(
+                        &levels_config_for_store(&self.store, &guild_text),
                         "message",
-                        amount,
-                        Utc::now().timestamp_millis(),
-                    ) {
-                        Ok(Some(after)) => Some(after),
-                        Ok(None) => {
-                            // The event was already applied by an earlier
-                            // delivery; its announcements were already sent.
-                            None
+                        &message.channel_id.to_string(),
+                        &event_key,
+                        true,
+                        0,
+                        before,
+                    );
+                    let award = if decision.allowed {
+                        match self.store.add_xp_event(
+                            &guild_text,
+                            &user_text,
+                            &event_key,
+                            "message",
+                            decision.amount,
+                            Utc::now().timestamp_millis(),
+                        ) {
+                            Ok(Some(after)) => Some(after),
+                            Ok(None) => {
+                                // The event was already applied by an earlier
+                                // delivery; its announcements were already sent.
+                                None
+                            }
+                            Err(error) => {
+                                warn!(%guild_id, user = %message.author.id, %error, "failed to award message XP");
+                                None
+                            }
                         }
-                        Err(error) => {
-                            warn!(%guild_id, user = %message.author.id, %error, "failed to award message XP");
-                            None
-                        }
+                    } else {
+                        None
                     };
                     if let Some(after) = award {
                         self.announce_achievement_unlocks(
@@ -11335,6 +11335,37 @@ fn setting_bool(store: &Store, guild_id: &str, key: &str, default: bool) -> bool
     setting_string(store, guild_id, key)
         .and_then(|value| value.parse::<bool>().ok())
         .unwrap_or(default)
+}
+
+fn levels_config_for_store(store: &Store, guild_id: &str) -> serde_json::Value {
+    let ignored_channels = setting_string(store, guild_id, "community.levels.ignored_channels")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .take(100)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let level_roles = setting_string(store, guild_id, "community.levels.level_roles")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .take(50)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "xpMin": setting_i64(store, guild_id, "community.levels.xp_min", 15),
+        "xpMax": setting_i64(store, guild_id, "community.levels.xp_max", 30),
+        "cooldownSeconds": setting_u64(store, guild_id, "community.levels.cooldown_seconds", 60),
+        "voiceXpEnabled": setting_bool(store, guild_id, "community.levels.voice_xp_enabled", false),
+        "voiceXpPerMinute": setting_i64(store, guild_id, "community.levels.voice_xp_per_minute", 2),
+        "ignoredChannels": ignored_channels,
+        "levelRoles": level_roles,
+        "stackRoles": setting_bool(store, guild_id, "community.levels.stack_roles", true),
+        "announceChannel": setting_string(store, guild_id, "community.levels.announce_channel").unwrap_or_default(),
+        "announceTemplate": setting_string(store, guild_id, "community.levels.announce_template").unwrap_or_else(|| "{member} reached level {level}!".into()),
+    })
 }
 
 fn moderation_policy_for_store(store: &Store, guild_id: &str) -> ModerationPolicy {

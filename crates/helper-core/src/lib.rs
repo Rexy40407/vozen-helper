@@ -727,6 +727,147 @@ pub fn evaluate_leaderboard(
     }
 }
 
+/// Bounded observation used by the XP runtime and dashboard preview.  The
+/// evaluator deliberately contains no store or Discord calls so a preview of
+/// an XP award cannot drift from what the gateway actually awards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LevelsDecision {
+    pub allowed: bool,
+    pub source: String,
+    pub amount: i64,
+    pub before_xp: i64,
+    pub after_xp: i64,
+    pub before_level: i64,
+    pub after_level: i64,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+/// Evaluate one message or voice XP event using the canonical levels config.
+/// Message amounts are deterministic per event id; voice amounts are bounded
+/// to one day so malformed fixtures or gateway input cannot inflate XP.
+pub fn evaluate_levels(
+    config: &serde_json::Value,
+    source: &str,
+    channel_id: &str,
+    event_id: &str,
+    cooldown_ready: bool,
+    duration_minutes: u64,
+    before_xp: i64,
+) -> LevelsDecision {
+    let object = config.as_object();
+    let source = source.trim().to_ascii_lowercase();
+    let before_xp = before_xp.max(0);
+    let before_level = before_xp / 100 + 1;
+    let ignored = object
+        .and_then(|values| values.get("ignoredChannels"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|channels| {
+            channels.iter().any(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|candidate| candidate.trim() == channel_id.trim())
+            })
+        });
+    let reject = |reason_code: &'static str, explanation: String| LevelsDecision {
+        allowed: false,
+        source: source.clone(),
+        amount: 0,
+        before_xp,
+        after_xp: before_xp,
+        before_level,
+        after_level: before_level,
+        reason_code,
+        explanation,
+    };
+    if ignored {
+        return reject(
+            "channel_ignored",
+            format!(
+                "Channel `{}` is excluded from XP awards.",
+                channel_id.trim()
+            ),
+        );
+    }
+    let amount = match source.as_str() {
+        "message" => {
+            if !cooldown_ready {
+                return reject(
+                    "cooldown_active",
+                    "This member is still within the configured XP cooldown.".into(),
+                );
+            }
+            let minimum = object
+                .and_then(|values| values.get("xpMin"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(15)
+                .clamp(1, 1_000);
+            let maximum = object
+                .and_then(|values| values.get("xpMax"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(30)
+                .clamp(minimum, 2_000);
+            let span = (maximum - minimum + 1) as u64;
+            let stable = event_id.bytes().fold(0_u64, |total, byte| {
+                total.wrapping_mul(33).wrapping_add(byte as u64)
+            });
+            minimum + (stable % span) as i64
+        }
+        "voice" => {
+            if !object
+                .and_then(|values| values.get("voiceXpEnabled"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                return reject(
+                    "voice_xp_disabled",
+                    "Voice XP is disabled for this server.".into(),
+                );
+            }
+            let per_minute = object
+                .and_then(|values| values.get("voiceXpPerMinute"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(2)
+                .clamp(0, 30);
+            duration_minutes.min(24 * 60) as i64 * per_minute
+        }
+        _ => {
+            return reject(
+                "unsupported_source",
+                "Only message and voice XP are supported.".into(),
+            );
+        }
+    };
+    if amount <= 0 {
+        return reject(
+            "no_xp_awarded",
+            "This event does not produce any XP with the current settings.".into(),
+        );
+    }
+    let after_xp = before_xp.saturating_add(amount);
+    let after_level = after_xp / 100 + 1;
+    LevelsDecision {
+        allowed: true,
+        source: source.clone(),
+        amount,
+        before_xp,
+        after_xp,
+        before_level,
+        after_level,
+        reason_code: "xp_awarded",
+        explanation: format!(
+            "Award {amount} XP from this {} event (level {} → {}).",
+            if source == "voice" {
+                "voice"
+            } else {
+                "message"
+            },
+            before_level,
+            after_level
+        ),
+    }
+}
+
 /// Parse the bounded `leaderboardEntries` fixture accepted by the simulation
 /// endpoint. Invalid rows are ignored just like rows without a Discord user
 /// in the runtime store.
@@ -7677,6 +7818,47 @@ impl FeatureAdapter for LevelsAdapter {
         }
         pairs
     }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let source = fixture_string(fixture, "source", "source", "message");
+        let channel_id = fixture_string(fixture, "channelId", "channel_id", "preview-channel");
+        let event_id = fixture_string(fixture, "eventId", "event_id", "preview-event");
+        let cooldown_ready = fixture_bool(fixture, "cooldownReady", "cooldown_ready", true);
+        let duration_minutes = fixture_u64(fixture, "durationMinutes", "duration_minutes", 5);
+        let before_xp = fixture
+            .get("currentXp")
+            .or_else(|| fixture.get("current_xp"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        let decision = evaluate_levels(
+            config,
+            source,
+            channel_id,
+            event_id,
+            cooldown_ready,
+            duration_minutes,
+            before_xp,
+        );
+        let mut effects = if decision.allowed {
+            let level_note = if decision.after_level > decision.before_level {
+                format!(" Level up to {}.", decision.after_level)
+            } else {
+                String::new()
+            };
+            vec![format!("{}{}", decision.explanation, level_note)]
+        } else {
+            vec![format!(
+                "XP award rejected ({}): {}",
+                decision.reason_code, decision.explanation
+            )]
+        };
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -11672,6 +11854,41 @@ mod tests {
                 .runtime_projection(&serde_json::json!({"ignoredRoles": ["456"]}))
                 .contains(&("community.starboard.ignored_roles".into(), "456".into()))
         );
+    }
+
+    #[test]
+    fn levels_simulation_and_runtime_evaluator_share_cooldown_voice_and_exclusions() {
+        let config = serde_json::json!({
+            "xpMin": 10,
+            "xpMax": 10,
+            "voiceXpEnabled": true,
+            "voiceXpPerMinute": 3,
+            "ignoredChannels": ["999"]
+        });
+        let message = evaluate_levels(&config, "message", "123", "message-1", true, 0, 95);
+        assert!(message.allowed);
+        assert_eq!(message.amount, 10);
+        assert_eq!(message.before_level, 1);
+        assert_eq!(message.after_level, 2);
+        let cooldown = evaluate_levels(&config, "message", "123", "message-2", false, 0, 0);
+        assert_eq!(cooldown.reason_code, "cooldown_active");
+        let ignored = evaluate_levels(&config, "message", "999", "message-3", true, 0, 0);
+        assert_eq!(ignored.reason_code, "channel_ignored");
+        let voice = evaluate_levels(&config, "voice", "123", "voice-1", true, 20, 0);
+        assert!(voice.allowed);
+        assert_eq!(voice.amount, 60);
+        let preview = feature_adapter("community.levels")
+            .expect("levels adapter")
+            .simulate(
+                &config,
+                &serde_json::json!({
+                    "source": "voice",
+                    "channelId": "123",
+                    "durationMinutes": 20,
+                    "currentXp": 0
+                }),
+            );
+        assert!(preview[0].contains("Award 60 XP"));
     }
 
     #[test]
