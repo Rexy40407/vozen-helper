@@ -8702,6 +8702,8 @@ struct FeatureTestRequest {
     event_now_unix: Option<i64>,
     #[serde(default, rename = "eventCapacity")]
     event_capacity: Option<i64>,
+    #[serde(default, rename = "destructiveActions")]
+    destructive_actions: Option<u64>,
 }
 
 fn generic_feature_effect(key: &str) -> Vec<String> {
@@ -8894,6 +8896,7 @@ async fn test_feature(
         "endUnix": test.event_end_unix,
         "nowUnix": test.event_now_unix,
         "capacity": test.event_capacity,
+        "destructiveActions": test.destructive_actions,
     });
     let adapter_effects = if maturity == FeatureMaturity::Blocked {
         // A blocked provider must never claim that a JSON draft would be

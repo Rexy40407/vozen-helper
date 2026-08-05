@@ -8,11 +8,11 @@ use helper_core::{
     LeaderboardEntry, ModerationObservation, ModerationPolicy, ReminderObservation, ReminderPolicy,
     RolePanelObservation, StarboardObservation, WorkflowObservation, WorkflowPolicy,
     anti_spam_policy_from_json, evaluate_achievements, evaluate_anti_raid, evaluate_anti_spam,
-    evaluate_birthday, evaluate_custom_command, evaluate_embed, evaluate_event, evaluate_giveaway,
-    evaluate_join_gate, evaluate_leaderboard, evaluate_moderation, evaluate_poll,
-    evaluate_reminder, evaluate_role_panel, evaluate_scam_with_roles, evaluate_starboard,
-    evaluate_suggestion, evaluate_temp_channel, evaluate_welcome_channel, evaluate_workflow,
-    feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
+    evaluate_audit, evaluate_birthday, evaluate_custom_command, evaluate_embed, evaluate_event,
+    evaluate_giveaway, evaluate_join_gate, evaluate_leaderboard, evaluate_moderation,
+    evaluate_poll, evaluate_reminder, evaluate_role_panel, evaluate_scam_with_roles,
+    evaluate_starboard, evaluate_suggestion, evaluate_temp_channel, evaluate_welcome_channel,
+    evaluate_workflow, feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
     parse_utc_offset_minutes, quota_limit, render_member_message, scam_policy_from_json,
     starboard_policy_from_json,
 };
@@ -2727,9 +2727,35 @@ impl EventHandler for Handler {
         if !armed {
             return;
         }
-        let configured_log_channel =
-            setting_u64_optional(&self.store, &guild_text, "management.audit.log_channel")
-                .map(ChannelId::new);
+        let audit_config = serde_json::json!({
+            "threshold": threshold as i64,
+            "windowSeconds": window_seconds as i64,
+            "shadowMode": shadow_mode_enabled(
+                self.store
+                    .get_setting(&guild_text, "security.shadow_mode")
+                    .ok()
+                    .flatten()
+                    .as_deref(),
+            ),
+            "logChannel": setting_string(
+                &self.store,
+                &guild_text,
+                "management.audit.log_channel",
+            )
+            .unwrap_or_default(),
+            "includeContent": setting_bool(
+                &self.store,
+                &guild_text,
+                "management.audit.include_content",
+                false,
+            ),
+        });
+        let audit_decision = evaluate_audit(&audit_config, threshold as i64);
+        let configured_log_channel = audit_decision
+            .log_channel_id
+            .as_deref()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(ChannelId::new);
         let fallback_log_channel = if configured_log_channel.is_none() {
             guild_id
                 .to_partial_guild(&ctx.http)
@@ -2740,13 +2766,7 @@ impl EventHandler for Handler {
             None
         };
         let audit_alert_channel = configured_log_channel.or(fallback_log_channel);
-        let shadow_mode = shadow_mode_enabled(
-            self.store
-                .get_setting(&guild_text, "security.shadow_mode")
-                .ok()
-                .flatten()
-                .as_deref(),
-        );
+        let shadow_mode = audit_decision.shadow_mode;
         if shadow_mode {
             let _ = self.store.record_case(
                 &guild_text,

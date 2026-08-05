@@ -3287,6 +3287,101 @@ impl FeatureAdapter for CustomCommandsAdapter {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditDecision {
+    pub should_contain: bool,
+    pub shadow_mode: bool,
+    pub threshold: i64,
+    pub window_seconds: i64,
+    pub log_channel_id: Option<String>,
+    pub include_content: bool,
+    pub reason_code: &'static str,
+    pub explanation: String,
+}
+
+/// Resolve the destructive-action guard from the same bounded policy exposed
+/// by the dashboard. `destructive_actions` is the number observed in the
+/// current window; the Discord gateway supplies the real count after its
+/// in-memory burst latch fires.
+pub fn evaluate_audit(config: &serde_json::Value, destructive_actions: i64) -> AuditDecision {
+    let object = config.as_object();
+    let threshold = object
+        .and_then(|values| values.get("threshold"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(3)
+        .clamp(2, 25);
+    let window_seconds = object
+        .and_then(|values| values.get("windowSeconds"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(10)
+        .clamp(3, 60);
+    let shadow_mode = object
+        .and_then(|values| values.get("shadowMode"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let include_content = object
+        .and_then(|values| values.get("includeContent"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let log_channel_id = object
+        .and_then(|values| values.get("logChannel"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::trim)
+        .map(str::to_owned);
+    if log_channel_id
+        .as_deref()
+        .is_some_and(|value| value.parse::<u64>().is_err())
+    {
+        return AuditDecision {
+            should_contain: false,
+            shadow_mode,
+            threshold,
+            window_seconds,
+            log_channel_id: None,
+            include_content,
+            reason_code: "invalid_log_channel",
+            explanation: "Choose a valid Discord audit log channel.".into(),
+        };
+    }
+    if destructive_actions < threshold {
+        return AuditDecision {
+            should_contain: false,
+            shadow_mode,
+            threshold,
+            window_seconds,
+            log_channel_id,
+            include_content,
+            reason_code: "below_threshold",
+            explanation: format!(
+                "The current window has {destructive_actions}/{threshold} destructive actions."
+            ),
+        };
+    }
+    AuditDecision {
+        should_contain: !shadow_mode,
+        shadow_mode,
+        threshold,
+        window_seconds,
+        log_channel_id,
+        include_content,
+        reason_code: if shadow_mode {
+            "shadow_alert"
+        } else {
+            "containment_required"
+        },
+        explanation: if shadow_mode {
+            format!(
+                "The threshold was reached in {window_seconds}s; record and alert without containment."
+            )
+        } else {
+            format!(
+                "The threshold was reached in {window_seconds}s; enable the join gate for review."
+            )
+        },
+    }
+}
+
 /// The audit feature controls the existing destructive-action guard and its
 /// shadow mode.  Keeping these projections here makes the panel toggle and
 /// the `/anti-nuke` command operate on the same persisted settings.
@@ -3428,6 +3523,46 @@ impl FeatureAdapter for AuditAdapter {
             projection.push(("management.audit.include_content".into(), value.to_string()));
         }
         projection
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let actions = fixture_u64(fixture, "destructiveActions", "destructive_actions", 3) as i64;
+        let decision = evaluate_audit(config, actions);
+        let mut effects = if decision.reason_code == "invalid_log_channel" {
+            vec![format!(
+                "Audit simulation rejected ({}): {}",
+                decision.reason_code, decision.explanation
+            )]
+        } else if decision.should_contain {
+            vec![format!(
+                "Contain the executor after {} destructive actions in {}s by enabling the join gate and recording an audit case.",
+                decision.threshold, decision.window_seconds
+            )]
+        } else if decision.shadow_mode && actions >= decision.threshold {
+            vec![format!(
+                "Alert only after {} destructive actions in {}s; no containment is applied in shadow mode.",
+                decision.threshold, decision.window_seconds
+            )]
+        } else {
+            vec![decision.explanation]
+        };
+        effects.push(format!(
+            "Audit content persistence is {}.",
+            if decision.include_content {
+                "enabled for cached content"
+            } else {
+                "metadata-only"
+            }
+        ));
+        if let Some(channel_id) = decision.log_channel_id {
+            effects.push(format!("Audit alerts route to <#{channel_id}>."));
+        }
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
@@ -10920,6 +11055,32 @@ mod tests {
                 .iter()
                 .any(|issue| issue.path == "logChannel")
         );
+        let shadow_preview = audit.simulate(
+            &serde_json::json!({
+                "threshold": 3,
+                "windowSeconds": 10,
+                "shadowMode": true,
+                "logChannel": "789",
+                "includeContent": false
+            }),
+            &serde_json::json!({"destructiveActions": 3}),
+        );
+        assert!(shadow_preview[0].contains("Alert only"));
+        assert!(
+            shadow_preview
+                .iter()
+                .any(|effect| effect.contains("<#789>"))
+        );
+        assert!(
+            shadow_preview
+                .iter()
+                .any(|effect| effect.contains("metadata-only"))
+        );
+        let invalid_preview = audit.simulate(
+            &serde_json::json!({"logChannel": "not-a-channel"}),
+            &serde_json::json!({"destructiveActions": 3}),
+        );
+        assert!(invalid_preview[0].contains("invalid_log_channel"));
 
         let templates = feature_adapter("management.templates").expect("templates adapter");
         assert!(templates.validate(&serde_json::json!({})).is_empty());
