@@ -2693,7 +2693,7 @@ impl EventHandler for Handler {
         )
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "⭐".to_string());
-        if emoji != &configured_emoji && emoji != "🌟" {
+        if emoji != &configured_emoji && !(configured_emoji == "⭐" && emoji == "🌟") {
             return;
         }
         let ignored_channels = setting_string(
@@ -2789,7 +2789,8 @@ impl EventHandler for Handler {
             }
             return;
         }
-        let content = starboard_message_content(&policy, count, &original, &link);
+        let content =
+            starboard_message_content(&policy, &configured_emoji, count, &original, &link);
         if let Ok(Some(entry)) = self
             .store
             .star_entry(&guild_id.to_string(), &reaction.message_id.to_string())
@@ -5269,7 +5270,7 @@ impl Handler {
             .reaction_users(
                 &ctx.http,
                 message_id,
-                serenity::all::ReactionType::Unicode(configured_emoji),
+                serenity::all::ReactionType::Unicode(configured_emoji.clone()),
                 Some(100),
                 None,
             )
@@ -5316,7 +5317,8 @@ impl Handler {
             "https://discord.com/channels/{}/{}/{}",
             guild_id, channel_id, message_id
         );
-        let content = starboard_message_content(&policy, count, &original, &link);
+        let content =
+            starboard_message_content(&policy, &configured_emoji, count, &original, &link);
         if let Ok(starboard_message_id) = entry.starboard_message_id.parse::<u64>() {
             let _ = board
                 .edit_message(
@@ -10599,13 +10601,14 @@ fn starboard_policy_for_store(store: &Store, guild_id: &str) -> helper_core::Sta
 
 fn starboard_message_content(
     policy: &helper_core::StarboardPolicy,
+    emoji: &str,
     count: i64,
     original: &serenity::all::Message,
     link: &str,
 ) -> String {
     let mut content = format!(
-        "⭐ **{} stars** on <@{}>\n{}\n{}",
-        count, original.author.id, original.content, link
+        "{emoji} **{count} stars** on <@{}>\n{}\n{}",
+        original.author.id, original.content, link
     );
     if policy.include_images {
         let attachment_links = original
