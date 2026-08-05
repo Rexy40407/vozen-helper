@@ -2097,7 +2097,7 @@ impl FeatureAdapter for AuditAdapter {
                 }]
             }),
             defaults: serde_json::json!({"threshold": 3, "windowSeconds": 10, "shadowMode": false, "logChannel": "", "includeContent": false}),
-            dependencies: vec!["guild_moderation".into(), "view_audit_log".into()],
+            dependencies: vec!["view_audit_log".into()],
         }
     }
 
@@ -3955,7 +3955,11 @@ impl FeatureAdapter for WelcomeAdapter {
                 }]
             }),
             defaults: serde_json::json!({"channel":"","message":"Welcome {member} to {server}!","delaySeconds":0,"sendDm":false,"dmMessage":"Hello {member}, welcome to {server}!","autoRole":"","farewellChannel":"","farewellMessage":"Goodbye {member}. We hope to see you again!","templateId":""}),
-            dependencies: vec!["guild_members_intent".into(), "send_messages".into()],
+            dependencies: vec![
+                "guild_members_intent".into(),
+                "send_messages".into(),
+                "manage_roles".into(),
+            ],
         }
     }
 
@@ -5083,7 +5087,11 @@ impl FeatureAdapter for StatsAdapter {
                 }]
             }),
             defaults: serde_json::json!({"windowDays": 7, "public": false, "channelId": "", "intervalMinutes": 15, "nameTemplate": "messages-{messages}"}),
-            dependencies: vec!["message_events".into(), "scheduler".into()],
+            dependencies: vec![
+                "message_events".into(),
+                "scheduler".into(),
+                "manage_channels".into(),
+            ],
         }
     }
 
@@ -9368,6 +9376,27 @@ mod tests {
             feature_maturity("management.nickname"),
             FeatureMaturity::Operational
         );
+    }
+
+    #[test]
+    fn adapters_declare_permissions_required_by_their_discord_mutations() {
+        let expectations = [
+            ("management.audit", "view_audit_log"),
+            ("support.welcome", "manage_roles"),
+            ("insights.stats", "manage_channels"),
+        ];
+        for (key, dependency) in expectations {
+            let descriptor = feature_adapter(key)
+                .expect("adapter registered")
+                .descriptor();
+            assert!(
+                descriptor
+                    .dependencies
+                    .iter()
+                    .any(|value| value == dependency),
+                "{key} must declare {dependency}"
+            );
+        }
     }
 
     #[test]

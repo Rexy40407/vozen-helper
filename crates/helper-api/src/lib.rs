@@ -5111,6 +5111,10 @@ fn dependency_permission(dependency: &str) -> Option<(u8, &'static str)> {
     })
 }
 
+fn dependency_requires_role_management(dependency: &str) -> bool {
+    dependency_permission(dependency).is_some_and(|(_, label)| label == "Manage Roles")
+}
+
 fn collect_configured_resources(
     value: &serde_json::Value,
     path: &str,
@@ -5363,7 +5367,7 @@ async fn generic_feature_preflight(
         value
             .dependencies
             .iter()
-            .any(|dependency| dependency == "manage_roles")
+            .any(|dependency| dependency_requires_role_management(dependency))
     });
     if request.enabled && needs_role_management && snapshot.roles_ready && bot_context_available {
         let bot_top_position = snapshot
@@ -11442,6 +11446,9 @@ mod tests {
             assert_eq!(dependency_permission(key), Some((bit, label)));
             assert_eq!(dependency_permission(label), Some((bit, label)));
         }
+        assert!(dependency_requires_role_management("manage_roles"));
+        assert!(dependency_requires_role_management("Manage Roles"));
+        assert!(!dependency_requires_role_management("Manage Messages"));
     }
 
     #[tokio::test]
