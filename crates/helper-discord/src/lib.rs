@@ -5773,7 +5773,7 @@ impl Handler {
             return respond(ctx, command, "Embed published.").await;
         }
         let content = match command.data.name.as_str() {
-            "ping" => "Pong — Vozen Helper está online.".to_string(),
+            "ping" => "Pong — Vozen Helper is online.".to_string(),
             "help" => {
                 let guild_text = command.guild_id.map(|guild_id| guild_id.to_string());
                 if let Some(guild_id) = guild_text.as_deref()
@@ -5824,7 +5824,7 @@ impl Handler {
                 if selected.is_empty() {
                     "Setup guiado: escolhe pelo menos um módulo (Security, Support, Events, Community, Automate ou Insights) e executa novamente. Depois confirma as permissões com `/permissions`.".to_string()
                 } else {
-                    format!("Setup guardado para: **{}**. Próximo passo: `/permissions` e depois configura cada módulo.", selected.join(", "))
+                    format!("Setup saved for: **{}**. Next step: `/permissions` and then configure each module.", selected.join(", "))
                 }
             }
             "modules" => {
@@ -5866,9 +5866,9 @@ impl Handler {
                     })
                     .copied()
                     .collect::<Vec<_>>();
-                format!("Setup: **{}** · Módulos: **{}** · Isolamento por guild ativo · Privacy export/delete disponível", if setup { "concluído" } else { "pendente" }, if configured.is_empty() { "nenhum".to_string() } else { configured.join(", ") })
+                format!("Setup: **{}** · Modules: **{}** · Guild isolation enabled · Privacy export/delete available", if setup { "complete" } else { "pending" }, if configured.is_empty() { "none".to_string() } else { configured.join(", ") })
             }
-            "dashboard" => "Painel: https://helper.vozen.org (o endpoint permanece desligado até o rollout aprovado).".to_string(),
+            "dashboard" => "Dashboard: https://helper.vozen.org (the endpoint remains disabled until the approved rollout).".to_string(),
             "plan" => {
                 if let Some(client) = &self.entitlements {
                     match client.resolve(&command.user.id.to_string(), command.guild_id.map(|id| id.to_string()).as_deref()).await {
@@ -5979,7 +5979,7 @@ impl Handler {
                         }
                         let reason = if reason.trim().is_empty() { "No reason provided" } else { reason };
                         let case_id = self.store.record_case(&guild_id.to_string(), "warn", &target.to_string(), &command.user.id.to_string(), reason, None)?;
-                        format!("Aviso criado como caso #{case_id} para <@{}>.", target)
+                        format!("Warning created as case #{case_id} for <@{}>.", target)
                     } else { "Indica um membro.".to_string() }
                 } else { "Este comando só pode ser usado num servidor.".to_string() }
             }
@@ -6003,7 +6003,7 @@ impl Handler {
                     return respond(ctx, command, "Indica um utilizador.").await;
                 };
                 let user = ctx.http.get_user(user_id).await?;
-                format!("{} (<@{}>) · conta criada em {}.", user.name, user.id, user.id.created_at().unix_timestamp())
+                format!("{} (<@{}>) · account created at {}.", user.name, user.id, user.id.created_at().unix_timestamp())
             }
             "violation" | "note" => {
                 let Some(guild_id) = command.guild_id else {
@@ -6020,7 +6020,7 @@ impl Handler {
                     let details = option_string(command, "details").unwrap_or("Sem detalhes");
                     format!("{rule}: {details}")
                 } else {
-                    option_string(command, "content").unwrap_or("Sem conteúdo").to_string()
+                    option_string(command, "content").unwrap_or("No content").to_string()
                 };
                 if reason.len() > 500 {
                     return respond(ctx, command, "O conteúdo não pode exceder 500 caracteres.").await;
@@ -6057,7 +6057,7 @@ impl Handler {
                     .edit_member(&ctx.http, target, serenity::all::EditMember::new().enable_communication())
                     .await;
                 match result {
-                    Ok(_) => format!("Timeout removido para <@{}>.", target),
+                    Ok(_) => format!("Timeout removed for <@{}>.", target),
                     Err(error) => {
                         tracing::warn!(%error, "untimeout failed");
                         "Unable to remove the timeout; check permissions.".to_string()
@@ -6107,7 +6107,7 @@ impl Handler {
                 } else {
                     let ids: Vec<_> = messages.iter().map(|message| message.id).collect();
                     command.channel_id.delete_messages(&ctx.http, ids).await?;
-                    format!("{} mensagens apagadas.", messages.len())
+                    format!("{} messages deleted.", messages.len())
                 }
             }
             "tempban" | "softban" => {
@@ -6140,7 +6140,7 @@ impl Handler {
                 if command.data.name == "softban" {
                     let _ = guild_id.unban(&ctx.http, target).await;
                     let case_id = self.store.record_case(&guild_id.to_string(), "softban", &target.to_string(), &command.user.id.to_string(), reason, None)?;
-                    format!("Softban concluído como caso #{case_id} para <@{}>.", target)
+                    format!("Softban completed as case #{case_id} for <@{}>.", target)
                 } else {
                     let Some(delay) = parse_duration(option_string(command, "duration").unwrap_or_default()) else {
                         let _ = guild_id.unban(&ctx.http, target).await;
@@ -6148,7 +6148,7 @@ impl Handler {
                     };
                     let case_id = self.store.record_case(&guild_id.to_string(), "tempban", &target.to_string(), &command.user.id.to_string(), reason, Some(delay))?;
                     self.store.schedule_typed(&guild_id.to_string(), "unban", &target.to_string(), chrono::Utc::now().timestamp_millis() + delay, "")?;
-                    format!("Tempban concluído como caso #{case_id} para <@{}>; expira em {}.", target, format_duration(delay))
+                    format!("Tempban completed as case #{case_id} for <@{}>; expires in {}.", target, format_duration(delay))
                 }
             }
             "kick" | "ban" | "timeout" => {
@@ -6357,7 +6357,7 @@ impl Handler {
                     return respond(ctx, command, "This server has reached its custom command limit.").await;
                 }
                 self.store.upsert_tag(&guild_text, &name, content, &command.user.id.to_string())?;
-                format!("Tag `{name}` guardada.")
+                format!("Tag `{name}` saved.")
             }
             "tag-delete" => {
                 let Some(guild_id) = command.guild_id else {
@@ -7184,12 +7184,12 @@ impl Handler {
                     .components(vec![CreateActionRow::Buttons(vec![CreateButton::new(format!("giveaway:join:{id}")).label("Join").style(ButtonStyle::Primary)])])).await?;
                 self.store.set_giveaway_message(id, &message.id.to_string())?;
                 self.store.schedule_typed(&guild_id.to_string(), "giveaway_end", &command.user.id.to_string(), end_at, &serde_json::json!({"channel_id": command.channel_id.to_string(), "giveaway_id": id}).to_string())?;
-                format!("Giveaway #{id} criado.")
+                format!("Giveaway #{id} created.")
             }
             "giveaway-end" | "gend" => {
                 let id = option_i64(command, "id").unwrap_or(0);
                 if finish_giveaway(&ctx.http, &self.store, id).await? {
-                    format!("Giveaway #{id} terminado.")
+                    format!("Giveaway #{id} ended.")
                 } else {
                     "Giveaway not found or already ended.".to_string()
                 }
@@ -7249,7 +7249,7 @@ impl Handler {
                     .components(vec![CreateActionRow::Buttons(labels)])).await?;
                 self.store.set_poll_message(id, &message.id.to_string())?;
                 self.store.schedule_typed(&guild_id.to_string(), "poll_end", &command.user.id.to_string(), end_at, &serde_json::json!({"channel_id": command.channel_id.to_string(), "poll_id": id}).to_string())?;
-                format!("Poll #{id} criada.")
+                format!("Poll #{id} created.")
             }
             "quarantine" => {
                 let Some(guild_id) = command.guild_id else {
@@ -7269,7 +7269,7 @@ impl Handler {
                     let _ = member.remove_role(&ctx.http, *role).await;
                 }
                 let case_id = self.store.record_case(&guild_id.to_string(), "quarantine", &target.to_string(), &command.user.id.to_string(), reason, None)?;
-                format!("<@{}> colocado em quarantine como caso #{case_id}. Os cargos foram guardados para restauro.", target)
+                format!("<@{}> quarantined as case #{case_id}. Roles were saved for restoration.", target)
             }
             "unquarantine" => {
                 let Some(guild_id) = command.guild_id else {
@@ -7294,7 +7294,7 @@ impl Handler {
                     }
                 }
                 self.store.clear_quarantine(&guild_id.to_string(), &target.to_string())?;
-                format!("Quarantine removida de <@{}>; {} cargo(s) restaurado(s).", target, restored)
+                format!("Quarantine removed from <@{}>; {} role(s) restored.", target, restored)
             }
             "join-gate" => {
                 let Some(guild_id) = command.guild_id else {
@@ -7367,14 +7367,14 @@ impl Handler {
                 let reason = option_string(command, "reason").unwrap_or("Lockdown manual");
                 let count = apply_lockdown(&ctx.http, &self.store, guild_id, true).await?;
                 self.store.set_setting(&guild_id.to_string(), "security.lockdown.reason", reason)?;
-                format!("Lockdown aplicado em {count} canal(is) de texto. Motivo: {reason}.")
+                format!("Lockdown applied to {count} text channel(s). Reason: {reason}.")
             }
             "unlock" => {
                 let Some(guild_id) = command.guild_id else {
                     return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
                 };
                 let count = apply_lockdown(&ctx.http, &self.store, guild_id, false).await?;
-                format!("Lockdown removido de {count} canal(is); overwrites anteriores restaurados quando estavam guardados.")
+                format!("Lockdown removed from {count} channel(s); previous overwrites were restored when saved.")
             }
             "security-mode" => {
                 let Some(guild_id) = command.guild_id else {
@@ -7812,7 +7812,7 @@ impl Handler {
                     return respond(ctx, command, "O teu check-in já está registado.").await;
                 }
                 if self.store.check_in_event(&guild_id.to_string(), &event_id.to_string(), &user_id)? {
-                    format!("Check-in registado para **{}**.", event.name)
+                    format!("Check-in recorded for **{}**.", event.name)
                 } else {
                     "Não foi possível registar o check-in.".to_string()
                 }
@@ -8082,7 +8082,7 @@ impl Handler {
                     })
                     .to_string(),
                 )?;
-                format!("Painel de tickets criado em <#{}>.", command.channel_id)
+                format!("Ticket panel created in <#{}>.", command.channel_id)
             }
             "ticket-update" => {
                 let Some(_guild_id) = command.guild_id else {
@@ -8268,7 +8268,7 @@ impl Handler {
                     })
                     .to_string(),
                 )?;
-                "Painel de cargos criado.".to_string()
+                "Role panel created.".to_string()
             }
             _ => "Comando desconhecido.".to_string(),
         };
@@ -8622,7 +8622,7 @@ impl Handler {
                 return respond_component(ctx, component, "Já estás verificado.").await;
             }
             member.add_role(&ctx.http, role).await?;
-            return respond_component(ctx, component, "Verificacao concluida; cargo atribuido.")
+            return respond_component(ctx, component, "Verification complete; role assigned.")
                 .await;
         }
         if let Some(raw) = component.data.custom_id.strip_prefix("welcome:step:") {
@@ -8797,7 +8797,7 @@ impl Handler {
                 respond_component(
                     ctx,
                     component,
-                    &format!("Ticket criado: <#{}>.", channel.id),
+                    &format!("Ticket created: <#{}>.", channel.id),
                 )
                 .await
             }
