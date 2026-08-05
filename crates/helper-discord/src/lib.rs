@@ -3244,6 +3244,98 @@ impl EventHandler for Handler {
                 )
                 .await;
         }
+        if feature_enabled(&self.store, &guild_text, "management.custom_commands", None) {
+            let prefix = setting_string(
+                &self.store,
+                &guild_text,
+                "management.custom_commands.trigger_prefix",
+            )
+            .filter(|value| {
+                let value = value.trim();
+                !value.is_empty()
+                    && value.len() <= 3
+                    && value.chars().all(|character| {
+                        !character.is_whitespace()
+                            && !character.is_control()
+                            && !matches!(character, '@' | '#' | ':' | '`')
+                    })
+            })
+            .unwrap_or_else(|| "!".to_string());
+            let staff_only = setting_bool(
+                &self.store,
+                &guild_text,
+                "management.custom_commands.staff_only",
+                false,
+            );
+            let ignored = setting_string(
+                &self.store,
+                &guild_text,
+                "management.custom_commands.ignored_channels",
+            );
+            if !custom_command_channel_ignored(ignored, message.channel_id)
+                && (!staff_only
+                    || custom_command_is_staff(
+                        message
+                            .member
+                            .as_ref()
+                            .and_then(|member| member.permissions),
+                    ))
+                && let Some(parsed) = parse_custom_command(&message.content, &prefix)
+                && let Ok(Some(tag)) = self.store.get_tag(&guild_text, &parsed.name)
+            {
+                let max_length = setting_u64(
+                    &self.store,
+                    &guild_text,
+                    "management.custom_commands.max_response_length",
+                    1_000,
+                )
+                .clamp(1, 2_000) as usize;
+                // The gateway context intentionally does not retain a broad
+                // cache. Keep the variable deterministic without performing a
+                // second Discord request in the message hot path.
+                let server_name = format!("server {guild_text}");
+                let response = render_custom_command(
+                    &tag.content,
+                    message.author.id,
+                    message.channel_id,
+                    &server_name,
+                    &parsed.args,
+                    max_length,
+                );
+                if !response.trim().is_empty()
+                    && message
+                        .channel_id
+                        .send_message(
+                            &ctx.http,
+                            CreateMessage::new().content(response).allowed_mentions(
+                                CreateAllowedMentions::new()
+                                    .everyone(false)
+                                    .empty_users()
+                                    .empty_roles()
+                                    .replied_user(false),
+                            ),
+                        )
+                        .await
+                        .is_ok()
+                {
+                    let detail = serde_json::json!({
+                        "command": parsed.name,
+                        "messageId": message.id.to_string(),
+                        "channelId": message.channel_id.to_string(),
+                        "staffOnly": staff_only,
+                    })
+                    .to_string();
+                    let _ = self.store.record_activity(
+                        &guild_text,
+                        "custom_command",
+                        &user_text,
+                        Some(&message.author.name),
+                        Some(&message.channel_id.to_string()),
+                        &detail,
+                    );
+                }
+            }
+        }
         if feature_enabled(&self.store, &guild_text, "protection.antispam", None) {
             let policy = anti_spam_policy_for_store(&self.store, &guild_text);
             let window_seconds = policy.window_seconds;
@@ -9904,6 +9996,74 @@ fn truncate(value: &str, max_chars: usize) -> String {
     output
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedCustomCommand {
+    name: String,
+    args: String,
+}
+
+fn parse_custom_command(content: &str, prefix: &str) -> Option<ParsedCustomCommand> {
+    let prefix = prefix.trim();
+    if prefix.is_empty() || !content.starts_with(prefix) {
+        return None;
+    }
+    let remainder = content[prefix.len()..].trim_start();
+    let mut parts = remainder.splitn(2, char::is_whitespace);
+    let name = parts.next()?.trim().to_lowercase();
+    if name.is_empty()
+        || name.len() > 32
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return None;
+    }
+    Some(ParsedCustomCommand {
+        name,
+        args: parts
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .chars()
+            .take(512)
+            .collect(),
+    })
+}
+
+fn custom_command_channel_ignored(raw_channels: Option<String>, channel_id: ChannelId) -> bool {
+    raw_channels.is_some_and(|channels| {
+        channels
+            .split(',')
+            .map(str::trim)
+            .any(|candidate| candidate == channel_id.to_string())
+    })
+}
+
+fn custom_command_is_staff(permissions: Option<Permissions>) -> bool {
+    permissions.is_some_and(|permissions| {
+        permissions.contains(Permissions::ADMINISTRATOR)
+            || permissions.contains(Permissions::MANAGE_GUILD)
+    })
+}
+
+fn render_custom_command(
+    template: &str,
+    user_id: serenity::all::UserId,
+    channel_id: ChannelId,
+    server_name: &str,
+    args: &str,
+    max_chars: usize,
+) -> String {
+    let rendered = template
+        .replace("{user}", &format!("<@{}>", user_id))
+        .replace("{channel}", &format!("<#{}>", channel_id))
+        .replace("{server}", server_name)
+        .replace("{args}", args)
+        .replace("@everyone", "@\u{200b}everyone")
+        .replace("@here", "@\u{200b}here");
+    rendered.chars().take(max_chars.clamp(1, 2_000)).collect()
+}
+
 fn account_age_days(now_timestamp: i64, created_timestamp: i64) -> i64 {
     ((now_timestamp - created_timestamp) / 86_400).max(0)
 }
@@ -11080,11 +11240,12 @@ mod tests {
     use super::{
         OpenSeaCollectionInfo, account_age_days,
         adapter::{DiscordAdapter, Effect, FakeDiscordAdapter},
-        command_feature_key, english_bot_text, feature_enabled, feature_title,
-        format_nft_collection, is_destructive_audit_action, join_burst_armed, parse_duration,
+        command_feature_key, custom_command_channel_ignored, custom_command_is_staff,
+        english_bot_text, feature_enabled, feature_title, format_nft_collection,
+        is_destructive_audit_action, join_burst_armed, parse_custom_command, parse_duration,
         parse_reminder_delay, parse_scheduled_event_window, reminder_repeat_interval_ms,
-        scheduled_action_feature, shadow_mode_enabled, should_cleanup_temp_channel,
-        template_message,
+        render_custom_command, scheduled_action_feature, shadow_mode_enabled,
+        should_cleanup_temp_channel, template_message,
     };
     use chrono::TimeZone;
     use helper_store::Store;
@@ -11145,6 +11306,55 @@ mod tests {
         ] {
             assert_eq!(english_bot_text(source), expected);
         }
+    }
+
+    #[test]
+    fn custom_commands_parse_bounded_names_and_arguments() {
+        assert_eq!(
+            parse_custom_command("!rules please read this", "!"),
+            Some(super::ParsedCustomCommand {
+                name: "rules".into(),
+                args: "please read this".into(),
+            })
+        );
+        assert!(parse_custom_command("rules", "!").is_none());
+        assert!(parse_custom_command("!bad.name", "!").is_none());
+        assert!(parse_custom_command("!rules", "?").is_none());
+    }
+
+    #[test]
+    fn custom_commands_render_variables_and_neutralize_broadcast_mentions() {
+        let rendered = render_custom_command(
+            "Hello {user} in {channel} on {server}: {args} @everyone @here",
+            serenity::all::UserId::new(7),
+            serenity::all::ChannelId::new(8),
+            "Test server",
+            "welcome",
+            2000,
+        );
+        assert!(rendered.contains("<@7>"));
+        assert!(rendered.contains("<#8>"));
+        assert!(rendered.contains("Test server"));
+        assert!(rendered.contains("welcome"));
+        assert!(!rendered.contains("@everyone"));
+        assert!(!rendered.contains("@here"));
+        assert!(rendered.chars().count() <= 2000);
+    }
+
+    #[test]
+    fn custom_commands_respect_channel_and_staff_guards() {
+        assert!(custom_command_channel_ignored(
+            Some("7,8".into()),
+            serenity::all::ChannelId::new(8)
+        ));
+        assert!(!custom_command_channel_ignored(
+            Some("7".into()),
+            serenity::all::ChannelId::new(8)
+        ));
+        assert!(!custom_command_is_staff(None));
+        assert!(custom_command_is_staff(Some(
+            serenity::all::Permissions::MANAGE_GUILD
+        )));
     }
 
     #[test]

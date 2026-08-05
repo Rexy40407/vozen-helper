@@ -1798,7 +1798,7 @@ pub struct CustomCommandsAdapter;
 
 impl CustomCommandsAdapter {
     pub const KEY: &'static str = "management.custom_commands";
-    pub const SOURCE: &'static str = "custom_commands_adapter_v1";
+    pub const SOURCE: &'static str = "custom_commands_adapter_v2";
 }
 
 impl FeatureAdapter for CustomCommandsAdapter {
@@ -1811,15 +1811,18 @@ impl FeatureAdapter for CustomCommandsAdapter {
                 "version": FEATURE_SCHEMA_VERSION,
                 "source": Self::SOURCE,
                 "sections": [{
-                    "title": "Custom command limits",
+                    "title": "Custom command behaviour",
                     "description": "Saved responses are deliberately bounded and never execute code.",
                     "fields": [
+                        {"key":"triggerPrefix","label":"Command prefix","kind":"text","maxLength":3,"help":"The character(s) members type before a saved command, for example !rules."},
+                        {"key":"ignoredChannels","label":"Ignored channels","kind":"channels","advanced":true,"help":"Commands are not answered in these channels."},
+                        {"key":"staffOnly","label":"Staff-only commands","kind":"toggle","advanced":true,"help":"Only members with Manage Server or Administrator can invoke saved commands."},
                         {"key":"maxTags","label":"Maximum saved commands","kind":"number","min":1,"max":100,"help":"The maximum number of saved responses this server can keep."},
                         {"key":"maxResponseLength","label":"Maximum response length","kind":"number","min":1,"max":2000,"help":"Responses longer than this are rejected before they can be sent."}
                     ]
                 }]
             }),
-            defaults: serde_json::json!({"maxTags": 100, "maxResponseLength": 1000}),
+            defaults: serde_json::json!({"triggerPrefix":"!","ignoredChannels":[],"staffOnly":false,"maxTags": 100, "maxResponseLength": 1000}),
             dependencies: vec!["message_content".into(), "send_messages".into()],
         }
     }
@@ -1834,6 +1837,56 @@ impl FeatureAdapter for CustomCommandsAdapter {
             }];
         };
         let mut issues = Vec::new();
+        if let Some(value) = object.get("triggerPrefix") {
+            let valid = value.as_str().is_some_and(|prefix| {
+                let trimmed = prefix.trim();
+                !trimmed.is_empty()
+                    && trimmed.len() <= 3
+                    && trimmed.chars().all(|character| {
+                        !character.is_whitespace()
+                            && !character.is_control()
+                            && !matches!(character, '@' | '#' | ':' | '`')
+                    })
+            });
+            if !valid {
+                issues.push(ValidationIssue {
+                    path: "triggerPrefix".into(),
+                    code: "invalid_prefix".into(),
+                    message: "Command prefix must be 1-3 visible non-space characters and cannot use mention syntax.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if let Some(value) = object.get("ignoredChannels") {
+            let valid = value.as_array().is_some_and(|channels| {
+                channels.len() <= 50
+                    && channels.iter().all(|channel| {
+                        channel.as_str().is_some_and(|id| {
+                            !id.is_empty()
+                                && id.len() <= 20
+                                && id.chars().all(|c| c.is_ascii_digit())
+                        })
+                    })
+            });
+            if !valid {
+                issues.push(ValidationIssue {
+                    path: "ignoredChannels".into(),
+                    code: "invalid_channels".into(),
+                    message: "Ignored channels must contain at most 50 Discord channel IDs.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
+        if let Some(value) = object.get("staffOnly")
+            && !value.is_boolean()
+        {
+            issues.push(ValidationIssue {
+                path: "staffOnly".into(),
+                code: "boolean_required".into(),
+                message: "Staff-only commands must be a boolean.".into(),
+                severity: "error".into(),
+            });
+        }
         for (field, min, max, label) in [
             ("maxTags", 1_i64, 100_i64, "Maximum saved commands"),
             (
@@ -1871,6 +1924,37 @@ impl FeatureAdapter for CustomCommandsAdapter {
             return Vec::new();
         };
         let mut projection = Vec::new();
+        if let Some(value) = object
+            .get("triggerPrefix")
+            .and_then(serde_json::Value::as_str)
+        {
+            projection.push((
+                "management.custom_commands.trigger_prefix".into(),
+                value.trim().to_string(),
+            ));
+        }
+        if let Some(values) = object
+            .get("ignoredChannels")
+            .and_then(serde_json::Value::as_array)
+        {
+            let channels = values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>()
+                .join(",");
+            projection.push((
+                "management.custom_commands.ignored_channels".into(),
+                channels,
+            ));
+        }
+        if let Some(value) = object.get("staffOnly").and_then(serde_json::Value::as_bool) {
+            projection.push((
+                "management.custom_commands.staff_only".into(),
+                value.to_string(),
+            ));
+        }
         if let Some(value) = object.get("maxTags").and_then(serde_json::Value::as_i64) {
             projection.push((
                 "management.custom_commands.max_tags".into(),
@@ -8965,6 +9049,7 @@ mod tests {
     #[test]
     fn custom_commands_audit_and_templates_have_real_contracts() {
         let custom = feature_adapter("management.custom_commands").expect("custom command adapter");
+        assert_eq!(custom.descriptor().defaults["triggerPrefix"], "!");
         assert_eq!(custom.descriptor().defaults["maxTags"], 100);
         assert!(
             custom
@@ -8974,9 +9059,44 @@ mod tests {
         );
         assert!(
             custom
-                .runtime_projection(&serde_json::json!({"maxTags": 12, "maxResponseLength": 700}))
+                .validate(&serde_json::json!({"triggerPrefix": " @"}))
+                .iter()
+                .any(|issue| issue.path == "triggerPrefix")
+        );
+        assert!(
+            custom
+                .validate(&serde_json::json!({"ignoredChannels": ["not-a-channel"]}))
+                .iter()
+                .any(|issue| issue.path == "ignoredChannels")
+        );
+        assert!(
+            custom
+                .runtime_projection(&serde_json::json!({
+                    "triggerPrefix": "?",
+                    "ignoredChannels": ["123", "456"],
+                    "staffOnly": true,
+                    "maxTags": 12,
+                    "maxResponseLength": 700
+                }))
                 .contains(&("management.custom_commands.max_tags".into(), "12".into()))
         );
+        let projection = custom.runtime_projection(&serde_json::json!({
+            "triggerPrefix": "?",
+            "ignoredChannels": ["123", "456"],
+            "staffOnly": true
+        }));
+        assert!(projection.contains(&(
+            "management.custom_commands.trigger_prefix".into(),
+            "?".into()
+        )));
+        assert!(projection.contains(&(
+            "management.custom_commands.ignored_channels".into(),
+            "123,456".into()
+        )));
+        assert!(projection.contains(&(
+            "management.custom_commands.staff_only".into(),
+            "true".into()
+        )));
 
         let audit = feature_adapter("management.audit").expect("audit adapter");
         assert_eq!(audit.descriptor().defaults["threshold"], 3);

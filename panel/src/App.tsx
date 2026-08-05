@@ -806,8 +806,9 @@ const defaults: Record<string, FeatureConfig> = {
   'management.custom_commands': {
     triggerPrefix: '!',
     ignoredChannels: [],
-    commands: [],
     staffOnly: false,
+    maxTags: 100,
+    maxResponseLength: 1000,
   },
   'management.audit': {
     logChannel: '',
@@ -916,10 +917,12 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       fields: [
         { key: 'triggerPrefix', label: 'Prefixo do comando', kind: 'text', maxLength: 3 },
         {
-          key: 'commands',
-          label: 'Comandos guardados',
-          kind: 'tags',
-          help: 'Um nome por vírgula.',
+          key: 'maxTags',
+          label: 'Máximo de comandos guardados',
+          kind: 'number',
+          min: 1,
+          max: 100,
+          help: 'Limita quantas respostas este servidor pode guardar.',
           advanced: true,
         },
       ],
@@ -928,8 +931,16 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       title: 'Regras de utilização',
       description: 'Controla onde e por quem as respostas podem ser usadas.',
       fields: [
-        { key: 'ignoredChannels', label: 'Canais ignorados', kind: 'tags', advanced: true },
+        { key: 'ignoredChannels', label: 'Canais ignorados', kind: 'channels', advanced: true },
         { key: 'staffOnly', label: 'Apenas equipa', kind: 'toggle', advanced: true },
+        {
+          key: 'maxResponseLength',
+          label: 'Tamanho máximo da resposta',
+          kind: 'number',
+          min: 1,
+          max: 2000,
+          help: 'Impede respostas demasiado longas no Discord.',
+        },
       ],
     },
   ],
