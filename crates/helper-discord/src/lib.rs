@@ -30,11 +30,11 @@ use reqwest::Client as HttpClient;
 use serenity::{
     all::{
         ButtonStyle, ChannelId, ChannelType, Client, Command, CommandDataOptionValue,
-        CommandInteraction, Context, CreateActionRow, CreateAttachment, CreateButton,
-        CreateChannel, CreateCommand, CreateCommandOption, CreateEmbed, CreateInteractionResponse,
-        CreateInteractionResponseMessage, CreateMessage, EditChannel, EditMessage, EventHandler,
-        GatewayIntents, Interaction, MessageId, MessageUpdateEvent, PermissionOverwrite,
-        PermissionOverwriteType, Permissions, Ready, RoleId,
+        CommandInteraction, Context, CreateActionRow, CreateAllowedMentions, CreateAttachment,
+        CreateButton, CreateChannel, CreateCommand, CreateCommandOption, CreateEmbed,
+        CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, EditChannel,
+        EditMessage, EventHandler, GatewayIntents, Interaction, MessageId, MessageUpdateEvent,
+        PermissionOverwrite, PermissionOverwriteType, Permissions, Ready, RoleId,
     },
     async_trait,
 };
@@ -2800,7 +2800,9 @@ impl EventHandler for Handler {
                     .edit_message(
                         &ctx.http,
                         serenity::all::MessageId::new(message_id),
-                        serenity::all::EditMessage::new().content(content),
+                        serenity::all::EditMessage::new()
+                            .content(content)
+                            .allowed_mentions(starboard_allowed_mentions(original.author.id)),
                     )
                     .await;
                 let _ = self.store.upsert_star_entry(
@@ -2811,7 +2813,12 @@ impl EventHandler for Handler {
                 );
             }
         } else if let Ok(message) = serenity::all::ChannelId::new(board_id)
-            .say(&ctx.http, content)
+            .send_message(
+                &ctx.http,
+                serenity::all::CreateMessage::new()
+                    .content(content)
+                    .allowed_mentions(starboard_allowed_mentions(original.author.id)),
+            )
             .await
         {
             let _ = self.store.upsert_star_entry(
@@ -5324,7 +5331,9 @@ impl Handler {
                 .edit_message(
                     &ctx.http,
                     MessageId::new(starboard_message_id),
-                    serenity::all::EditMessage::new().content(content),
+                    serenity::all::EditMessage::new()
+                        .content(content)
+                        .allowed_mentions(starboard_allowed_mentions(original.author.id)),
                 )
                 .await;
             let _ = self.store.upsert_star_entry(
@@ -10624,6 +10633,15 @@ fn starboard_message_content(
         }
     }
     content
+}
+
+/// Starboard mirrors user-authored content, so never allow arbitrary mentions
+/// from that content to ping a whole server. The original author mention is
+/// retained explicitly because it is part of the board's attribution.
+fn starboard_allowed_mentions(author_id: serenity::all::UserId) -> CreateAllowedMentions {
+    CreateAllowedMentions::new()
+        .users([author_id])
+        .replied_user(false)
 }
 
 fn permission_passport_message() -> String {
