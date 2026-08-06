@@ -323,6 +323,11 @@ export function apiUrl(path: string): string {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(apiUrl(path), {
     ...init,
+    // Feature maturity and guild health are live state.  Never let the
+    // browser reuse a cached catalogue after a backend release or guild
+    // switch; otherwise a previously planned module can remain displayed as
+    // Planned until the cache expires.
+    cache: init?.cache ?? 'no-store',
     credentials: 'include',
     headers: {
       Accept: 'application/json',
