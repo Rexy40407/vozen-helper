@@ -8748,93 +8748,6 @@ struct FeatureTestRequest {
     search_query: Option<String>,
 }
 
-fn generic_feature_effect(key: &str) -> Vec<String> {
-    let effect = match key {
-        "community.leaderboard" => {
-            "Read the XP ledger and return a private or public leaderboard for the selected period."
-        }
-        "community.achievements" => {
-            "Evaluate XP, message and event milestones and grant eligible rewards."
-        }
-        "community.birthdays" => {
-            "Run the timezone-aware birthday job without exposing the member's birth year."
-        }
-        "management.nickname" => {
-            "Apply the configured Helper nickname after Discord hierarchy and permission checks."
-        }
-        "management.moderation" => {
-            "Route moderation commands through policy, hierarchy preflight and an audit record."
-        }
-        "management.audit" => {
-            "Record the selected Discord events as bounded metadata and enforce retention."
-        }
-        "management.privacy" => {
-            "Create a guild-scoped export or erasure receipt without deleting moderation evidence."
-        }
-        "management.templates" => {
-            "Render the selected bounded template with approved variables and Discord limits."
-        }
-        "management.custom_commands" => {
-            "Resolve a saved response with bounded variables; no user-provided code is executed."
-        }
-        "utility.help" => {
-            "Return the enabled modules and their dashboard instructions for this server."
-        }
-        "utility.reminders" => {
-            "Schedule an idempotent reminder with the configured timezone and recurrence policy."
-        }
-        "utility.emojis" => {
-            "Read the server emoji inventory and apply the configured filters and result limit."
-        }
-        "utility.embeds" => {
-            "Render the message/embed composer preview with mentions disabled by default."
-        }
-        "utility.search" => {
-            "Query only approved bounded providers and return a rate-limited result set."
-        }
-        "utility.temp_channels" => {
-            "Create a temporary voice room for the member and remove it after ownership ends."
-        }
-        "insights.stats" => {
-            "Update the configured statistics channel from guild activity using the selected window."
-        }
-        "community.economy" => {
-            "Write an idempotent economy ledger entry and derive the member balance from it."
-        }
-        "community.role_panels" => {
-            "Publish role panel components after checking role manageability and hierarchy."
-        }
-        "community.events" => {
-            "Create or update the scheduled event and persist registrations and reminders."
-        }
-        "community.suggestions" => {
-            "Create the suggestion record, apply the voting policy and keep its lifecycle auditable."
-        }
-        "community.giveaways" => {
-            "Create an idempotent giveaway job with bounded winners and requirements."
-        }
-        "management.polls" => {
-            "Publish the poll interaction and persist each vote with duplicate protection."
-        }
-        "support.tickets" => {
-            "Create a private ticket channel with staff roles, transcript and SLA settings."
-        }
-        "support.welcome" => {
-            "Send the welcome message/DM and apply the configured auto-role on member join."
-        }
-        "support.welcome_channel" => {
-            "Publish the guided welcome message with rules, first steps and bounded components."
-        }
-        "studio.rank_card" => {
-            "Render the XP card using only curated backgrounds and colour choices."
-        }
-        _ => {
-            "Apply the validated feature adapter to the Discord runtime and record an audit event."
-        }
-    };
-    vec![effect.into()]
-}
-
 async fn test_feature(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -8970,8 +8883,21 @@ async fn test_feature(
                     "This provider is blocked until its official dependencies are ready.".into()
                 }),
         ])
+    } else if let Some(adapter) = feature_adapter(&key) {
+        Some(adapter.simulate(&test.config, &adapter_fixture))
     } else {
-        feature_adapter(&key).map(|adapter| adapter.simulate(&test.config, &adapter_fixture))
+        // A known feature without an adapter is a server defect, not a valid
+        // simulation. Never fabricate an effect for a form with no runtime
+        // consumer.
+        issues.push(ValidationIssue {
+            path: "feature".into(),
+            code: "feature_not_operational".into(),
+            message: "This feature has no runtime adapter in the running Helper.".into(),
+            severity: "error".into(),
+        });
+        Some(vec![
+            "Simulation unavailable: this feature has no runtime adapter.".into(),
+        ])
     };
     let mut anti_spam_decision: Option<AntiSpamDecision> = None;
     let mut reminder_decision = None;
@@ -9026,9 +8952,12 @@ async fn test_feature(
                 .clone()
                 .unwrap_or_else(|| vec!["The reminder adapter could not produce a preview.".into()])
         }
-        _ => adapter_effects
-            .clone()
-            .unwrap_or_else(|| generic_feature_effect(&key)),
+        // Every non-blocked catalogue entry must reach its adapter. Keep the
+        // fallback as a hard failure description only for rolling upgrades;
+        // never describe a generic JSON save as a runtime effect.
+        _ => adapter_effects.clone().unwrap_or_else(|| {
+            vec!["Simulation unavailable: no runtime adapter is registered.".into()]
+        }),
     };
     let result = SimulationResult {
         key: key.clone(),

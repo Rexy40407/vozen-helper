@@ -3753,6 +3753,10 @@ function FeatureCatalogue({
         {features.map((feature) => {
           const maturity = feature.maturity ?? (feature.available ? 'operational' : 'planned');
           const configurable = feature.configurable ?? feature.available;
+          // A blocked feature may expose a contract so the user can inspect
+          // its requirements, but it must never look publishable until its
+          // external dependency/approval is ready.
+          const canConfigure = configurable && maturity !== 'blocked';
           const healthStatus = feature.health?.status;
           const dependencies = feature.health?.dependencies ?? [];
           const label =
@@ -3812,12 +3816,12 @@ function FeatureCatalogue({
               )}
               <button
                 className="secondary full"
-                disabled={!configurable && maturity !== 'blocked'}
+                disabled={!canConfigure && maturity !== 'blocked'}
                 onClick={() => onOpen(feature.key)}
               >
                 {feature.key === 'studio.rank_card'
                   ? 'Personalizar'
-                  : configurable
+                  : canConfigure
                     ? 'Configurar'
                     : maturity === 'blocked'
                       ? 'Ver requisitos'
@@ -3881,7 +3885,10 @@ function FeatureDetail({
       options: field.key === 'templateId' ? templateOptions : field.options,
     })),
   })) ?? (localPreviewMode ? spec(feature?.key ?? '') : []);
-  const configurable = feature?.configurable ?? true;
+  // Keep blocked providers discoverable, but do not expose a save/enable
+  // form that can only fail at publication time. Their detail page is a
+  // requirements view until the backend reports a non-blocked maturity.
+  const configurable = (feature?.configurable ?? true) && feature?.maturity !== 'blocked';
   if (!configurable)
     return (
       <section className="detail-page">
