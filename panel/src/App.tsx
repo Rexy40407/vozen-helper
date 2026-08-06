@@ -3699,7 +3699,9 @@ function FeatureCatalogue({
   const operationalCount = maturityCounts.operational ?? 0;
   const betaCount = maturityCounts.beta ?? 0;
   const requirementCount = maturityCounts.blocked ?? 0;
-  const configurableCount = uniqueFeatures.filter((feature) => feature.configurable !== false).length;
+  const configurableCount = uniqueFeatures.filter(
+    (feature) => feature.configurable !== false && feature.maturity !== 'blocked',
+  ).length;
   return (
     <section>
       <div className="catalog-toolbar">
