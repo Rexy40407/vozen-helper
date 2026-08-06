@@ -3752,7 +3752,7 @@ function FeatureCatalogue({
         ))}
       </div>
       <div className="feature-grid">
-        {features.map((feature) => {
+        {uniqueFeatures.map((feature) => {
           const maturity = feature.maturity ?? (feature.available ? 'operational' : 'planned');
           const configurable = feature.configurable ?? feature.available;
           // A blocked feature may expose a contract so the user can inspect
