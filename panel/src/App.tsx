@@ -244,6 +244,8 @@ const demoFeatures: Feature[] = [
     capability: 'core',
     available: true,
     enabled: false,
+    maturity: 'operational',
+    configurable: true,
   },
   {
     key: 'management.workflows',
