@@ -1007,6 +1007,44 @@ pub fn render_member_message(template: &str, member: &str, server: &str) -> Stri
     )
 }
 
+/// Render a reusable Studio template using the same bounded rules as the
+/// Discord gateway. Only the template's `config` object is considered, and
+/// only string content fields can reach Discord. Invalid, empty, oversized or
+/// control-character content falls back to the caller-provided message.
+pub fn render_bounded_template_message(
+    template: &serde_json::Value,
+    slot: &str,
+    fallback: &str,
+) -> String {
+    let config = template
+        .get("config")
+        .and_then(serde_json::Value::as_object);
+    let candidate = config.and_then(|object| {
+        object
+            .get(slot)
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                object
+                    .get(&format!("{slot}Message"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .or_else(|| object.get("content").and_then(serde_json::Value::as_str))
+            .or_else(|| object.get("message").and_then(serde_json::Value::as_str))
+    });
+    let Some(message) = candidate else {
+        return fallback.to_owned();
+    };
+    if message.trim().is_empty()
+        || message.chars().count() > 2_000
+        || message.chars().any(char::is_control)
+    {
+        return fallback.to_owned();
+    }
+    message
+        .replace("@everyone", "@\u{200b}everyone")
+        .replace("@here", "@\u{200b}here")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AchievementPolicy {
     pub first_threshold: i64,
@@ -3788,6 +3826,32 @@ impl FeatureAdapter for TemplatesAdapter {
         // silently disabled.
         let enabled = config.is_object();
         vec![("management.templates.enabled".into(), enabled.to_string())]
+    }
+
+    fn simulate(&self, config: &serde_json::Value, fixture: &serde_json::Value) -> Vec<String> {
+        let slot = fixture_string(fixture, "slot", "slot", "content");
+        let fallback = fixture_string(
+            fixture,
+            "fallback",
+            "fallback",
+            "Template preview unavailable.",
+        );
+        let template = fixture.get("template").unwrap_or(config);
+        let rendered = render_bounded_template_message(template, slot, fallback);
+        let used_fallback = rendered == fallback;
+        let mut effects = vec![format!("Render the bounded `{slot}` template: {rendered}")];
+        if used_fallback {
+            effects.push(
+                "The template was missing or outside safe Discord limits; the fallback will be used."
+                    .into(),
+            );
+        }
+        effects.extend(
+            self.runtime_projection(config)
+                .into_iter()
+                .map(|(setting, value)| format!("Runtime setting `{setting}` = `{value}`.")),
+        );
+        effects
     }
 }
 
@@ -12074,6 +12138,32 @@ mod tests {
         assert_eq!(
             feature_maturity("management.templates"),
             FeatureMaturity::Operational
+        );
+        let preview = templates.simulate(
+            &serde_json::json!({}),
+            &serde_json::json!({
+                "slot": "welcome",
+                "fallback": "Fallback",
+                "template": {"config": {"content": "Hello @everyone"}}
+            }),
+        );
+        assert!(
+            preview
+                .iter()
+                .any(|effect| effect.contains("Hello @\u{200b}everyone"))
+        );
+        let rejected = templates.simulate(
+            &serde_json::json!({}),
+            &serde_json::json!({
+                "slot": "welcome",
+                "fallback": "Fallback",
+                "template": {"config": {"content": "\u{0000}"}}
+            }),
+        );
+        assert!(
+            rejected
+                .iter()
+                .any(|effect| effect.contains("fallback will be used"))
         );
 
         let birthdays = feature_adapter("community.birthdays").expect("birthdays adapter");

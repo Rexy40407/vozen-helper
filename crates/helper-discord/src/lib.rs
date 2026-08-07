@@ -15,8 +15,8 @@ use helper_core::{
     evaluate_scam_with_roles, evaluate_search, evaluate_starboard, evaluate_stats,
     evaluate_suggestion, evaluate_temp_channel, evaluate_tickets, evaluate_welcome_channel,
     evaluate_workflow, feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
-    parse_utc_offset_minutes, quota_limit, render_member_message, scam_policy_from_json,
-    starboard_policy_from_json,
+    parse_utc_offset_minutes, quota_limit, render_bounded_template_message, render_member_message,
+    scam_policy_from_json, starboard_policy_from_json,
 };
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
@@ -11389,35 +11389,10 @@ fn template_message(
     let Ok(template) = serde_json::from_str::<serde_json::Value>(&raw) else {
         return fallback;
     };
-    let config = template
-        .get("config")
-        .and_then(serde_json::Value::as_object);
-    let candidate = config.and_then(|object| {
-        object
-            .get(slot)
-            .and_then(serde_json::Value::as_str)
-            .or_else(|| {
-                object
-                    .get(&format!("{slot}Message"))
-                    .and_then(serde_json::Value::as_str)
-            })
-            .or_else(|| object.get("content").and_then(serde_json::Value::as_str))
-            .or_else(|| object.get("message").and_then(serde_json::Value::as_str))
-    });
-    let Some(message) = candidate else {
-        return fallback;
-    };
-    if message.trim().is_empty()
-        || message.chars().count() > 2_000
-        || message.chars().any(char::is_control)
-    {
-        return fallback;
-    }
-    // Prevent a reusable template from pinging an entire server. Member
-    // mentions remain available through the explicit {member} placeholder.
-    message
-        .replace("@everyone", "@\u{200b}everyone")
-        .replace("@here", "@\u{200b}here")
+    // Keep the gateway and API simulation on the same bounded renderer. This
+    // prevents a template that previews safely from behaving differently in
+    // Discord after publication.
+    render_bounded_template_message(&template, slot, &fallback)
 }
 
 fn setting_u64(store: &Store, guild_id: &str, key: &str, default: u64) -> u64 {
