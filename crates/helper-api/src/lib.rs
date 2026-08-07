@@ -5444,11 +5444,8 @@ async fn generic_feature_preflight(
     // the proposed policy actually assigns one; a server that only announces
     // milestones should not be blocked by an unrelated role permission.
     if request.enabled && key == "community.achievements" && !configured_roles.is_empty() {
-        if !required_permissions
-            .iter()
-            .any(|value| *value == "Manage Roles")
-        {
-            required_permissions.push("Manage Roles".into());
+        if !required_permissions.contains(&"Manage Roles") {
+            required_permissions.push("Manage Roles");
         }
         let user_has = permission_bit(&guild_permissions, 28);
         let bot_has = bot_permissions
