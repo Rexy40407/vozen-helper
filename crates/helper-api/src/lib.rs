@@ -9928,11 +9928,12 @@ async fn update_studio_template(
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template"));
     }
     let key = template_key(&id);
-    let current = state
+    let current_raw = state
         .store
         .get_setting(&claims.guild_id, &key)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
-        .and_then(|value| parse_template(&value))
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "template_not_found"))?;
+    let current = parse_template(&current_raw)
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "template_not_found"))?;
     if input
         .expected_version
@@ -9954,16 +9955,18 @@ async fn update_studio_template(
         created_at: current.created_at,
         updated_at: now,
     };
-    state
+    let replacement = serde_json::to_string(&template)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "serialization_error"))?;
+    let replaced = state
         .store
-        .set_setting(
-            &claims.guild_id,
-            &key,
-            &serde_json::to_string(&template).map_err(|_| {
-                client_error(StatusCode::INTERNAL_SERVER_ERROR, "serialization_error")
-            })?,
-        )
+        .compare_and_swap_setting(&claims.guild_id, &key, &current_raw, &replacement)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    if !replaced {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "template_revision_conflict",
+        ));
+    }
     Ok(Json(serde_json::json!({
         "guildId": claims.guild_id,
         "template": template,

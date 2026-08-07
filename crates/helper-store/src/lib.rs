@@ -3436,6 +3436,31 @@ impl Store {
         Ok(())
     }
 
+    /// Replace a setting only when its current serialized value is exactly the
+    /// value read by the caller. This is the compare-and-swap primitive used by
+    /// editors that expose optimistic revisions (for example Studio templates)
+    /// so two browser tabs cannot silently overwrite one another.
+    pub fn compare_and_swap_setting(
+        &self,
+        guild_id: &str,
+        key: &str,
+        expected_value: &str,
+        replacement_value: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let changed = conn.execute(
+            "UPDATE settings SET value=?3,updated_at=?4 WHERE guild_id=?1 AND key=?2 AND value=?5",
+            params![
+                guild_id,
+                key,
+                replacement_value,
+                Utc::now().timestamp_millis(),
+                expected_value
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
     /// Insert a new namespaced setting while enforcing its quota in the same
     /// SQLite transaction. Updates to an existing key are deliberately not
     /// counted as new entries.
@@ -5273,6 +5298,39 @@ mod tests {
             !store
                 .consume_quota("guild", "user", "workflow_runs", 1, Utc::now())
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn compare_and_swap_setting_rejects_stale_writes() {
+        let store = Store::open(":memory:").unwrap();
+        store
+            .set_setting("guild", "studio.template.one", "v1")
+            .unwrap();
+
+        assert!(
+            store
+                .compare_and_swap_setting("guild", "studio.template.one", "v1", "v2")
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .get_setting("guild", "studio.template.one")
+                .unwrap()
+                .as_deref(),
+            Some("v2")
+        );
+        assert!(
+            !store
+                .compare_and_swap_setting("guild", "studio.template.one", "v1", "v3")
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .get_setting("guild", "studio.template.one")
+                .unwrap()
+                .as_deref(),
+            Some("v2")
         );
     }
 
