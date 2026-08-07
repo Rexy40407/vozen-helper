@@ -5147,6 +5147,26 @@ fn collect_configured_resources(
                         roles.insert((child_path.clone(), id.to_string()));
                     }
                 }
+                // Resource selectors are commonly arrays ("roleIds",
+                // "ignoredChannels", etc.). Preserve the parent field name
+                // while walking scalar array items so preflight can validate
+                // existence and permissions for every selected resource.
+                if let serde_json::Value::Array(items) = child {
+                    let lower = key.to_ascii_lowercase();
+                    for (index, item) in items.iter().enumerate() {
+                        let Some(id) = item.as_str().filter(|id| !id.trim().is_empty()) else {
+                            continue;
+                        };
+                        let item_path = format!("{child_path}[{index}]");
+                        if lower.contains("channel") || lower == "category" || lower == "categoryid"
+                        {
+                            channels.insert((item_path.clone(), id.to_string()));
+                        }
+                        if lower.contains("role") && id.parse::<u64>().is_ok() {
+                            roles.insert((item_path, id.to_string()));
+                        }
+                    }
+                }
                 collect_configured_resources(child, &child_path, channels, roles);
             }
         }
@@ -5156,6 +5176,27 @@ fn collect_configured_resources(
             }
         }
         _ => {}
+    }
+}
+
+fn collect_level_reward_roles(value: &serde_json::Value, roles: &mut BTreeSet<(String, String)>) {
+    let Some(rewards) = value
+        .get("levelRoles")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return;
+    };
+    for (index, reward) in rewards.iter().enumerate() {
+        let Some(raw) = reward.as_str() else {
+            continue;
+        };
+        let Some((_, role_id)) = raw.split_once('=') else {
+            continue;
+        };
+        let role_id = role_id.trim();
+        if !role_id.is_empty() && role_id.parse::<u64>().is_ok() {
+            roles.insert((format!("levelRoles[{index}]"), role_id.to_string()));
+        }
     }
 }
 
@@ -5345,6 +5386,13 @@ async fn generic_feature_preflight(
         &mut configured_channels,
         &mut configured_roles,
     );
+    // Levels encode rewards as "level=role_id", so the role ID is not a
+    // standalone JSON string that the generic resource walker can recognise.
+    // Extract it explicitly to make role existence, Manage Roles and
+    // hierarchy checks apply before publishing the policy.
+    if key == "community.levels" {
+        collect_level_reward_roles(&request.config, &mut configured_roles);
+    }
     let channel_ids: BTreeSet<String> = snapshot
         .channels
         .iter()
@@ -10815,6 +10863,25 @@ mod tests {
             expires_at: now + Duration::hours(1),
             last_seen_at: now,
         }
+    }
+
+    #[test]
+    fn preflight_collects_array_resources_and_level_reward_roles() {
+        let config = serde_json::json!({
+            "roleIds": ["111111111111111111", "222222222222222222"],
+            "ignoredChannels": ["333333333333333333"],
+            "levelRoles": ["5=444444444444444444", "10=555555555555555555"]
+        });
+        let mut channels = BTreeSet::new();
+        let mut roles = BTreeSet::new();
+        collect_configured_resources(&config, "", &mut channels, &mut roles);
+        collect_level_reward_roles(&config, &mut roles);
+
+        assert!(channels.contains(&("ignoredChannels[0]".into(), "333333333333333333".into())));
+        assert!(roles.contains(&("roleIds[0]".into(), "111111111111111111".into())));
+        assert!(roles.contains(&("roleIds[1]".into(), "222222222222222222".into())));
+        assert!(roles.contains(&("levelRoles[0]".into(), "444444444444444444".into())));
+        assert!(roles.contains(&("levelRoles[1]".into(), "555555555555555555".into())));
     }
 
     #[tokio::test]
