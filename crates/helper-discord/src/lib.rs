@@ -100,6 +100,11 @@ pub mod adapter {
             member_id: String,
             role_id: String,
         },
+        ChangeNickname {
+            guild_id: String,
+            member_id: String,
+            nickname: Option<String>,
+        },
         PublishEvent {
             guild_id: String,
             event_id: String,
@@ -137,6 +142,12 @@ pub mod adapter {
             guild_id: &str,
             member_id: &str,
             role_id: &str,
+        ) -> Result<(), String>;
+        fn change_nickname(
+            &mut self,
+            guild_id: &str,
+            member_id: &str,
+            nickname: Option<&str>,
         ) -> Result<(), String>;
         fn publish_event(
             &mut self,
@@ -271,6 +282,21 @@ pub mod adapter {
                 guild_id: guild_id.into(),
                 member_id: member_id.into(),
                 role_id: role_id.into(),
+            });
+            Ok(())
+        }
+
+        fn change_nickname(
+            &mut self,
+            guild_id: &str,
+            member_id: &str,
+            nickname: Option<&str>,
+        ) -> Result<(), String> {
+            self.check()?;
+            self.effects.push(Effect::ChangeNickname {
+                guild_id: guild_id.into(),
+                member_id: member_id.into(),
+                nickname: nickname.map(str::to_owned),
             });
             Ok(())
         }
@@ -12021,7 +12047,7 @@ mod tests {
         OpenSeaCollectionInfo, account_age_days,
         adapter::{DiscordAdapter, Effect, FakeDiscordAdapter},
         command_feature_key, custom_command_channel_ignored, custom_command_is_staff,
-        english_bot_text, feature_enabled, feature_title, format_nft_collection,
+        english_bot_text, evaluate_nickname, feature_enabled, feature_title, format_nft_collection,
         is_destructive_audit_action, join_burst_armed, parse_custom_command, parse_duration,
         parse_reminder_delay, parse_scheduled_event_window, reminder_repeat_interval_ms,
         render_custom_command, scheduled_action_feature, shadow_mode_enabled,
@@ -12430,16 +12456,29 @@ mod tests {
             .unwrap();
         discord.remove_role("guild", "member", "verified").unwrap();
         discord.delete_channel("ticket").unwrap();
-        assert_eq!(discord.effects().len(), 9);
+        let nickname = evaluate_nickname(&serde_json::json!({"nickname": "Vozen Helper"}));
+        assert!(nickname.allowed);
+        discord
+            .change_nickname("guild", "helper", Some(&nickname.nickname))
+            .unwrap();
+        assert_eq!(discord.effects().len(), 10);
         assert!(matches!(
             discord.effects()[0],
             Effect::Timeout { seconds: 60, .. }
+        ));
+        assert!(matches!(
+            discord.effects()[9],
+            Effect::ChangeNickname {
+                ref guild_id,
+                ref member_id,
+                ref nickname,
+            } if guild_id == "guild" && member_id == "helper" && nickname.as_deref() == Some("Vozen Helper")
         ));
 
         discord.fail_next();
         let error = discord.log("log-channel", "permission check").unwrap_err();
         assert_eq!(error, "discord_permission_denied");
-        assert_eq!(discord.effects().len(), 9);
+        assert_eq!(discord.effects().len(), 10);
     }
 
     #[test]
