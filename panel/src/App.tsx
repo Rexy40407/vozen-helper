@@ -3701,8 +3701,15 @@ function FeatureCatalogue({
   const operationalCount = maturityCounts.operational ?? 0;
   const betaCount = maturityCounts.beta ?? 0;
   const requirementCount = maturityCounts.blocked ?? 0;
+  // Every adapter-backed topic has a real configuration page, including
+  // integrations that are blocked until credentials or an approval exist.
+  // Keep “configuráveis” aligned with the API contract (52 topics), while the
+  // card itself still prevents publication and explains the blocked
+  // dependency.  Excluding blocked entries here made the panel report 45 and
+  // suggested that seven topics were missing rather than waiting on a
+  // legitimate external requirement.
   const configurableCount = uniqueFeatures.filter(
-    (feature) => feature.configurable !== false && feature.maturity !== 'blocked',
+    (feature) => feature.configurable !== false,
   ).length;
   return (
     <section>
