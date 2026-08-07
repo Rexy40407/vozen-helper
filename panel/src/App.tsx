@@ -734,10 +734,6 @@ const defaults: Record<string, FeatureConfig> = {
     defaultWinners: 1,
     requiredRole: '',
   },
-  'management.polls': {
-    defaultDurationHours: 24,
-    channel: '',
-  },
   'support.tickets': {
     categoryId: '',
     staffRole: '',
@@ -749,9 +745,9 @@ const defaults: Record<string, FeatureConfig> = {
   },
   'support.welcome': {
     channel: '',
-    message: 'Bem-vindo(a), {member}! Lê as regras e diverte-te.',
+    message: 'Welcome {member} to {server}!',
     sendDm: false,
-    dmMessage: 'Olá {member}, bem-vindo(a) ao servidor!',
+    dmMessage: 'Hello {member}, welcome to {server}!',
     autoRole: '',
     delaySeconds: 0,
     farewellChannel: '',
@@ -771,9 +767,6 @@ const defaults: Record<string, FeatureConfig> = {
   },
   'management.polls': {
     defaultDurationHours: 24,
-    allowMultiple: false,
-    anonymous: false,
-    reminderHours: 6,
     channel: '',
   },
   'insights.stats': {
@@ -1541,6 +1534,15 @@ const spec = (key: string): SectionSpec[] => {
           { key: 'sendDm', label: 'Enviar mensagem privada', kind: 'toggle' },
           { key: 'dmMessage', label: 'Mensagem privada', kind: 'textarea', advanced: true },
           { key: 'autoRole', label: 'Cargo inicial', kind: 'role', advanced: true },
+        ],
+      },
+      {
+        title: 'Saída e modelos',
+        description: 'Escolhe onde despedidas são publicadas e reutiliza um modelo aprovado.',
+        fields: [
+          { key: 'farewellChannel', label: 'Canal de despedidas', kind: 'channel', advanced: true },
+          { key: 'farewellMessage', label: 'Mensagem de despedida', kind: 'textarea', advanced: true },
+          { key: 'templateId', label: 'Modelo reutilizável', kind: 'select', advanced: true },
         ],
       },
     ],
