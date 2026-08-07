@@ -834,9 +834,11 @@ const defaults: Record<string, FeatureConfig> = {
   'management.templates': {},
   'community.role_panels': {
     channel: '',
+    roleIds: [],
     panelTitle: 'Escolhe os teus cargos',
     panelDescription: 'Seleciona as opções que combinam contigo.',
     maxRoles: 5,
+    selectionMode: 'multiple',
     removeOnUnselect: true,
   },
   'community.events': {
@@ -1105,7 +1107,7 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       title: 'Limites',
       description: 'Evita escolhas excessivas.',
       fields: [
-        { key: 'maxRoles', label: 'Máximo de cargos por membro', kind: 'number', min: 1, max: 25 },
+          { key: 'maxRoles', label: 'Máximo de cargos por membro', kind: 'number', min: 1, max: 5 },
         { key: 'selectionMode', label: 'Selection mode', kind: 'select', options: [['multiple', 'Several roles'], ['unique', 'One role']] },
         { key: 'removeOnUnselect', label: 'Remover cargo ao desselecionar', kind: 'toggle' },
       ],
