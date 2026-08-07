@@ -3911,6 +3911,12 @@ fn provider_error_code(error: &anyhow::Error) -> String {
     }
 }
 
+fn rss_retry_seconds(interval_seconds: i64, failure_count: i64) -> i64 {
+    let base = interval_seconds.clamp(300, 86_400);
+    let multiplier = 1_i64 << failure_count.clamp(0, 4);
+    base.saturating_mul(multiplier).min(3_600)
+}
+
 async fn run_rss_worker(http: Arc<serenity::http::Http>, store: Store, rss: RssClient) {
     let mut interval = tokio::time::interval(Duration::from_secs(15));
     loop {
@@ -3961,7 +3967,7 @@ async fn process_rss_subscription(
         Ok(feed) => feed,
         Err(error) => {
             let failures = subscription.failure_count.saturating_add(1).min(8);
-            let backoff = (subscription.interval_seconds * (1_i64 << failures.min(4))).min(3_600);
+            let backoff = rss_retry_seconds(subscription.interval_seconds, failures);
             store.update_rss_poll(
                 subscription.id,
                 subscription.last_item_id.as_deref(),
@@ -3995,7 +4001,21 @@ async fn process_rss_subscription(
         .target_channel_id
         .parse::<u64>()
         .map_err(|_| anyhow::anyhow!("invalid_discord_channel_id"))?;
-    ChannelId::new(channel_id).say(http, content).await?;
+    if let Err(error) = ChannelId::new(channel_id).say(http, content).await {
+        let failures = subscription.failure_count.saturating_add(1).min(8);
+        let backoff = rss_retry_seconds(subscription.interval_seconds, failures);
+        // Do not advance last_item_id until Discord confirms delivery.  The
+        // bounded retry keeps a transient 429/5xx from hot-looping every
+        // worker tick while still allowing the item to be delivered later.
+        store.update_rss_poll(
+            subscription.id,
+            subscription.last_item_id.as_deref(),
+            now + backoff * 1_000,
+            failures,
+            Some("discord_delivery_failed"),
+        )?;
+        return Err(error.into());
+    }
     store.update_rss_poll(subscription.id, Some(&item.id), next(), 0, None)?;
     Ok(())
 }
@@ -12050,7 +12070,7 @@ mod tests {
         english_bot_text, evaluate_nickname, feature_enabled, feature_title, format_nft_collection,
         is_destructive_audit_action, join_burst_armed, parse_custom_command, parse_duration,
         parse_reminder_delay, parse_scheduled_event_window, reminder_repeat_interval_ms,
-        render_custom_command, scheduled_action_feature, shadow_mode_enabled,
+        render_custom_command, rss_retry_seconds, scheduled_action_feature, shadow_mode_enabled,
         should_cleanup_temp_channel, template_message,
     };
     use chrono::TimeZone;
@@ -12144,6 +12164,15 @@ mod tests {
         assert!(parse_custom_command("rules", "!").is_none());
         assert!(parse_custom_command("!bad.name", "!").is_none());
         assert!(parse_custom_command("!rules", "?").is_none());
+    }
+
+    #[test]
+    fn rss_delivery_backoff_is_bounded_and_grows_after_failures() {
+        assert_eq!(rss_retry_seconds(300, 0), 300);
+        assert_eq!(rss_retry_seconds(900, 1), 1_800);
+        assert_eq!(rss_retry_seconds(900, 4), 3_600);
+        assert_eq!(rss_retry_seconds(86_400, 8), 3_600);
+        assert_eq!(rss_retry_seconds(1, -2), 300);
     }
 
     #[test]
