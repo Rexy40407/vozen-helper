@@ -5390,7 +5390,52 @@ async fn generic_feature_preflight(
             .dependencies
             .iter()
             .any(|dependency| dependency_requires_role_management(dependency))
-    });
+    }) || (key == "community.achievements"
+        && !configured_roles.is_empty());
+    // Achievement reward roles are optional.  Only require Manage Roles when
+    // the proposed policy actually assigns one; a server that only announces
+    // milestones should not be blocked by an unrelated role permission.
+    if request.enabled && key == "community.achievements" && !configured_roles.is_empty() {
+        if !required_permissions
+            .iter()
+            .any(|value| *value == "Manage Roles")
+        {
+            required_permissions.push("Manage Roles".into());
+        }
+        let user_has = permission_bit(&guild_permissions, 28);
+        let bot_has = bot_permissions
+            .map(|permissions| permission_bit(&permissions.to_string(), 28))
+            .unwrap_or(false);
+        user_permission_results.insert("manage_roles".into(), serde_json::json!(user_has));
+        bot_permission_results.insert("manage_roles".into(), serde_json::json!(bot_has));
+        if !user_has {
+            add_dependency_issue(
+                &mut issues,
+                "permissions.manage_roles".into(),
+                "missing_permission",
+                "Your Discord account needs Manage Roles to publish achievement reward roles."
+                    .into(),
+                "error",
+            );
+        }
+        if !bot_context_available {
+            add_dependency_issue(
+                &mut issues,
+                "permissions.bot_context".into(),
+                "discord_context_unavailable",
+                "Refresh the Discord context before publishing achievement reward roles.".into(),
+                "error",
+            );
+        } else if !bot_has {
+            add_dependency_issue(
+                &mut issues,
+                "permissions.bot.manage_roles".into(),
+                "missing_bot_permission",
+                "The Helper bot needs Manage Roles to assign achievement reward roles.".into(),
+                "error",
+            );
+        }
+    }
     if request.enabled && needs_role_management && snapshot.roles_ready && bot_context_available {
         let bot_top_position = snapshot
             .roles

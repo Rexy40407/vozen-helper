@@ -5479,6 +5479,20 @@ fn achievement_policy_for_store(store: &Store, guild_id: &str) -> AchievementPol
     }
 }
 
+fn achievement_reward_role_for_store(
+    store: &Store,
+    guild_id: &str,
+    achievement_key: &str,
+) -> Option<u64> {
+    let setting_key = match achievement_key {
+        "first_steps" => "community.achievements.first_reward_role",
+        "regular" => "community.achievements.regular_reward_role",
+        "community_pillar" => "community.achievements.pillar_reward_role",
+        _ => return None,
+    };
+    setting_string(store, guild_id, setting_key).and_then(|value| value.parse::<u64>().ok())
+}
+
 impl Handler {
     /// Reconcile an existing starboard entry after the source message changes.
     /// Reaction events are not emitted for edits, so without this pass the
@@ -5632,6 +5646,12 @@ impl Handler {
                 .unwrap_or(false)
             {
                 newly_unlocked.push(format!("{} ({} XP)", milestone.label, milestone.threshold));
+                if let Some(role_id) =
+                    achievement_reward_role_for_store(&self.store, &guild_text, milestone.key)
+                {
+                    self.apply_achievement_reward_role(ctx, guild_id, user_id, role_id)
+                        .await;
+                }
             }
         }
         if newly_unlocked.is_empty() {
@@ -5654,6 +5674,82 @@ impl Handler {
                 format!("🏆 <@{user_id}> unlocked: {}", newly_unlocked.join(", ")),
             )
             .await;
+    }
+
+    /// Assign an optional achievement reward role after the unlock has been
+    /// persisted.  Discord remains the source of truth for role manageability;
+    /// a stale/deleted/managed role is reported to the activity log instead of
+    /// turning an otherwise valid XP award into a failed command.
+    async fn apply_achievement_reward_role(
+        &self,
+        ctx: &Context,
+        guild_id: serenity::all::GuildId,
+        user_id: &str,
+        role_id: u64,
+    ) {
+        if role_id == 0 {
+            return;
+        }
+        let Ok(user_id) = user_id.parse::<u64>() else {
+            return;
+        };
+        let role = match guild_id.roles(&ctx.http).await {
+            Ok(mut roles) => roles.remove(&RoleId::new(role_id)),
+            Err(error) => {
+                warn!(%guild_id, %error, role_id, "could not inspect achievement reward role");
+                return;
+            }
+        };
+        let Some(role) = role else {
+            let _ = self.store.record_activity(
+                &guild_id.to_string(),
+                "achievement_reward",
+                &user_id.to_string(),
+                None,
+                Some(&role_id.to_string()),
+                &serde_json::json!({"status":"role_not_found"}).to_string(),
+            );
+            return;
+        };
+        if role.managed {
+            let _ = self.store.record_activity(
+                &guild_id.to_string(),
+                "achievement_reward",
+                &user_id.to_string(),
+                None,
+                Some(&role_id.to_string()),
+                &serde_json::json!({"status":"managed_role"}).to_string(),
+            );
+            return;
+        }
+        let Ok(member) = guild_id
+            .member(&ctx.http, serenity::all::UserId::new(user_id))
+            .await
+        else {
+            return;
+        };
+        if member
+            .roles
+            .iter()
+            .any(|existing| existing.get() == role_id)
+        {
+            return;
+        }
+        let result = member.add_role(&ctx.http, role.id).await;
+        let status = if let Err(error) = result {
+            warn!(%guild_id, %error, role_id, user_id, "failed to assign achievement reward role");
+            "discord_rejected"
+        } else {
+            "assigned"
+        };
+        let _ = self.store.record_activity(
+            &guild_id.to_string(),
+            "achievement_reward",
+            &user_id.to_string(),
+            None,
+            Some(&role_id.to_string()),
+            &serde_json::json!({"status":status,"roleId":role_id}).to_string(),
+        );
     }
 
     async fn apply_level_rewards(

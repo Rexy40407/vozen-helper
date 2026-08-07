@@ -9308,11 +9308,14 @@ impl FeatureAdapter for AchievementsAdapter {
                     "fields": [
                         {"key":"firstThreshold","label":"First steps threshold","kind":"number","min":1,"max":1000000},
                         {"key":"regularThreshold","label":"Regular threshold","kind":"number","min":1,"max":1000000},
-                        {"key":"pillarThreshold","label":"Community pillar threshold","kind":"number","min":1,"max":1000000}
+                        {"key":"pillarThreshold","label":"Community pillar threshold","kind":"number","min":1,"max":1000000},
+                        {"key":"firstRewardRole","label":"First steps reward role","kind":"role","advanced":true},
+                        {"key":"regularRewardRole","label":"Regular reward role","kind":"role","advanced":true},
+                        {"key":"pillarRewardRole","label":"Community pillar reward role","kind":"role","advanced":true}
                     ]
                 }]
             }),
-            defaults: serde_json::json!({"firstThreshold":100,"regularThreshold":1000,"pillarThreshold":10000}),
+            defaults: serde_json::json!({"firstThreshold":100,"regularThreshold":1000,"pillarThreshold":10000,"firstRewardRole":"","regularRewardRole":"","pillarRewardRole":""}),
             dependencies: vec![
                 "message_content".into(),
                 "levels".into(),
@@ -9346,6 +9349,22 @@ impl FeatureAdapter for AchievementsAdapter {
                     message: "XP threshold must be an integer.".into(),
                     severity: "error".into(),
                 }),
+            }
+        }
+        for field in ["firstRewardRole", "regularRewardRole", "pillarRewardRole"] {
+            if let Some(value) = object.get(field) {
+                let valid = value.as_str().is_some_and(|role| {
+                    role.is_empty()
+                        || (role.len() <= 22 && role.chars().all(|c| c.is_ascii_digit()))
+                });
+                if !valid {
+                    issues.push(ValidationIssue {
+                        path: field.into(),
+                        code: "role_id_invalid".into(),
+                        message: "Reward roles must be empty or a Discord role ID.".into(),
+                        severity: "error".into(),
+                    });
+                }
             }
         }
         if let (Some(first), Some(regular), Some(pillar)) = (
@@ -9386,6 +9405,29 @@ impl FeatureAdapter for AchievementsAdapter {
                 .and_then(serde_json::Value::as_i64)
                 .map(|value| (key.into(), value.to_string()))
         })
+        .chain(
+            [
+                (
+                    "firstRewardRole",
+                    "community.achievements.first_reward_role",
+                ),
+                (
+                    "regularRewardRole",
+                    "community.achievements.regular_reward_role",
+                ),
+                (
+                    "pillarRewardRole",
+                    "community.achievements.pillar_reward_role",
+                ),
+            ]
+            .into_iter()
+            .filter_map(|(field, key)| {
+                config
+                    .get(field)
+                    .and_then(serde_json::Value::as_str)
+                    .map(|value| (key.into(), value.to_owned()))
+            }),
+        )
         .collect()
     }
 
@@ -9422,6 +9464,24 @@ impl FeatureAdapter for AchievementsAdapter {
                     .join(", ")
             )]
         };
+        for milestone in unlocked {
+            let role_key = match milestone.key {
+                "first_steps" => "firstRewardRole",
+                "regular" => "regularRewardRole",
+                "community_pillar" => "pillarRewardRole",
+                _ => continue,
+            };
+            if let Some(role) = config
+                .get(role_key)
+                .and_then(serde_json::Value::as_str)
+                .filter(|role| !role.trim().is_empty())
+            {
+                effects.push(format!(
+                    "Assign reward role `{role}` for {}.",
+                    milestone.label
+                ));
+            }
+        }
         effects.extend(
             self.runtime_projection(config)
                 .into_iter()
@@ -11255,13 +11315,19 @@ mod tests {
             &serde_json::json!({
                 "firstThreshold": 100,
                 "regularThreshold": 500,
-                "pillarThreshold": 1000
+                "pillarThreshold": 1000,
+                "firstRewardRole": "123456789012345678"
             }),
             &serde_json::json!({"xp": 600}),
         );
         assert!(effects[0].contains("First steps"));
         assert!(effects[0].contains("Regular"));
         assert!(!effects[0].contains("Community pillar"));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| { effect.contains("Assign reward role `123456789012345678`") })
+        );
     }
 
     #[test]
