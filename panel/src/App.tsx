@@ -669,13 +669,14 @@ function presentFeature(feature: Feature): Feature {
 }
 const defaults: Record<string, FeatureConfig> = {
   'protection.antiscam': {
-    enabledLinks: true,
+    blockInvites: true,
     blockedDomains: [],
-    protectedDomains: [],
-    action: 'delete_timeout',
-    timeoutMinutes: 10,
-    ignoreTrustedRoles: true,
+    blockedKeywords: ['free nitro', 'steam gift', 'claim your prize', 'verify your wallet'],
+    ignoredChannels: [],
+    ignoredRoles: [],
     logChannel: '',
+    timeoutSeconds: 300,
+    alertOnly: false,
   },
   'protection.anti_raid': {
     joinThreshold: 10,
@@ -1256,35 +1257,22 @@ const spec = (key: string): SectionSpec[] => {
     'protection.antiscam': [
       {
         title: 'Deteção de fraude',
-        description: 'Controla como o Helper reage a links e domínios suspeitos.',
+        description: 'Controla como o Helper reage a convites, domínios e frases suspeitas.',
         fields: [
-          { key: 'enabledLinks', label: 'Verificar links e convites', kind: 'toggle' },
-          {
-            key: 'action',
-            label: 'Ação aplicada',
-            kind: 'select',
-            options: [
-              ['delete', 'Apagar mensagem'],
-              ['delete_timeout', 'Apagar e aplicar timeout'],
-              ['quarantine', 'Enviar para quarentena'],
-            ],
-          },
-          { key: 'timeoutMinutes', label: 'Timeout (minutos)', kind: 'number', min: 1, max: 10080 },
+          { key: 'blockInvites', label: 'Bloquear convites Discord não solicitados', kind: 'toggle' },
+          { key: 'blockedDomains', label: 'Domínios bloqueados', kind: 'tags', advanced: true },
+          { key: 'blockedKeywords', label: 'Frases bloqueadas', kind: 'tags', advanced: true },
+          { key: 'timeoutSeconds', label: 'Timeout (segundos)', kind: 'number', min: 0, max: 86400, advanced: true },
+          { key: 'alertOnly', label: 'Apenas monitorizar', kind: 'toggle', advanced: true },
         ],
       },
       {
-        title: 'Listas de confiança',
-        description: 'Uma lista protegida reduz falsos positivos em links legítimos.',
+        title: 'Exceções e registo',
+        description: 'Escolhe recursos reais do servidor para reduzir falsos positivos.',
         fields: [
-          { key: 'blockedDomains', label: 'Domínios bloqueados', kind: 'tags', advanced: true },
-          { key: 'protectedDomains', label: 'Domínios protegidos', kind: 'tags', advanced: true },
-          {
-            key: 'ignoreTrustedRoles',
-            label: 'Ignorar cargos de confiança',
-            kind: 'toggle',
-            advanced: true,
-          },
-          { key: 'logChannel', label: 'Canal de registo', kind: 'text', advanced: true },
+          { key: 'ignoredChannels', label: 'Canais ignorados', kind: 'channels', advanced: true },
+          { key: 'ignoredRoles', label: 'Cargos ignorados', kind: 'roles', advanced: true },
+          { key: 'logChannel', label: 'Canal de registo', kind: 'channel', advanced: true },
         ],
       },
     ],
@@ -1297,15 +1285,15 @@ const spec = (key: string): SectionSpec[] => {
             key: 'joinThreshold',
             label: 'Entradas para iniciar alerta',
             kind: 'number',
-            min: 3,
+            min: 2,
             max: 100,
           },
           {
             key: 'windowSeconds',
             label: 'Janela de tempo (segundos)',
             kind: 'number',
-            min: 5,
-            max: 300,
+            min: 3,
+            max: 60,
           },
           {
             key: 'incidentMinutes',
