@@ -829,10 +829,9 @@ const defaults: Record<string, FeatureConfig> = {
     includeContent: false,
   },
   'management.privacy': {
-    retainDays: 30,
     allowMemberExport: true,
-    deleteOnLeave: false,
-    logChannel: '',
+    allowMemberErase: true,
+    maxExportBytes: 1000000,
   },
   // Templates use the dedicated StudioTemplate manager below.  Do not expose
   // generic JSON switches that are not part of the API's template contract.
@@ -975,16 +974,15 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       title: 'Retenção',
       description: 'Define quanto tempo os dados opcionais ficam guardados.',
       fields: [
-        { key: 'retainDays', label: 'Retenção (dias)', kind: 'number', min: 1, max: 3650 },
-        { key: 'deleteOnLeave', label: 'Apagar dados opcionais quando alguém sai', kind: 'toggle' },
+        { key: 'allowMemberErase', label: 'Allow member erasure', kind: 'toggle' },
+        { key: 'maxExportBytes', label: 'Maximum export size', kind: 'number', min: 65536, max: 10000000 },
       ],
     },
     {
       title: 'Pedidos de dados',
       description: 'Mantém os pedidos de privacidade claros.',
       fields: [
-        { key: 'allowMemberExport', label: 'Permitir exportação pelo membro', kind: 'toggle' },
-        { key: 'logChannel', label: 'Canal de registo', kind: 'text', advanced: true },
+        { key: 'allowMemberExport', label: 'Allow member exports', kind: 'toggle' },
       ],
     },
   ],
