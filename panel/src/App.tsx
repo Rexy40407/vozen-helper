@@ -822,10 +822,11 @@ const defaults: Record<string, FeatureConfig> = {
     maxResponseLength: 1000,
   },
   'management.audit': {
+    threshold: 3,
+    windowSeconds: 10,
+    shadowMode: false,
     logChannel: '',
-    retainDays: 30,
-    notifyDestructive: true,
-    notifyPermissionChanges: true,
+    includeContent: false,
   },
   'management.privacy': {
     retainDays: 30,
@@ -961,20 +962,11 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       title: 'Registo de alterações',
       description: 'Escolhe o que a equipa deve conseguir rever.',
       fields: [
-        { key: 'logChannel', label: 'Canal de auditoria', kind: 'text' },
-        { key: 'retainDays', label: 'Retenção (dias)', kind: 'number', min: 1, max: 3650 },
-      ],
-    },
-    {
-      title: 'Alertas sensíveis',
-      description: 'Recebe contexto extra sobre alterações perigosas.',
-      fields: [
-        { key: 'notifyDestructive', label: 'Alertar ações destrutivas', kind: 'toggle' },
-        {
-          key: 'notifyPermissionChanges',
-          label: 'Alertar alterações de permissões',
-          kind: 'toggle',
-        },
+        { key: 'threshold', label: 'Actions before containment', kind: 'number', min: 2, max: 25 },
+        { key: 'windowSeconds', label: 'Detection window (seconds)', kind: 'number', min: 3, max: 60 },
+        { key: 'shadowMode', label: 'Shadow mode', kind: 'toggle' },
+        { key: 'logChannel', label: 'Audit log channel (optional)', kind: 'channel', advanced: true },
+        { key: 'includeContent', label: 'Include cached message content', kind: 'toggle', advanced: true },
       ],
     },
   ],
