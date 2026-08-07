@@ -272,6 +272,14 @@ pub fn router(state: ApiState) -> Router {
                 .put(update_studio_template)
                 .delete(delete_studio_template),
         )
+        .route(
+            "/api/studio/templates/{id}/revisions",
+            get(studio_template_revisions),
+        )
+        .route(
+            "/api/studio/templates/{id}/rollback",
+            post(rollback_studio_template),
+        )
         .route("/api/permissions", get(permissions))
         .route("/api/security/health", get(security_health))
         .route("/api/analytics", get(analytics))
@@ -9781,6 +9789,13 @@ struct StudioTemplateInput {
     expected_version: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct StudioTemplateRollbackInput {
+    revision: u64,
+    #[serde(default, rename = "expectedVersion")]
+    expected_version: Option<u64>,
+}
+
 fn default_template_config() -> serde_json::Value {
     serde_json::json!({})
 }
@@ -9880,6 +9895,26 @@ async fn studio_template(
     })))
 }
 
+async fn studio_template_revisions(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    if !valid_template_id(&id) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template_id"));
+    }
+    let revisions = state
+        .store
+        .studio_template_revisions(&claims.guild_id, &id, 50)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "templateId": id,
+        "revisions": revisions,
+    })))
+}
+
 async fn create_studio_template(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -9897,12 +9932,14 @@ async fn create_studio_template(
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "serialization_error"))?;
     let inserted = state
         .store
-        .insert_setting_bounded(
+        .insert_studio_template(
             &claims.guild_id,
             &template_key(&id),
             &value,
             TEMPLATE_PREFIX,
             quota_limit(&plan, "templates"),
+            &template.id,
+            &claims.user_id,
         )
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     if !inserted {
@@ -9959,7 +9996,15 @@ async fn update_studio_template(
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "serialization_error"))?;
     let replaced = state
         .store
-        .compare_and_swap_setting(&claims.guild_id, &key, &current_raw, &replacement)
+        .compare_and_swap_studio_template(
+            &claims.guild_id,
+            &key,
+            &current_raw,
+            &replacement,
+            &template.id,
+            template.version,
+            &claims.user_id,
+        )
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     if !replaced {
         return Err(client_error(
@@ -9970,6 +10015,78 @@ async fn update_studio_template(
     Ok(Json(serde_json::json!({
         "guildId": claims.guild_id,
         "template": template,
+    })))
+}
+
+async fn rollback_studio_template(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<StudioTemplateRollbackInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    if !valid_template_id(&id) || input.revision == 0 {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_template_revision",
+        ));
+    }
+    let key = template_key(&id);
+    let current_raw = state
+        .store
+        .get_setting(&claims.guild_id, &key)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "template_not_found"))?;
+    let current = parse_template(&current_raw)
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "template_not_found"))?;
+    if input
+        .expected_version
+        .is_some_and(|expected| expected != current.version)
+    {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "template_revision_conflict",
+        ));
+    }
+    let snapshot = state
+        .store
+        .studio_template_revision(&claims.guild_id, &id, input.revision)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "template_revision_not_found"))?;
+    let mut restored = parse_template(&snapshot.template_json).ok_or_else(|| {
+        client_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid_template_revision",
+        )
+    })?;
+    restored.id = id.clone();
+    restored.version = current.version.saturating_add(1);
+    restored.created_at = current.created_at;
+    restored.updated_at = Utc::now().to_rfc3339();
+    let replacement = serde_json::to_string(&restored)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "serialization_error"))?;
+    let replaced = state
+        .store
+        .compare_and_swap_studio_template(
+            &claims.guild_id,
+            &key,
+            &current_raw,
+            &replacement,
+            &restored.id,
+            restored.version,
+            &claims.user_id,
+        )
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    if !replaced {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "template_revision_conflict",
+        ));
+    }
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "template": restored,
+        "restoredRevision": input.revision,
     })))
 }
 
@@ -12286,6 +12403,63 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["template"]["version"], 2);
 
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/studio/templates/{template_id}/revisions"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["revisions"].as_array().unwrap().len(), 2);
+        assert_eq!(body["revisions"][0]["revision"], 2);
+
+        let stale_rollback = serde_json::json!({
+            "revision": 1,
+            "expectedVersion": 1
+        });
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/studio/templates/{template_id}/rollback"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(stale_rollback.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let rollback = serde_json::json!({
+            "revision": 1,
+            "expectedVersion": 2
+        });
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/studio/templates/{template_id}/rollback"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(rollback.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["template"]["version"], 3);
+        assert_eq!(body["template"]["name"], "Gaming onboarding");
+        assert_eq!(body["restoredRevision"], 1);
+
         // A second panel tab must not overwrite the newer template revision.
         let stale_update = serde_json::json!({
             "name": "Stale edit",
@@ -12324,8 +12498,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["template"]["version"], 2);
-        assert_eq!(body["template"]["name"], "Gaming onboarding v2");
+        assert_eq!(body["template"]["version"], 3);
+        assert_eq!(body["template"]["name"], "Gaming onboarding");
 
         let response = router(state(store.clone()))
             .oneshot(

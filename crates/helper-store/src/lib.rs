@@ -88,6 +88,19 @@ pub struct FeatureSettingRecord {
     pub updated_by: String,
 }
 
+/// Immutable snapshot of a Studio template. Revisions are guild-scoped and
+/// append-only so the panel can show history and restore a previous version
+/// without overwriting the audit trail.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StudioTemplateRevisionRecord {
+    pub guild_id: String,
+    pub template_id: String,
+    pub revision: u64,
+    pub template_json: String,
+    pub created_at: i64,
+    pub created_by: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct YouTubeSubscriptionRecord {
     pub id: i64,
@@ -804,6 +817,7 @@ impl Store {
         // would make an in-place Rust cutover fail on the live database.
         conn.execute_batch("CREATE TABLE IF NOT EXISTS tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, opener_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', claimed_by TEXT, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_tickets_owner ON tickets(guild_id,opener_id,status); CREATE TABLE IF NOT EXISTS suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, author_id TEXT NOT NULL, content TEXT NOT NULL, message_id TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS suggestion_votes (suggestion_id INTEGER NOT NULL, user_id TEXT NOT NULL, vote INTEGER NOT NULL, PRIMARY KEY(suggestion_id,user_id)); CREATE TABLE IF NOT EXISTS giveaways (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, prize TEXT NOT NULL, winners INTEGER NOT NULL DEFAULT 1, end_at INTEGER NOT NULL, ended INTEGER NOT NULL DEFAULT 0, required_role_id TEXT, host_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS giveaway_entries (giveaway_id INTEGER NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY(giveaway_id,user_id)); CREATE TABLE IF NOT EXISTS polls (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, question TEXT NOT NULL, options TEXT NOT NULL, end_at INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS poll_votes (poll_id INTEGER NOT NULL, user_id TEXT NOT NULL, choice INTEGER NOT NULL, PRIMARY KEY(poll_id,user_id)); CREATE TABLE IF NOT EXISTS workflows (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, name TEXT NOT NULL, trigger TEXT NOT NULL, condition TEXT NOT NULL DEFAULT '', action TEXT NOT NULL, payload TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS workflow_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id INTEGER NOT NULL, guild_id TEXT NOT NULL, source_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_workflows_trigger ON workflows(guild_id,trigger,enabled); CREATE TABLE IF NOT EXISTS quarantine (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, role_ids TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE TABLE IF NOT EXISTS starboard (guild_id TEXT NOT NULL, original_message_id TEXT NOT NULL, starboard_message_id TEXT NOT NULL, star_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,original_message_id));")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, correlation_id TEXT NOT NULL UNIQUE, guild_id TEXT NOT NULL, actor_id TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', before_json TEXT NOT NULL DEFAULT '{}', after_json TEXT NOT NULL DEFAULT '{}', outcome TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_audit_events_guild_time ON audit_events(guild_id, created_at DESC); CREATE TABLE IF NOT EXISTS feature_settings (guild_id TEXT NOT NULL, key TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, config_json TEXT NOT NULL DEFAULT '{}', revision INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL DEFAULT '', PRIMARY KEY(guild_id,key)); CREATE TABLE IF NOT EXISTS feature_revisions (guild_id TEXT NOT NULL, key TEXT NOT NULL, revision INTEGER NOT NULL, enabled INTEGER NOT NULL, config_json TEXT NOT NULL, updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL, PRIMARY KEY(guild_id,key,revision)); CREATE INDEX IF NOT EXISTS idx_feature_revisions_lookup ON feature_revisions(guild_id,key,revision DESC);")?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS studio_template_revisions (guild_id TEXT NOT NULL, template_id TEXT NOT NULL, revision INTEGER NOT NULL, template_json TEXT NOT NULL, created_at INTEGER NOT NULL, created_by TEXT NOT NULL, PRIMARY KEY(guild_id,template_id,revision)); CREATE INDEX IF NOT EXISTS idx_studio_template_revisions_lookup ON studio_template_revisions(guild_id,template_id,revision DESC);")?;
         // Member-add events can be delivered more than once. Keep a short
         // guild/user claim so welcome messages remain idempotent without
         // permanently suppressing a genuine re-join.
@@ -3461,6 +3475,165 @@ impl Store {
         Ok(changed == 1)
     }
 
+    /// Atomically replaces a Studio template setting and appends its revision.
+    /// The revision is committed only when the compare-and-swap succeeds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn compare_and_swap_studio_template(
+        &self,
+        guild_id: &str,
+        key: &str,
+        expected_value: &str,
+        replacement_value: &str,
+        template_id: &str,
+        revision: u64,
+        created_by: &str,
+    ) -> Result<bool> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE settings SET value=?3,updated_at=?4 WHERE guild_id=?1 AND key=?2 AND value=?5",
+            params![
+                guild_id,
+                key,
+                replacement_value,
+                Utc::now().timestamp_millis(),
+                expected_value
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO studio_template_revisions(guild_id,template_id,revision,template_json,created_at,created_by) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                guild_id,
+                template_id,
+                i64::try_from(revision).unwrap_or(i64::MAX),
+                replacement_value,
+                Utc::now().timestamp_millis(),
+                created_by
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Creates a template setting and its first revision in one transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_studio_template(
+        &self,
+        guild_id: &str,
+        key: &str,
+        value: &str,
+        prefix: &str,
+        limit: u64,
+        template_id: &str,
+        created_by: &str,
+    ) -> Result<bool> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT value FROM settings WHERE guild_id=?1 AND key=?2",
+                params![guild_id, key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing.is_some() {
+            return Ok(false);
+        }
+        let pattern = format!("{prefix}%");
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM settings WHERE guild_id=?1 AND key LIKE ?2",
+            params![guild_id, pattern],
+            |row| row.get(0),
+        )?;
+        if count < 0 || count as u64 >= limit {
+            return Ok(false);
+        }
+        let now = Utc::now().timestamp_millis();
+        tx.execute(
+            "INSERT INTO settings(guild_id,key,value,updated_at) VALUES(?1,?2,?3,?4)",
+            params![guild_id, key, value, now],
+        )?;
+        tx.execute(
+            "INSERT INTO studio_template_revisions(guild_id,template_id,revision,template_json,created_at,created_by) VALUES(?1,?2,1,?3,?4,?5)",
+            params![guild_id, template_id, value, now, created_by],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn record_studio_template_revision(
+        &self,
+        guild_id: &str,
+        template_id: &str,
+        revision: u64,
+        template_json: &str,
+        created_by: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT INTO studio_template_revisions(guild_id,template_id,revision,template_json,created_at,created_by) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                guild_id,
+                template_id,
+                i64::try_from(revision).unwrap_or(i64::MAX),
+                template_json,
+                Utc::now().timestamp_millis(),
+                created_by
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn studio_template_revisions(
+        &self,
+        guild_id: &str,
+        template_id: &str,
+        limit: u64,
+    ) -> Result<Vec<StudioTemplateRevisionRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let limit = i64::try_from(limit.clamp(1, 100)).unwrap_or(100);
+        let mut stmt = conn.prepare("SELECT guild_id,template_id,revision,template_json,created_at,created_by FROM studio_template_revisions WHERE guild_id=?1 AND template_id=?2 ORDER BY revision DESC LIMIT ?3")?;
+        let rows = stmt.query_map(params![guild_id, template_id, limit], |row| {
+            Ok(StudioTemplateRevisionRecord {
+                guild_id: row.get(0)?,
+                template_id: row.get(1)?,
+                revision: row.get::<_, i64>(2)?.try_into().unwrap_or(0),
+                template_json: row.get(3)?,
+                created_at: row.get(4)?,
+                created_by: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn studio_template_revision(
+        &self,
+        guild_id: &str,
+        template_id: &str,
+        revision: u64,
+    ) -> Result<Option<StudioTemplateRevisionRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT guild_id,template_id,revision,template_json,created_at,created_by FROM studio_template_revisions WHERE guild_id=?1 AND template_id=?2 AND revision=?3",
+                params![guild_id, template_id, i64::try_from(revision).unwrap_or(i64::MAX)],
+                |row| {
+                    Ok(StudioTemplateRevisionRecord {
+                        guild_id: row.get(0)?,
+                        template_id: row.get(1)?,
+                        revision: row.get::<_, i64>(2)?.try_into().unwrap_or(0),
+                        template_json: row.get(3)?,
+                        created_at: row.get(4)?,
+                        created_by: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     /// Insert a new namespaced setting while enforcing its quota in the same
     /// SQLite transaction. Updates to an existing key are deliberately not
     /// counted as new entries.
@@ -5331,6 +5504,53 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("v2")
+        );
+    }
+
+    #[test]
+    fn studio_template_revisions_are_guild_scoped_and_ordered() {
+        let store = Store::open(":memory:").unwrap();
+        store
+            .record_studio_template_revision("guild-a", "template", 1, r#"{"version":1}"#, "user-a")
+            .unwrap();
+        store
+            .record_studio_template_revision("guild-a", "template", 2, r#"{"version":2}"#, "user-b")
+            .unwrap();
+        store
+            .record_studio_template_revision("guild-b", "template", 1, r#"{"version":1}"#, "user-c")
+            .unwrap();
+
+        let revisions = store
+            .studio_template_revisions("guild-a", "template", 50)
+            .unwrap();
+        assert_eq!(
+            revisions
+                .iter()
+                .map(|item| item.revision)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        assert_eq!(revisions[0].created_by, "user-b");
+        assert_eq!(
+            store
+                .studio_template_revision("guild-a", "template", 1)
+                .unwrap()
+                .unwrap()
+                .template_json,
+            r#"{"version":1}"#
+        );
+        assert!(
+            store
+                .studio_template_revision("guild-a", "template", 3)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .studio_template_revisions("guild-b", "template", 50)
+                .unwrap()
+                .len(),
+            1
         );
     }
 
