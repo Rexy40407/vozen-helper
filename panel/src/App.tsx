@@ -779,6 +779,28 @@ const defaults: Record<string, FeatureConfig> = {
     intervalMinutes: 15,
     nameTemplate: 'messages-{messages}',
   },
+  'utility.emojis': {
+    maxEntries: 50,
+    animatedOnly: false,
+  },
+  'utility.embeds': {
+    maxDescription: 2000,
+    defaultColor: '',
+    defaultFooter: '',
+  },
+  'utility.search': {
+    maxResults: 5,
+    allowWikipedia: true,
+    allowAniList: true,
+    allowBluesky: true,
+    allowYouTube: true,
+    allowTwitch: true,
+  },
+  'utility.temp_channels': {
+    categoryId: '',
+    nameTemplate: "{user}'s room",
+    maxActive: 10,
+  },
   'social.youtube': {
     sourceChannelId: '',
     targetChannelId: '',
@@ -848,12 +870,14 @@ const defaults: Record<string, FeatureConfig> = {
     reminders: true,
     reminderHours: 1,
   },
-  'utility.help': { channel: '', showAdminOnly: true, includeExamples: true },
+  'utility.help': { showModules: true, showDashboard: true },
   'utility.reminders': {
-    channel: '',
-    defaultMinutes: 60,
-    allowMembers: true,
-    announceResult: true,
+    maxDelayHours: 168,
+    maxTextLength: 500,
+    timezone: 'UTC',
+    notifyUser: true,
+    allowRecurring: false,
+    maxRecurrences: 12,
   },
 };
 
@@ -1149,13 +1173,8 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       title: 'Ajuda no servidor',
       description: 'Escolhe como o Helper explica os seus módulos.',
       fields: [
-        { key: 'channel', label: 'Canal de ajuda', kind: 'text' },
-        {
-          key: 'showAdminOnly',
-          label: 'Detalhes de administração só para a equipa',
-          kind: 'toggle',
-        },
-        { key: 'includeExamples', label: 'Incluir exemplos', kind: 'toggle' },
+        { key: 'showModules', label: 'Show module list', kind: 'toggle' },
+        { key: 'showDashboard', label: 'Include dashboard link', kind: 'toggle' },
       ],
     },
   ],
@@ -1164,16 +1183,23 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       title: 'Lembretes',
       description: 'Prepara lembretes consistentes para a comunidade.',
       fields: [
-        { key: 'channel', label: 'Canal predefinido', kind: 'text' },
         {
-          key: 'defaultMinutes',
-          label: 'Duração predefinida (minutos)',
+          key: 'maxDelayHours',
+          label: 'Maximum delay (hours)',
           kind: 'number',
           min: 1,
-          max: 525600,
+          max: 8760,
         },
-        { key: 'allowMembers', label: 'Permitir lembretes a membros', kind: 'toggle' },
-        { key: 'announceResult', label: 'Anunciar quando termina', kind: 'toggle' },
+        { key: 'maxTextLength', label: 'Maximum message length', kind: 'number', min: 50, max: 500 },
+        {
+          key: 'timezone',
+          label: 'Reminder timezone',
+          kind: 'select',
+          options: [['UTC', 'UTC'], ['UTC-05:00', 'UTC-05:00'], ['UTC+01:00', 'UTC+01:00'], ['UTC+02:00', 'UTC+02:00'], ['UTC+05:30', 'UTC+05:30'], ['UTC+08:00', 'UTC+08:00']],
+        },
+        { key: 'notifyUser', label: 'Mention the member when it fires', kind: 'toggle' },
+        { key: 'allowRecurring', label: 'Allow recurring reminders', kind: 'toggle' },
+        { key: 'maxRecurrences', label: 'Maximum repeats', kind: 'number', min: 1, max: 52 },
       ],
     },
   ],
@@ -1614,20 +1640,67 @@ const spec = (key: string): SectionSpec[] => {
     ],
     'insights.stats': [
       {
-        title: 'Canais de estatísticas',
-        description: 'Mostra os dados importantes sem poluir o servidor.',
+        title: 'Server statistics',
+        description: 'Control the period, visibility and optional live counter channel for server statistics.',
         fields: [
-          { key: 'channel', label: 'Canal de estatísticas', kind: 'text' },
+          { key: 'windowDays', label: 'Reporting window (days)', kind: 'number', min: 1, max: 30 },
+          { key: 'public', label: 'Show publicly', kind: 'toggle' },
+          { key: 'channelId', label: 'Live counter channel', kind: 'channel' },
           {
-            key: 'refreshMinutes',
-            label: 'Atualização (minutos)',
+            key: 'intervalMinutes',
+            label: 'Counter refresh (minutes)',
             kind: 'number',
             min: 5,
             max: 1440,
+            advanced: true,
           },
-          { key: 'showMembers', label: 'Mostrar membros', kind: 'toggle' },
-          { key: 'showMessages', label: 'Mostrar mensagens', kind: 'toggle' },
-          { key: 'showVoice', label: 'Mostrar atividade de voz', kind: 'toggle' },
+          { key: 'nameTemplate', label: 'Channel name template', kind: 'text', maxLength: 100 },
+        ],
+      },
+    ],
+    'utility.emojis': [
+      {
+        title: 'Emoji inventory',
+        description: 'Choose how many custom emojis the staff command lists.',
+        fields: [
+          { key: 'maxEntries', label: 'Emojis shown', kind: 'number', min: 1, max: 100 },
+          { key: 'animatedOnly', label: 'Only animated emojis', kind: 'toggle' },
+        ],
+      },
+    ],
+    'utility.embeds': [
+      {
+        title: 'Safe embed publishing',
+        description: 'Publish bounded embeds with mentions disabled by default.',
+        fields: [
+          { key: 'maxDescription', label: 'Maximum description length', kind: 'number', min: 1, max: 4000 },
+          { key: 'defaultColor', label: 'Default colour (hex)', kind: 'text', maxLength: 7 },
+          { key: 'defaultFooter', label: 'Default footer', kind: 'text', maxLength: 2048 },
+        ],
+      },
+    ],
+    'utility.search': [
+      {
+        title: 'Approved search sources',
+        description: 'Search is limited to documented providers; arbitrary URLs are never fetched.',
+        fields: [
+          { key: 'maxResults', label: 'Results per search', kind: 'number', min: 1, max: 5 },
+          { key: 'allowWikipedia', label: 'Wikipedia', kind: 'toggle' },
+          { key: 'allowAniList', label: 'AniList', kind: 'toggle' },
+          { key: 'allowBluesky', label: 'Bluesky', kind: 'toggle' },
+          { key: 'allowYouTube', label: 'YouTube', kind: 'toggle' },
+          { key: 'allowTwitch', label: 'Twitch', kind: 'toggle' },
+        ],
+      },
+    ],
+    'utility.temp_channels': [
+      {
+        title: 'Temporary voice rooms',
+        description: 'Create bounded rooms with a predictable name and optional category.',
+        fields: [
+          { key: 'categoryId', label: 'Category', kind: 'category' },
+          { key: 'nameTemplate', label: 'Room name template', kind: 'text', maxLength: 80 },
+          { key: 'maxActive', label: 'Maximum active rooms', kind: 'number', min: 1, max: 50 },
         ],
       },
     ],
