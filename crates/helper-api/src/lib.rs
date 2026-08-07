@@ -9774,6 +9774,11 @@ struct StudioTemplateInput {
     modules: Vec<String>,
     #[serde(default = "default_template_config")]
     config: serde_json::Value,
+    /// Optional optimistic-concurrency token for edits made in the panel.
+    /// Older clients may omit it; new clients can prevent a stale tab from
+    /// silently overwriting a newer template revision.
+    #[serde(default, rename = "expectedVersion")]
+    expected_version: Option<u64>,
 }
 
 fn default_template_config() -> serde_json::Value {
@@ -9929,6 +9934,15 @@ async fn update_studio_template(
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
         .and_then(|value| parse_template(&value))
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "template_not_found"))?;
+    if input
+        .expected_version
+        .is_some_and(|expected| expected != current.version)
+    {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "template_revision_conflict",
+        ));
+    }
     let now = Utc::now().to_rfc3339();
     let template = StudioTemplate {
         id,
@@ -12268,6 +12282,47 @@ mod tests {
         let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["template"]["version"], 2);
+
+        // A second panel tab must not overwrite the newer template revision.
+        let stale_update = serde_json::json!({
+            "name": "Stale edit",
+            "description": "Must be rejected",
+            "modules": ["core"],
+            "config": {"welcome": {"enabled": true}},
+            "expectedVersion": 1
+        });
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/studio/templates/{template_id}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(stale_update.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "template_revision_conflict");
+
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/studio/templates/{template_id}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["template"]["version"], 2);
+        assert_eq!(body["template"]["name"], "Gaming onboarding v2");
 
         let response = router(state(store.clone()))
             .oneshot(
