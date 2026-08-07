@@ -761,10 +761,9 @@ const defaults: Record<string, FeatureConfig> = {
   },
   'management.nickname': { nickname: '' },
   'management.workflows': {
-    defaultAction: 'send_message',
-    logChannel: '',
-    dryRun: true,
-    workflows: [],
+    maxWorkflows: 10,
+    maxReplyLength: 1000,
+    allowMentions: false,
   },
   'management.polls': {
     defaultDurationHours: 24,
@@ -808,11 +807,8 @@ const defaults: Record<string, FeatureConfig> = {
     mention: '',
   },
   'management.moderation': {
-    logChannel: '',
-    warnThreshold: 3,
-    timeoutMinutes: 10,
-    deleteAfterSeconds: 0,
-    notifyStaff: true,
+    requireReason: true,
+    maxPurge: 100,
   },
   'management.custom_commands': {
     triggerPrefix: '!',
@@ -862,21 +858,17 @@ const defaults: Record<string, FeatureConfig> = {
 const additionalSpecs: Record<string, SectionSpec[]> = {
   'community.leaderboard': [
     {
-      title: 'Visibilidade',
-      description: 'Mostra a progressão sem expor dados que os membros não autorizaram.',
+      title: 'Leaderboard privacy',
+      description: 'Control how many members appear in the XP leaderboard.',
       fields: [
-        { key: 'publicEnabled', label: 'Publicar leaderboard', kind: 'toggle' },
         {
-          key: 'period',
-          label: 'Período',
-          kind: 'select',
-          options: [
-            ['all_time', 'Desde sempre'],
-            ['month', 'Este mês'],
-            ['week', 'Esta semana'],
-          ],
+          key: 'maxEntries',
+          label: 'Members shown',
+          kind: 'number',
+          min: 1,
+          max: 100,
         },
-        { key: 'optOut', label: 'Permitir exclusão individual', kind: 'toggle' },
+        { key: 'public', label: 'Show the leaderboard publicly', kind: 'toggle' },
       ],
     },
   ],
@@ -893,32 +885,21 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
   ],
   'management.moderation': [
     {
-      title: 'Ações e limites',
-      description: 'Define limites para moderar de forma consistente.',
+      title: 'Moderation safety',
+      description: 'Set guardrails used by manual moderation commands.',
       fields: [
-        { key: 'warnThreshold', label: 'Avisos antes de timeout', kind: 'number', min: 1, max: 20 },
         {
-          key: 'timeoutMinutes',
-          label: 'Timeout predefinido (minutos)',
+          key: 'requireReason',
+          label: 'Require a reason',
+          kind: 'toggle',
+        },
+        {
+          key: 'maxPurge',
+          label: 'Maximum purge count',
           kind: 'number',
           min: 1,
-          max: 10080,
+          max: 100,
         },
-        {
-          key: 'deleteAfterSeconds',
-          label: 'Apagar mensagens depois de (segundos)',
-          kind: 'number',
-          min: 0,
-          max: 3600,
-        },
-      ],
-    },
-    {
-      title: 'Registo da equipa',
-      description: 'Mantém as decisões visíveis para quem tem permissão.',
-      fields: [
-        { key: 'logChannel', label: 'Canal de moderação', kind: 'text' },
-        { key: 'notifyStaff', label: 'Notificar a equipa', kind: 'toggle' },
       ],
     },
   ],
@@ -1576,28 +1557,24 @@ const spec = (key: string): SectionSpec[] => {
     ],
     'management.workflows': [
       {
-        title: 'Predefinições',
-        description: 'Os fluxos completos podem ser adicionados depois desta base segura.',
+        title: 'Automation safety limits',
+        description: 'Bounded message automations keep your server responsive.',
         fields: [
           {
-            key: 'defaultAction',
-            label: 'Ação predefinida',
-            kind: 'select',
-            options: [
-              ['send_message', 'Enviar mensagem'],
-              ['add_role', 'Adicionar cargo'],
-              ['remove_role', 'Remover cargo'],
-            ],
+            key: 'maxWorkflows',
+            label: 'Maximum workflows',
+            kind: 'number',
+            min: 1,
+            max: 100,
           },
-          { key: 'logChannel', label: 'Canal de execução', kind: 'text' },
-        ],
-      },
-      {
-        title: 'Segurança',
-        description: 'Testa primeiro e publica só quando estiveres confiante.',
-        fields: [
-          { key: 'dryRun', label: 'Abrir novos fluxos em modo de teste', kind: 'toggle' },
-          { key: 'workflows', label: 'Fluxos guardados', kind: 'tags', advanced: true },
+          {
+            key: 'maxReplyLength',
+            label: 'Maximum reply length',
+            kind: 'number',
+            min: 1,
+            max: 1500,
+          },
+          { key: 'allowMentions', label: 'Allow mentions in replies', kind: 'toggle' },
         ],
       },
     ],
