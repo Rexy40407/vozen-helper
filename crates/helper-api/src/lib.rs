@@ -8383,7 +8383,7 @@ async fn apply_discord_nickname(
     state: &ApiState,
     guild_id: &str,
     nickname: &str,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     if state.discord_token.len() < 20 {
         return Err("discord_bot_unavailable".into());
     }
@@ -8397,6 +8397,16 @@ async fn apply_discord_nickname(
         .get("id")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "discord_bot_identity_unavailable".to_string())?;
+    let member = discord_json(
+        &client,
+        &auth,
+        &format!("/guilds/{guild_id}/members/{bot_id}"),
+    )
+    .await?;
+    let previous_nickname = member
+        .get("nick")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
     let value = if nickname.trim().is_empty() {
         serde_json::Value::Null
     } else {
@@ -8414,7 +8424,7 @@ async fn apply_discord_nickname(
     if !response.status().is_success() {
         return Err(format!("discord_http_{}", response.status().as_u16()));
     }
-    Ok(())
+    Ok(previous_nickname)
 }
 
 async fn update_feature_detail(
@@ -8484,6 +8494,46 @@ async fn update_feature_detail(
             "invalid_feature_config",
         ));
     }
+    // Check the revision before touching Discord.  The store repeats this
+    // check inside its transaction; this early guard avoids changing the
+    // Helper nickname for a stale panel tab in the common conflict case.
+    if key == "management.nickname"
+        && let Some(expected_revision) = update.expected_revision
+    {
+        let current_revision = state
+            .store
+            .get_feature_setting(&claims.guild_id, &key)
+            .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+            .map(|record| record.revision)
+            .unwrap_or(0);
+        if current_revision != expected_revision {
+            return Err(client_error(
+                StatusCode::CONFLICT,
+                "feature_revision_conflict",
+            ));
+        }
+    }
+    // Nickname is the one feature whose publish path has an immediate
+    // external Discord mutation.  Apply it before committing the revision so
+    // a Discord failure cannot leave the panel showing an active but inert
+    // feature.  Keep the old value for compensation if the store rejects the
+    // publish (for example because another moderator won a race).
+    let previous_nickname = if key == "management.nickname" {
+        let requested_nickname = update
+            .config
+            .get("nickname")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        Some(
+            apply_discord_nickname(&state, &claims.guild_id, requested_nickname)
+                .await
+                .map_err(|_| {
+                    client_error(StatusCode::BAD_GATEWAY, "discord_nickname_apply_failed")
+                })?,
+        )
+    } else {
+        None
+    };
     let youtube_subscription = if key == "social.youtube" {
         prepare_youtube_feature(&state, &claims, &update.config, update.enabled).await?
     } else {
@@ -8652,12 +8702,28 @@ async fn update_feature_detail(
     let record = match publish_result {
         Ok(record) => record,
         Err(error) if error.to_string().starts_with("feature_revision_conflict:") => {
+            if let Some(previous_nickname) = previous_nickname.as_ref() {
+                let _ = apply_discord_nickname(
+                    &state,
+                    &claims.guild_id,
+                    previous_nickname.as_deref().unwrap_or_default(),
+                )
+                .await;
+            }
             return Err(client_error(
                 StatusCode::CONFLICT,
                 "feature_revision_conflict",
             ));
         }
         Err(_) => {
+            if let Some(previous_nickname) = previous_nickname.as_ref() {
+                let _ = apply_discord_nickname(
+                    &state,
+                    &claims.guild_id,
+                    previous_nickname.as_deref().unwrap_or_default(),
+                )
+                .await;
+            }
             return Err(client_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store_error",
@@ -8665,20 +8731,7 @@ async fn update_feature_detail(
         }
     };
     let discord_apply = if key == "management.nickname" {
-        match apply_discord_nickname(
-            &state,
-            &claims.guild_id,
-            update
-                .config
-                .get("nickname")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default(),
-        )
-        .await
-        {
-            Ok(()) => serde_json::json!({"applied": true}),
-            Err(error) => serde_json::json!({"applied": false, "error": error}),
-        }
+        serde_json::json!({"applied": true})
     } else {
         serde_json::json!(null)
     };
