@@ -362,25 +362,41 @@ textarea:focus-visible {
 }
 
 .panel-main .swatches {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
+  min-width: 0;
 }
 
 .panel-main .swatch {
   display: grid;
   place-items: center;
-  width: 44px;
-  height: 44px;
+  flex: 0 0 44px;
+  width: 44px !important;
+  min-width: 44px;
+  max-width: 44px;
+  height: 44px !important;
   min-height: 44px;
-  border: 0;
-  border-radius: 10px;
+  max-height: 44px;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 50%;
   background: transparent !important;
 }
 
 .panel-main .swatch::before {
   content: '';
-  width: 24px;
-  height: 24px;
+  display: block;
+  flex: 0 0 24px;
+  width: 24px !important;
+  min-width: 24px;
+  max-width: 24px;
+  height: 24px !important;
+  min-height: 24px;
+  max-height: 24px;
+  aspect-ratio: 1;
   border-radius: 50%;
   background: var(--swatch-color, currentColor);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);

@@ -25,6 +25,9 @@ check(foundation.includes('align-items: start'), 'editor grids must not stretch 
 check(foundation.includes('grid-auto-rows: max-content'), 'XP editor columns must size to their own content');
 check(foundation.includes('height: max-content'), 'XP editor cards must not inherit the taller column height');
 check(foundation.includes('aspect-ratio: 1.86 / 1'), 'XP preview needs a stable desktop aspect ratio');
+check(foundation.includes('flex: 0 0 44px'), 'XP color swatches must keep a square touch target');
+check(foundation.includes('aspect-ratio: 1;'), 'XP color swatches must keep a circular aspect ratio');
+check(foundation.includes('max-width: 44px'), 'XP color swatches must not be compressed by flex layout');
 check(foundation.includes('--panel-control-height: 44px'), 'interactive controls need a 44px minimum token');
 check(foundation.includes('.panel-sidebar .nav'), 'sidebar navigation must be scoped and touch friendly');
 check(foundation.includes('prefers-reduced-motion'), 'motion must have a reduced-motion fallback');
