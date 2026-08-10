@@ -302,6 +302,18 @@ textarea:focus-visible {
   align-items: start;
 }
 
+/* Keep each editor column at its own content height. CSS Grid otherwise
+ * stretches the preview card to match the taller settings column. */
+.panel-main .editor-grid.panel-editor-grid {
+  grid-auto-rows: max-content;
+}
+
+.panel-main .editor-grid.panel-editor-grid > .preview-panel,
+.panel-main .editor-grid.panel-editor-grid > .controls {
+  height: max-content;
+  min-height: 0;
+}
+
 .panel-main .preview-panel,
 .panel-main .controls {
   align-self: start;
