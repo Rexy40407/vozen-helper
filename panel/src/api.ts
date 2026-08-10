@@ -51,6 +51,37 @@ export type CustomCommand = {
   author_id?: string;
   created_at?: number;
 };
+export type WorkflowRecord = {
+  id: number;
+  guild_id?: string;
+  name: string;
+  trigger: string;
+  condition: string;
+  action: 'reply' | 'react' | string;
+  payload: string;
+  enabled: boolean;
+  created_at?: number;
+};
+export type LeaderboardEntry = {
+  rank: number;
+  userId: string;
+  xp: number;
+};
+export type ReminderRecord = {
+  id: number;
+  targetId: string;
+  channelId?: string | null;
+  text: string;
+  repeat?: string | null;
+  remaining?: number | null;
+  timezone?: string | null;
+  localTime?: string | null;
+  executeAt: number;
+  status: 'pending' | 'running' | 'dead' | string;
+  attempts: number;
+  leaseUntil?: number | null;
+  lastError?: string | null;
+};
 export type RolePanelRecord = {
   channel_id?: string;
   message_id: string;
@@ -382,6 +413,22 @@ export const api = {
       body: JSON.stringify({ guild_id: guildId }),
     }),
   stats: () => request<{ totalCases: number; guildId: string }>('/api/stats'),
+  leaderboard: () =>
+    request<{
+      guildId: string;
+      enabled: boolean;
+      public: boolean;
+      maxEntries: number;
+      entries: LeaderboardEntry[];
+    }>('/api/leaderboard'),
+  reminders: () =>
+    request<{ guildId: string; enabled: boolean; reminders: ReminderRecord[] }>(
+      '/api/reminders?limit=100',
+    ),
+  cancelReminder: (id: number) =>
+    request<{ ok: boolean; id: number }>(`/api/reminders/${id}`, { method: 'DELETE' }),
+  retryReminder: (id: number) =>
+    request<{ ok: boolean; id: number }>(`/api/reminders/${id}/retry`, { method: 'POST' }),
   cases: () => request<{ cases: CaseRecord[] }>('/api/cases?limit=8'),
   audit: () => request<{ events: AuditRecord[] }>('/api/audit?limit=12'),
   activity: () => request<{ activity: ActivityRecord[] }>('/api/activity?limit=24'),
@@ -398,6 +445,35 @@ export const api = {
       maxResponseLength: number;
       commands: CustomCommand[];
     }>('/api/custom-commands'),
+  workflows: () =>
+    request<{
+      guildId: string;
+      enabled: boolean;
+      planLimit: number;
+      maxWorkflows: number;
+      maxReplyLength: number;
+      workflows: WorkflowRecord[];
+    }>('/api/workflows'),
+  createWorkflow: (payload: {
+    name: string;
+    trigger: 'message';
+    condition?: string;
+    action: 'reply' | 'react';
+    payload: string;
+  }) =>
+    request<{ id: number }>('/api/workflows', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  updateWorkflow: (id: number, enabled: boolean) =>
+    request<{ ok: boolean; id: number; enabled: boolean }>(`/api/workflows/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    }),
+  deleteWorkflow: (id: number) =>
+    request<{ ok: boolean }>(`/api/workflows/${id}`, { method: 'DELETE' }),
   createCustomCommand: (name: string, content: string) =>
     request<{ command: CustomCommand }>('/api/custom-commands', {
       method: 'POST',

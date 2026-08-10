@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import {
   api,
   type ActivityRecord,
@@ -12,19 +12,23 @@ import {
   type ExternalSubscription,
   type Guild,
   type GuildContext,
+  type LeaderboardEntry,
   type Me,
   type QuickSetupState,
   type QuickSetupStepKey,
   type RankCardConfig,
+  type ReminderRecord,
   type RolePanelRecord,
   type RssSubscription,
   type RssSubscriptionHealth,
   type StudioTemplate,
   type TwitchSubscription,
   type TwitchSubscriptionHealth,
+  type WorkflowRecord,
   type YouTubeSubscription,
   type YouTubeSubscriptionHealth,
 } from './api';
+import { docsProviderStatusUrl, docsTroubleshootingUrl, docsUrlForFeature } from './docs';
 
 const defaultRankCard: RankCardConfig = {
   font: 'system',
@@ -779,6 +783,7 @@ const defaults: Record<string, FeatureConfig> = {
   'utility.emojis': {
     maxEntries: 50,
     animatedOnly: false,
+    allowManagement: false,
   },
   'utility.embeds': {
     maxDescription: 2000,
@@ -1623,10 +1628,16 @@ const spec = (key: string): SectionSpec[] => {
     'utility.emojis': [
       {
         title: 'Emoji inventory',
-        description: 'Choose how many custom emojis the staff command lists.',
+        description: 'List custom emojis safely, with optional staff-only rename and delete controls.',
         fields: [
           { key: 'maxEntries', label: 'Emojis shown', kind: 'number', min: 1, max: 100 },
           { key: 'animatedOnly', label: 'Only animated emojis', kind: 'toggle' },
+          {
+            key: 'allowManagement',
+            label: 'Allow staff to rename or delete emojis',
+            kind: 'toggle',
+            advanced: true,
+          },
         ],
       },
     ],
@@ -1990,6 +2001,13 @@ function App() {
     if (!window.location.hash) window.location.hash = '#/';
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+      document.querySelector<HTMLElement>('[data-route-heading]')?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [route.page, route.key]);
   useEffect(() => {
     if (localPreviewMode) {
       setMe({
@@ -2775,7 +2793,7 @@ function App() {
   }
   if (status === 'loading')
     return (
-      <div className="center">
+      <div className="center" role="status" aria-live="polite" aria-busy="true">
         <div className="loader" />
         <p>A preparar o teu espaço de trabalho…</p>
       </div>
@@ -2805,18 +2823,19 @@ function App() {
               ? 'Cria uma carta de nível com a identidade do teu servidor.'
               : 'Configuração por servidor, com opções simples e avançadas.';
   return (
-    <div className="shell">
-      <aside className="sidebar">
-        <div className="logo">
+    <div className="shell panel-shell">
+      <aside className="sidebar panel-sidebar">
+        <div className="logo panel-logo">
           <span>✦</span>
           <div>
             <strong>VOZEN</strong>
             <small>HELPER PANEL</small>
           </div>
         </div>
-        <div className="workspace">
+        <div className="workspace panel-workspace">
           <small>SERVIDOR ATUAL</small>
           <select
+            aria-label="Servidor atual"
             value={currentGuild?.id ?? ''}
             onChange={(event) => void switchGuild(event.target.value)}
           >
@@ -2828,14 +2847,20 @@ function App() {
           </select>
           <p>As alterações ficam isoladas neste servidor.</p>
         </div>
-        <nav aria-label="Navegação principal">
+        <nav className="panel-nav" aria-label="Navegação principal">
           {pages.map((item) => (
             <button
               key={item.id}
+              type="button"
               className={
                 route.page === item.id || (item.id === 'features' && route.page === 'detail')
                   ? 'nav active'
                   : 'nav'
+              }
+              aria-current={
+                route.page === item.id || (item.id === 'features' && route.page === 'detail')
+                  ? 'page'
+                  : undefined
               }
               onClick={() => navigate(item.id === 'overview' ? '#/' : `#/${item.id}`)}
             >
@@ -2851,11 +2876,11 @@ function App() {
           <i /> {localPreviewMode ? 'Pré-visualização local' : 'Sincronizado com Rust'}
         </div>
       </aside>
-      <main className="main">
-        <header>
+      <main className="main panel-main" aria-labelledby="route-heading">
+        <header className="panel-header">
           <div>
             <small className="eyebrow">{currentGuild?.name ?? 'WORKSPACE'} · HELPER</small>
-            <h1>{title}</h1>
+            <h1 id="route-heading" data-route-heading tabIndex={-1}>{title}</h1>
             <p className="subtitle">{subtitle}</p>
           </div>
           <div className="header-state">
@@ -2868,15 +2893,15 @@ function App() {
           </div>
         </header>
         {message && (
-          <div className="toast" role="status">
+          <div className="toast panel-toast" role="status">
             {message}
-            <button aria-label="Fechar" onClick={() => setMessage('')}>
+            <button type="button" aria-label="Fechar" onClick={() => setMessage('')}>
               ×
             </button>
           </div>
         )}
         {guildContext && !localPreviewMode && guildContext.stale && (
-          <div className="toast" role="status">
+          <div className="toast panel-toast" role="status">
             O contexto do Discord precisa de ser atualizado antes de publicar alterações.{' '}
             {guildContext.bot?.reason === 'discord_bot_member_unavailable'
               ? 'Não foi possível confirmar o cargo e as permissões do Helper.'
@@ -2941,6 +2966,7 @@ function App() {
               context={guildContext}
               config={detailConfig}
               enabled={detailEnabled}
+              revision={detailRevision}
               onEnabled={setDetailEnabled}
               onChange={(key, value) =>
                 setDetailConfig((current) => ({ ...current, [key]: value }))
@@ -3050,10 +3076,10 @@ function QuickSetup({
             </span>
           </div>
           <div className="actions">
-            <button className="secondary" onClick={onDismiss}>
+            <button type="button" className="secondary" onClick={onDismiss}>
               Agora não
             </button>
-            <button className="primary" onClick={() => setStarted(true)}>
+            <button type="button" className="primary" onClick={() => setStarted(true)}>
               Preparar servidor <span>→</span>
             </button>
           </div>
@@ -3106,7 +3132,7 @@ function QuickSetup({
                 text="Liga eventos do servidor a ações personalizadas."
               />
             </div>
-            <button className="secondary" onClick={() => onOpen('#/features')}>
+            <button type="button" className="secondary" onClick={() => onOpen('#/features')}>
               Ver todas as funcionalidades
             </button>
           </div>
@@ -3132,7 +3158,7 @@ function QuickSetup({
           <h2>Configura o essencial do servidor.</h2>
           <p>Aplicamos uma etapa de cada vez. Voltar não desfaz alterações já publicadas.</p>
         </div>
-        <button className="link-button" onClick={onDismiss}>
+          <button type="button" className="link-button" onClick={onDismiss}>
           Sair por agora
         </button>
       </div>
@@ -3140,6 +3166,7 @@ function QuickSetup({
         {quickSetupSteps.map((step, stepIndex) => (
           <button
             key={step.key}
+            type="button"
             className={
               stepIndex === index
                 ? 'progress-step active'
@@ -3233,6 +3260,7 @@ function QuickSetup({
                     ['languages', 'Idiomas'],
                   ].map(([id, label]) => (
                     <button
+                      type="button"
                       key={id}
                       className={currentConfig.template === id ? 'template selected' : 'template'}
                       onClick={() => patch('template', id)}
@@ -3391,10 +3419,10 @@ function QuickSetup({
             <small className="muted-note">{roles.length} cargos disponíveis para reutilizar.</small>
           )}
           <div className="sticky-actions">
-            <button className="secondary" onClick={() => void skip()} disabled={applying}>
+            <button type="button" className="secondary" onClick={() => void skip()} disabled={applying}>
               Saltar
             </button>
-            <button className="primary" onClick={() => void apply()} disabled={applying}>
+            <button type="button" className="primary" onClick={() => void apply()} disabled={applying}>
               {applying ? 'A aplicar…' : 'Confirmar e aplicar'}
             </button>
           </div>
@@ -3485,7 +3513,7 @@ function AuthScreen({
 }) {
   const visibleError = /unauthenticated|API 401/i.test(error) ? '' : error;
   return (
-    <main className="auth-shell">
+    <main className="auth-shell" aria-labelledby="auth-title">
       <div className="auth-brand">
         <span>✦</span>
         <div>
@@ -3496,9 +3524,15 @@ function AuthScreen({
       <section className="auth-card card">
         <div className="auth-icon">✦</div>
         <small className="eyebrow">ACESSO SEGURO</small>
-        <h1>Entra no teu painel</h1>
+        <h1 id="auth-title">Entra no teu painel</h1>
         <p>Usa a tua conta Discord para gerir o Helper e configurar os teus servidores.</p>
-        <button className="primary auth-button" onClick={onLogin} disabled={loading}>
+        <button
+          type="button"
+          className="primary auth-button"
+          onClick={onLogin}
+          disabled={loading}
+          aria-busy={loading}
+        >
           {loading ? 'A ligar ao Discord…' : 'Continuar com Discord'}
         </button>
         {visibleError && (
@@ -3538,12 +3572,12 @@ function Overview({
             Vê o que precisa de atenção e configura o Helper por etapas simples. Cada alteração fica
             ligada ao teu servidor.
           </p>
-          <button className="primary" onClick={() => onOpen('#/features')}>
+          <button type="button" className="primary" onClick={() => onOpen('#/features')}>
             Configurar o Helper
           </button>
         </div>
         <div className="setup-steps">
-          <button onClick={() => onOpen('#/config/protection.antispam')}>
+          <button type="button" onClick={() => onOpen('#/config/protection.antispam')}>
             <span>1</span>
             <div>
               <b>Proteger o servidor</b>
@@ -3551,7 +3585,7 @@ function Overview({
             </div>
             <em>›</em>
           </button>
-          <button onClick={() => onOpen('#/config/support.welcome')}>
+          <button type="button" onClick={() => onOpen('#/config/support.welcome')}>
             <span>2</span>
             <div>
               <b>Receber novos membros</b>
@@ -3559,7 +3593,7 @@ function Overview({
             </div>
             <em>›</em>
           </button>
-          <button onClick={() => onOpen('#/config/community.levels')}>
+          <button type="button" onClick={() => onOpen('#/config/community.levels')}>
             <span>3</span>
             <div>
               <b>Dar vida à comunidade</b>
@@ -3580,7 +3614,7 @@ function Overview({
           <small className="eyebrow">RECOMENDADO</small>
           <h2>O que queres fazer primeiro?</h2>
         </div>
-        <button className="link-button" onClick={() => onOpen('#/features')}>
+        <button type="button" className="link-button" onClick={() => onOpen('#/features')}>
           Ver tudo →
         </button>
       </section>
@@ -3667,7 +3701,7 @@ function Quick({
   onClick: () => void;
 }) {
   return (
-    <button className="quick card" onClick={onClick}>
+    <button type="button" className="quick card" onClick={onClick}>
       <span className="quick-icon">{icon}</span>
       <div>
         <h3>{title}</h3>
@@ -3732,6 +3766,7 @@ function FeatureCatalogue({
           onChange={(event) => setSearch(event.target.value)}
           placeholder="Pesquisar funcionalidade…"
           aria-label="Pesquisar funcionalidade"
+          autoComplete="off"
         />
       </div>
       <div className="feature-summary" aria-label="Estado do catálogo">
@@ -3757,7 +3792,9 @@ function FeatureCatalogue({
         {categories.map((category) => (
           <button
             key={category.id}
+            type="button"
             className={filter === category.id ? 'filter active' : 'filter'}
+            aria-pressed={filter === category.id}
             onClick={() => setFilter(category.id)}
           >
             {category.label}
@@ -3774,6 +3811,7 @@ function FeatureCatalogue({
           const canConfigure = configurable && maturity !== 'blocked';
           const healthStatus = feature.health?.status;
           const dependencies = feature.health?.dependencies ?? [];
+          const docsUrl = docsUrlForFeature(feature.key);
           const label =
             healthStatus === 'misconfigured'
               ? 'Verificar configuração'
@@ -3830,6 +3868,7 @@ function FeatureCatalogue({
                 </details>
               )}
               <button
+                type="button"
                 className="secondary full"
                 disabled={!canConfigure && maturity !== 'blocked'}
                 onClick={() => onOpen(feature.key)}
@@ -3840,8 +3879,13 @@ function FeatureCatalogue({
                     ? 'Configurar'
                     : maturity === 'blocked'
                       ? 'Ver requisitos'
-                      : 'Ver plano'}
+                    : 'Ver plano'}
               </button>
+              {docsUrl && (
+                <a className="link-button feature-doc-link" href={docsUrl} target="_blank" rel="noopener noreferrer">
+                  Learn how this works
+                </a>
+              )}
             </article>
           );
         })}
@@ -3859,6 +3903,7 @@ function FeatureDetail({
   context,
   config,
   enabled,
+  revision,
   onEnabled,
   onChange,
   onSave,
@@ -3876,6 +3921,7 @@ function FeatureDetail({
   context: GuildContext | null;
   config: FeatureConfig;
   enabled: boolean;
+  revision: number;
   onEnabled: (value: boolean) => void;
   onChange: (key: string, value: unknown) => void;
   onSave: () => void;
@@ -3904,10 +3950,11 @@ function FeatureDetail({
   // form that can only fail at publication time. Their detail page is a
   // requirements view until the backend reports a non-blocked maturity.
   const configurable = (feature?.configurable ?? true) && feature?.maturity !== 'blocked';
+  const docsUrl = docsUrlForFeature(feature?.key);
   if (!configurable)
     return (
       <section className="detail-page">
-        <button className="back-link" onClick={onBack}>
+        <button type="button" className="back-link" onClick={onBack}>
           ← Voltar às funcionalidades
         </button>
         <div className="detail-intro card">
@@ -3930,13 +3977,18 @@ function FeatureDetail({
               </div>
             )}
           </div>
+          {docsUrl && (
+            <a className="link-button" href={docsUrl} target="_blank" rel="noopener noreferrer">
+              Read the documentation
+            </a>
+          )}
         </div>
       </section>
     );
   if (!schema && !localPreviewMode)
     return (
       <section className="detail-page">
-        <button className="back-link" onClick={onBack}>
+        <button type="button" className="back-link" onClick={onBack}>
           ← Voltar às funcionalidades
         </button>
         <div className="detail-intro card">
@@ -3948,12 +4000,17 @@ function FeatureDetail({
               estado da API antes de publicar alterações.
             </p>
           </div>
+          {docsUrl && (
+            <a className="link-button" href={docsUrl} target="_blank" rel="noopener noreferrer">
+              Read the documentation
+            </a>
+          )}
         </div>
       </section>
     );
   return (
     <section className="detail-page">
-      <button className="back-link" onClick={onBack}>
+      <button type="button" className="back-link" onClick={onBack}>
         ← Voltar às funcionalidades
       </button>
       <div className="detail-intro card">
@@ -3980,6 +4037,11 @@ function FeatureDetail({
             onChange={(event) => onEnabled(event.target.checked)}
           />
         </label>
+        {docsUrl && (
+          <a className="link-button" href={docsUrl} target="_blank" rel="noopener noreferrer">
+            Learn how this works
+          </a>
+        )}
       </div>
       <div className="detail-layout">
         <div className="detail-sections">
@@ -3992,6 +4054,15 @@ function FeatureDetail({
           )}
           {feature?.key === 'management.custom_commands' && (
             <CustomCommandManager localPreviewMode={localPreviewMode} />
+          )}
+          {feature?.key === 'management.workflows' && (
+            <WorkflowManager enabled={enabled} localPreviewMode={localPreviewMode} />
+          )}
+          {feature?.key === 'community.leaderboard' && (
+            <LeaderboardPreview enabled={enabled} localPreviewMode={localPreviewMode} />
+          )}
+          {feature?.key === 'utility.reminders' && (
+            <RemindersManager enabled={enabled} localPreviewMode={localPreviewMode} />
           )}
           {feature?.key === 'community.role_panels' && (
             <RolePanelManager context={context} localPreviewMode={localPreviewMode} />
@@ -4015,7 +4086,7 @@ function FeatureDetail({
               membros.
             </p>
           </div>
-          <button className="secondary full" onClick={onTest}>
+          <button type="button" className="secondary full" onClick={onTest}>
             {feature?.key === 'social.youtube' ||
             feature?.key === 'social.twitch' ||
             feature?.key === 'social.rss' ||
@@ -4024,22 +4095,31 @@ function FeatureDetail({
               : 'Simular configuração'}
           </button>
           {providerHealth && <ProviderHealthPanel health={providerHealth} />}
-          {!localPreviewMode && feature?.health?.status && feature.health.status !== 'ready' && (
-            <button className="secondary full" onClick={onRepair} disabled={saving}>
-              Reparar publicação
-            </button>
-          )}
+          {!localPreviewMode &&
+            feature?.health?.status &&
+            feature.health.status !== 'ready' &&
+            revision > 0 && (
+              <button type="button" className="secondary full" onClick={onRepair} disabled={saving}>
+                Reparar publicação
+              </button>
+            )}
           <div className="tip">
             <b>Precisas de ajuda?</b>
+            <a className="link-button" href={docsTroubleshootingUrl('missing-permissions')} target="_blank" rel="noopener noreferrer">
+              Why is this permission needed?
+            </a>
+            <a className="link-button" href={docsTroubleshootingUrl('restore-configuration')} target="_blank" rel="noopener noreferrer">
+              Rollback instructions
+            </a>
             <span>Os campos avançados estão fechados para manter o primeiro passo simples.</span>
           </div>
         </aside>
       </div>
       <div className="sticky-actions">
-        <button className="secondary" onClick={onDiscard} disabled={saving}>
+        <button type="button" className="secondary" onClick={onDiscard} disabled={saving}>
           Descartar
         </button>
-        <button className="primary" onClick={onSave} disabled={saving}>
+        <button type="button" className="primary" onClick={onSave} disabled={saving}>
           {saving ? 'A guardar…' : 'Guardar alterações'}
         </button>
       </div>
@@ -4075,6 +4155,9 @@ function ProviderHealthPanel({ health }: { health: ProviderSubscriptionHealth })
       {source && <small>Ultima fonte: {source}</small>}
       {health.failureCount > 0 && <small>Falhas consecutivas: {health.failureCount}</small>}
       {health.lastError && <small className="provider-health-error">Ultimo erro: {health.lastError}</small>}
+      <a className="link-button" href={docsProviderStatusUrl()} target="_blank" rel="noopener noreferrer">
+        Provider status
+      </a>
     </div>
   );
 }
@@ -4178,6 +4261,7 @@ function TemplateManager({
         ))}
       </div>
       <button
+        type="button"
         className="secondary"
         onClick={() => void createTemplate()}
         disabled={localPreviewMode || busy || !name.trim()}
@@ -4191,6 +4275,7 @@ function TemplateManager({
             <div className="template-row" key={template.id}>
               <div><b>{template.name}</b><small>{template.description || 'No description'} · v{template.version}</small></div>
               <button
+                type="button"
                 className="ghost"
                 onClick={() => void removeTemplate(template.id)}
                 disabled={localPreviewMode || busy}
@@ -4329,10 +4414,10 @@ function CustomCommandManager({ localPreviewMode }: { localPreviewMode: boolean 
         </label>
       </div>
       <div className="inline-actions">
-        <button className="secondary" onClick={() => void saveCommand()} disabled={localPreviewMode || busy || !enabled || !name.trim() || !content.trim()}>
+        <button type="button" className="secondary" onClick={() => void saveCommand()} disabled={localPreviewMode || busy || !enabled || !name.trim() || !content.trim()}>
           {busy ? 'A guardar…' : editingName ? 'Guardar comando' : 'Adicionar comando'}
         </button>
-        {editingName && <button className="ghost" onClick={resetForm} disabled={busy}>Cancelar edição</button>}
+        {editingName && <button type="button" className="ghost" onClick={resetForm} disabled={busy}>Cancelar edição</button>}
         <small>{commands.length}/{limit} comandos usados</small>
       </div>
       {error && <p className="tip" role="alert">{error}</p>}
@@ -4343,8 +4428,383 @@ function CustomCommandManager({ localPreviewMode }: { localPreviewMode: boolean 
             <div className="template-row" key={command.name}>
               <div><b>{command.name}</b><small>{command.content}</small></div>
               <div className="inline-actions">
-                <button className="ghost" onClick={() => beginEdit(command)} disabled={busy}>Editar</button>
-                <button className="ghost" onClick={() => void removeCommand(command.name)} disabled={busy}>Apagar</button>
+                <button type="button" className="ghost" onClick={() => beginEdit(command)} disabled={busy}>Editar</button>
+                <button type="button" className="ghost" onClick={() => void removeCommand(command.name)} disabled={busy}>Apagar</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function LeaderboardPreview({
+  enabled,
+  localPreviewMode,
+}: {
+  enabled: boolean;
+  localPreviewMode: boolean;
+}) {
+  const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
+  const [maxEntries, setMaxEntries] = useState(10);
+  const [isPublic, setIsPublic] = useState(true);
+  const [loading, setLoading] = useState(!localPreviewMode);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (localPreviewMode) return;
+    let cancelled = false;
+    void api.leaderboard()
+      .then((result) => {
+        if (cancelled) return;
+        setEntries(result.entries);
+        setMaxEntries(result.maxEntries);
+        setIsPublic(result.public);
+      })
+      .catch((cause) => {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Could not load the leaderboard.');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [localPreviewMode]);
+
+  return (
+    <section className="config-section card">
+      <div className="section-heading">
+        <div>
+          <small className="eyebrow">XP COMMUNITY</small>
+          <h3>Leaderboard preview</h3>
+          <p>Preview the same opt-out-aware ranking that the Helper publishes with <code>/leaderboard</code>.</p>
+        </div>
+        <span className="status-pill">{isPublic ? 'Public' : 'Private'}</span>
+      </div>
+      {!localPreviewMode && !enabled && (
+        <p className="tip" role="status">Enable the XP leaderboard and save the settings to publish it in Discord.</p>
+      )}
+      {loading && <p className="tip" role="status">Loading the latest XP ranking…</p>}
+      {error && <p className="tip" role="alert">{error}</p>}
+      {!loading && enabled && entries.length === 0 && (
+        <p className="tip">No eligible XP data yet. Members can opt out with <code>/leaderboard-privacy</code>.</p>
+      )}
+      {entries.length > 0 && (
+        <div className="template-list" aria-label="XP leaderboard preview">
+          {entries.map((entry) => (
+            <div className="template-row" key={`${entry.userId}-${entry.rank}`}>
+              <div>
+                <b>#{entry.rank} · {entry.userId}</b>
+                <small>{entry.xp.toLocaleString()} XP</small>
+              </div>
+              <span className="status-pill">{entry.rank <= maxEntries ? 'Included' : 'Hidden'}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RemindersManager({
+  enabled,
+  localPreviewMode,
+}: {
+  enabled: boolean;
+  localPreviewMode: boolean;
+}) {
+  const [reminders, setReminders] = useState<ReminderRecord[]>([]);
+  const [loading, setLoading] = useState(!localPreviewMode);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (localPreviewMode) return;
+    let cancelled = false;
+    void api.reminders()
+      .then((result) => {
+        if (cancelled) return;
+        setReminders(result.reminders);
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          setError(cause instanceof Error ? cause.message : 'Could not load reminders.');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [localPreviewMode]);
+
+  async function cancel(id: number) {
+    if (localPreviewMode || busyAction !== null || !enabled) return;
+    setBusyAction(`cancel:${id}`);
+    setError('');
+    try {
+      await api.cancelReminder(id);
+      setReminders((current) => current.filter((reminder) => reminder.id !== id));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not cancel the reminder.');
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function retry(id: number) {
+    if (localPreviewMode || busyAction !== null || !enabled) return;
+    setBusyAction(`retry:${id}`);
+    setError('');
+    try {
+      await api.retryReminder(id);
+      setReminders((current) => current.map((reminder) => (
+        reminder.id === id
+          ? { ...reminder, status: 'pending', attempts: 0, lastError: null, leaseUntil: null, executeAt: Date.now() }
+          : reminder
+      )));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not retry the reminder.');
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  const statusCounts = reminders.reduce<Record<string, number>>((counts, reminder) => {
+    counts[reminder.status] = (counts[reminder.status] ?? 0) + 1;
+    return counts;
+  }, {});
+
+  return (
+    <section className="config-section card">
+      <div className="section-heading">
+        <div>
+          <small className="eyebrow">SCHEDULED ACTIONS</small>
+          <h3>Pending reminders</h3>
+          <p>See reminders created with <code>/remind</code> and cancel them before they are sent.</p>
+        </div>
+        <span className="status-pill">
+          {reminders.length} scheduled
+          {statusCounts.dead ? ` · ${statusCounts.dead} failed` : ''}
+        </span>
+      </div>
+      {!localPreviewMode && !enabled && (
+        <p className="tip" role="status">Enable reminders and save the policy before scheduling new messages.</p>
+      )}
+      {loading && <p className="tip" role="status">Loading scheduled reminders…</p>}
+      {error && <p className="tip" role="alert">{error}</p>}
+      {!loading && reminders.length === 0 && (
+        <p className="tip">No pending reminders. Members can create one with <code>/remind</code> in Discord.</p>
+      )}
+      {reminders.length > 0 && (
+        <div className="template-list" aria-label="Pending reminders">
+          {reminders.map((reminder) => (
+            <div className="template-row" key={reminder.id}>
+              <div>
+                <b>#{reminder.id} · {new Date(reminder.executeAt).toLocaleString()}</b>
+                <small>
+                  {reminder.text || 'Reminder'}
+                  {reminder.repeat ? ` · repeats ${reminder.repeat}${reminder.remaining == null ? '' : ` (${reminder.remaining} left)`}` : ''}
+                  {reminder.timezone ? ` · ${reminder.timezone}` : ''}
+                </small>
+                <span className={`status-pill reminder-status-${reminder.status}`}>
+                  {reminder.status === 'dead' ? 'Failed — retry required' : reminder.status}
+                  {reminder.attempts > 0 ? ` · ${reminder.attempts} attempt${reminder.attempts === 1 ? '' : 's'}` : ''}
+                </span>
+                {reminder.lastError ? <small className="tip">{reminder.lastError}</small> : null}
+              </div>
+              <div className="button-row">
+                {reminder.status === 'dead' && (
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => void retry(reminder.id)}
+                    disabled={localPreviewMode || !enabled || busyAction !== null}
+                  >
+                    {busyAction === `retry:${reminder.id}` ? 'Retrying...' : 'Retry now'}
+                  </button>
+                )}
+                <button
+                type="button"
+                className="ghost"
+                onClick={() => void cancel(reminder.id)}
+                disabled={localPreviewMode || !enabled || busyAction !== null}
+              >
+                {busyAction === `cancel:${reminder.id}` ? 'Cancelling...' : 'Cancel'}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function WorkflowManager({
+  enabled,
+  localPreviewMode,
+}: {
+  enabled: boolean;
+  localPreviewMode: boolean;
+}) {
+  const [workflows, setWorkflows] = useState<WorkflowRecord[]>([]);
+  const [limit, setLimit] = useState(10);
+  const [maxReplyLength, setMaxReplyLength] = useState(1000);
+  const [name, setName] = useState('');
+  const [condition, setCondition] = useState('');
+  const [action, setAction] = useState<'reply' | 'react'>('reply');
+  const [payload, setPayload] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(!localPreviewMode);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (localPreviewMode) return;
+    let cancelled = false;
+    void api.workflows()
+      .then((result) => {
+        if (cancelled) return;
+        setWorkflows(result.workflows);
+        setLimit(result.maxWorkflows);
+        setMaxReplyLength(result.maxReplyLength);
+      })
+      .catch((cause) => {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Could not load workflows.');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [localPreviewMode]);
+
+  async function create() {
+    const trimmedName = name.trim();
+    const trimmedCondition = condition.trim();
+    const trimmedPayload = payload.trim();
+    if (localPreviewMode || busy || !enabled || !trimmedName || !trimmedPayload) return;
+    if (action === 'reply' && trimmedPayload.length > maxReplyLength) {
+      setError(`Reply must be ${maxReplyLength} characters or fewer.`);
+      return;
+    }
+    if (action === 'react' && (trimmedPayload.length > 16 || /[<>]/.test(trimmedPayload))) {
+      setError('Reactions use one Unicode emoji or a short safe token (maximum 16 characters).');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const result = await api.createWorkflow({
+        name: trimmedName,
+        trigger: 'message',
+        condition: trimmedCondition || undefined,
+        action,
+        payload: trimmedPayload,
+      });
+      setWorkflows((current) => [
+        {
+          id: result.id,
+          name: trimmedName,
+          trigger: 'message',
+          condition: trimmedCondition,
+          action,
+          payload: trimmedPayload,
+          enabled: true,
+        },
+        ...current,
+      ]);
+      setName('');
+      setCondition('');
+      setPayload('');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not create the workflow.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggle(workflow: WorkflowRecord) {
+    if (localPreviewMode || busy || !enabled) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api.updateWorkflow(workflow.id, !workflow.enabled);
+      setWorkflows((current) => current.map((item) =>
+        item.id === workflow.id ? { ...item, enabled: !item.enabled } : item,
+      ));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not update the workflow.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(workflow: WorkflowRecord) {
+    if (localPreviewMode || busy || !enabled) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api.deleteWorkflow(workflow.id);
+      setWorkflows((current) => current.filter((item) => item.id !== workflow.id));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not delete the workflow.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="config-section card">
+      <div className="section-heading">
+        <div>
+          <small className="eyebrow">AUTOMAÇÕES REAIS</small>
+          <h3>Workflow builder</h3>
+          <p>Cria regras seguras de mensagem: quando o texto contém uma condição, o Helper responde ou adiciona uma reação.</p>
+        </div>
+      </div>
+      {!localPreviewMode && !enabled && (
+        <p className="tip" role="status">Ativa esta funcionalidade e guarda as alterações acima para gerir automações.</p>
+      )}
+      {loading && <p className="tip" role="status">A carregar automações deste servidor…</p>}
+      <div className="field-grid">
+        <label className="field">
+          <span><b>Nome</b><small>Um nome curto para encontrares a regra.</small></span>
+          <input value={name} maxLength={50} disabled={localPreviewMode || busy || !enabled} onChange={(event) => setName(event.target.value)} placeholder="welcome-reply" />
+        </label>
+        <label className="field">
+          <span><b>Quando a mensagem contém</b><small>Texto simples, sem código executável.</small></span>
+          <input value={condition} maxLength={200} disabled={localPreviewMode || busy || !enabled} onChange={(event) => setCondition(event.target.value)} placeholder="regras" />
+        </label>
+        <label className="field">
+          <span><b>Ação</b><small>As ações são limitadas para evitar loops e spam.</small></span>
+          <select value={action} disabled={localPreviewMode || busy || !enabled} onChange={(event) => setAction(event.target.value as 'reply' | 'react')}>
+            <option value="reply">Responder à mensagem</option>
+            <option value="react">Adicionar reação</option>
+          </select>
+        </label>
+        <label className="field">
+          <span><b>{action === 'reply' ? 'Resposta' : 'Emoji/reação'}</b><small>{action === 'reply' ? `Até ${maxReplyLength} caracteres.` : 'Emoji Unicode, até 16 caracteres; emojis personalizados ficam bloqueados por segurança.'}</small></span>
+          <textarea value={payload} maxLength={action === 'reply' ? maxReplyLength : 16} rows={2} disabled={localPreviewMode || busy || !enabled} onChange={(event) => setPayload(event.target.value)} placeholder={action === 'reply' ? 'Consulta #regras para conhecer as regras.' : '✅'} />
+        </label>
+      </div>
+      <div className="inline-actions">
+        <button type="button" className="secondary" onClick={() => void create()} disabled={localPreviewMode || busy || !enabled || !name.trim() || !payload.trim()}>
+          {busy ? 'A guardar…' : 'Adicionar automação'}
+        </button>
+        <small>{workflows.length}/{limit} automações usadas</small>
+      </div>
+      {error && <p className="tip" role="alert">{error}</p>}
+      {!localPreviewMode && !loading && workflows.length === 0 && <p className="tip">Ainda não existem automações. Adiciona a primeira acima.</p>}
+      {workflows.length > 0 && (
+        <div className="template-list" aria-label="Workflows do servidor">
+          {workflows.map((workflow) => (
+            <div className="template-row" key={workflow.id}>
+              <div>
+                <b>{workflow.name}</b>
+                <small>Quando contém “{workflow.condition || 'qualquer texto'}” · {workflow.action === 'react' ? `reage com ${workflow.payload}` : `responde: ${workflow.payload}`}</small>
+              </div>
+              <div className="inline-actions">
+                <button type="button" className="ghost" onClick={() => void toggle(workflow)} disabled={busy || localPreviewMode || !enabled}>{workflow.enabled ? 'Desativar' : 'Ativar'}</button>
+                <button type="button" className="ghost" onClick={() => void remove(workflow)} disabled={busy || localPreviewMode || !enabled}>Apagar</button>
               </div>
             </div>
           ))}
@@ -4443,8 +4903,8 @@ function RolePanelManager({
                 </small>
               </div>
               <div className="inline-actions">
-                <button className="ghost" onClick={() => void repair(panel.message_id)} disabled={busy}>Repair</button>
-                <button className="ghost" onClick={() => void remove(panel.message_id)} disabled={busy}>Delete</button>
+                <button type="button" className="ghost" onClick={() => void repair(panel.message_id)} disabled={busy}>Repair</button>
+                <button type="button" className="ghost" onClick={() => void remove(panel.message_id)} disabled={busy}>Delete</button>
               </div>
             </div>
           ))}
@@ -4731,8 +5191,8 @@ function RankCardEditor({
   saving: boolean;
 }) {
   return (
-    <section className="editor-grid">
-      <div className="card preview-panel">
+    <section className="editor-grid panel-editor-grid">
+      <div className="card preview-panel panel-preview-panel">
         <div className="card-title">
           <div>
             <small className="eyebrow">PRÉ-VISUALIZAÇÃO AO VIVO</small>
@@ -4742,7 +5202,7 @@ function RankCardEditor({
         </div>
         <RankPreview config={config} />
       </div>
-      <div className="card controls">
+      <div className="card controls panel-controls">
         <div className="card-title">
           <div>
             <small className="eyebrow">EDITOR SEGURO</small>
@@ -4785,11 +5245,11 @@ function RankCardEditor({
           />
         </label>
         <BackgroundPicker config={config} patch={patch} />
-        <div className="actions">
-          <button className="secondary" onClick={onReset}>
+        <div className="actions rank-actions">
+          <button type="button" className="secondary" onClick={onReset}>
             Restaurar
           </button>
-          <button className="primary" onClick={onSave} disabled={saving}>
+          <button type="button" className="primary" onClick={onSave} disabled={saving}>
             {saving ? 'A guardar…' : 'Guardar alterações'}
           </button>
         </div>
@@ -4887,10 +5347,11 @@ function ColorField({
         {colors.map((color) => (
           <button
             type="button"
-            aria-label={color}
+            aria-label={`${label}: ${color}`}
+            title={color}
             key={color}
             className={color.toLowerCase() === value.toLowerCase() ? 'swatch selected' : 'swatch'}
-            style={{ background: color }}
+            style={{ '--swatch-color': color } as CSSProperties}
             onClick={() => onChange(color)}
           />
         ))}

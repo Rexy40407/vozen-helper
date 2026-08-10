@@ -1,0 +1,636 @@
+/* Vozen Helper visual foundation.
+ * This file is intentionally scoped to the application shell and its page
+ * primitives. The legacy stylesheet remains loaded during the migration, but
+ * every new rule below wins without changing a public route or API contract.
+ */
+@font-face {
+  font-family: 'Vozen Outfit';
+  src: url('../fonts/vozen-outfit-400-ext.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+0100-024F, U+1E00-1EFF, U+20A0-20AB, U+20AD-20CF, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: 'Vozen Outfit';
+  src: url('../fonts/vozen-outfit-400.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Vozen Mono';
+  src: url('../fonts/vozen-jetbrains-mono-400.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+/* The legacy stylesheet still names these families in a few page-specific
+ * rules. Keep those names local so CSP never falls back to a blocked remote
+ * Google font. The Vozen Outfit cut is deliberately used as the visual
+ * fallback while the component migration is completed. */
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('../fonts/vozen-outfit-400.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'DM Sans';
+  src: url('../fonts/vozen-outfit-400.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+  --panel-bg: #070b12;
+  --panel-surface: #101a2a;
+  --panel-surface-raised: #152238;
+  --panel-border: #2b3d59;
+  --panel-border-strong: #3c587d;
+  --panel-copy: #f3f7ff;
+  --panel-copy-muted: #a5b5cf;
+  --panel-copy-subtle: #7f91ad;
+  --panel-accent: #8ee5d2;
+  --panel-accent-blue: #82a5ff;
+  --panel-danger: #ff9ab5;
+  --panel-warning: #f1cb85;
+  --panel-radius: 14px;
+  --panel-control-height: 44px;
+  --panel-focus: 0 0 0 3px color-mix(in srgb, var(--panel-accent) 28%, transparent);
+}
+
+html {
+  min-width: 320px;
+  scroll-behavior: auto;
+}
+
+body {
+  min-width: 320px;
+  overflow-x: hidden;
+  color: var(--panel-copy);
+  font-family: 'Vozen Outfit', 'Segoe UI', system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+button,
+select,
+input[type='checkbox'],
+input[type='radio'],
+input[type='color'] {
+  min-height: var(--panel-control-height);
+}
+
+button {
+  touch-action: manipulation;
+}
+
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible,
+select:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--panel-accent);
+  outline-offset: 2px;
+  box-shadow: var(--panel-focus);
+}
+
+.panel-shell {
+  grid-template-columns: 248px minmax(0, 1fr);
+  min-width: 0;
+  min-height: 100dvh;
+}
+
+.panel-sidebar {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  border-right-color: color-mix(in srgb, var(--panel-border) 75%, transparent);
+}
+
+.panel-sidebar .nav,
+.panel-sidebar select {
+  min-height: var(--panel-control-height);
+}
+
+.panel-logo strong,
+.panel-header h1,
+.panel-main h2,
+.panel-main h3,
+.panel-main h4 {
+  font-family: 'Vozen Outfit', 'Segoe UI', system-ui, sans-serif;
+  font-synthesis: weight;
+}
+
+.panel-main {
+  min-width: 0;
+  width: 100%;
+  max-width: 1440px;
+  padding: clamp(28px, 4vw, 56px) clamp(18px, 5vw, 76px) 100px;
+}
+
+.panel-header {
+  min-width: 0;
+  margin-bottom: clamp(25px, 3vw, 38px);
+}
+
+.panel-header > div:first-child {
+  min-width: 0;
+}
+
+.panel-header h1 {
+  max-width: 22ch;
+  color: var(--panel-copy);
+  font-size: clamp(30px, 3vw, 45px);
+  line-height: 1.08;
+  letter-spacing: -0.035em;
+  overflow-wrap: anywhere;
+}
+
+.panel-header .subtitle {
+  max-width: 70ch;
+  color: var(--panel-copy-muted);
+  font-size: 15px;
+}
+
+.panel-header [data-route-heading] {
+  scroll-margin-top: 24px;
+}
+
+.panel-main .card {
+  border-radius: var(--panel-radius);
+  border-color: var(--panel-border);
+  background: linear-gradient(145deg, rgba(19, 31, 50, 0.98), rgba(12, 21, 35, 0.98));
+}
+
+.panel-main .card,
+.panel-main .config-section,
+.panel-main .feature,
+.panel-main .quick,
+.panel-main .metric {
+  min-width: 0;
+}
+
+.panel-main .feature-grid,
+.panel-main .quick-grid,
+.panel-main .metrics,
+.panel-main .field-grid,
+.panel-main .detail-layout,
+.panel-main .editor-grid {
+  min-width: 0;
+}
+
+.panel-main .feature-grid {
+  grid-auto-rows: minmax(0, auto);
+}
+
+.panel-main .feature-grid,
+.panel-main .quick-grid,
+.panel-main .metrics,
+.panel-main .field-grid {
+  align-items: start;
+}
+
+.panel-main .controls label,
+.panel-main .field-label {
+  font-size: 13px;
+}
+
+.panel-main .feature {
+  min-height: 0;
+}
+
+.panel-main .feature h3,
+.panel-main .section-heading h2,
+.panel-main .section-heading h3,
+.panel-main .detail-intro h2,
+.panel-main .card-title h2 {
+  overflow-wrap: anywhere;
+}
+
+.panel-main .feature p,
+.panel-main .card-title p,
+.panel-main .detail-intro p,
+.panel-main .field small,
+.panel-main .tip span {
+  font-size: 13px;
+}
+
+.panel-main .nav,
+.panel-main .filter,
+.panel-main .link-button,
+.panel-main .back-link,
+.panel-main .ghost,
+.panel-main .primary,
+.panel-main .secondary,
+.panel-main .mode,
+.panel-main .banner-option {
+  min-height: var(--panel-control-height);
+}
+
+.panel-main .toast button,
+.panel-main .actions > button,
+.panel-main .inline-actions > button,
+.panel-main .template-row .ghost {
+  min-width: var(--panel-control-height);
+  min-height: var(--panel-control-height);
+}
+
+.panel-main .filters {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.panel-main .search,
+.panel-main .field input,
+.panel-main .field select,
+.panel-main .field textarea,
+.panel-main .controls select {
+  min-height: var(--panel-control-height);
+}
+
+.panel-main .table {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.panel-main .table-head,
+.panel-main .table-row {
+  min-width: 640px;
+}
+
+.panel-main .toast {
+  right: max(18px, env(safe-area-inset-right));
+  bottom: max(18px, env(safe-area-inset-bottom));
+  max-width: min(520px, calc(100vw - 36px));
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.panel-main .sticky-actions {
+  bottom: max(0px, env(safe-area-inset-bottom));
+  padding-bottom: max(0px, env(safe-area-inset-bottom));
+  margin-inline: -2px;
+}
+
+.panel-main .sticky-actions > * {
+  min-width: 120px;
+}
+
+/* The editor and preview are independent columns. The preview must not be
+ * stretched to match a tall controls column. */
+.panel-main .editor-grid {
+  align-items: start;
+}
+
+.panel-main .preview-panel,
+.panel-main .controls {
+  align-self: start;
+}
+
+.panel-main .preview-panel {
+  min-height: 0;
+}
+
+.panel-main .controls {
+  min-height: 0;
+  max-height: none;
+}
+
+.panel-main .rank-preview {
+  min-height: 0;
+  aspect-ratio: 1.86 / 1;
+  max-height: 390px;
+  overflow: hidden;
+}
+
+.panel-main .rank-preview,
+.panel-main .rank-preview * {
+  min-width: 0;
+}
+
+.panel-main .rank-content p,
+.panel-main .rank-top strong,
+.panel-main .rank-top div {
+  overflow-wrap: anywhere;
+}
+
+.panel-main .rank-actions {
+  position: static;
+  min-height: var(--panel-control-height);
+  margin-top: auto;
+  padding-top: 18px;
+}
+
+.panel-main .rank-actions > button {
+  min-width: 132px;
+}
+
+.panel-main .color-field {
+  min-width: 0;
+}
+
+.panel-main .swatches {
+  align-items: center;
+  gap: 4px;
+}
+
+.panel-main .swatch {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent !important;
+}
+
+.panel-main .swatch::before {
+  content: '';
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--swatch-color, currentColor);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
+}
+
+.panel-main .swatch.selected {
+  border: 2px solid var(--panel-accent);
+  outline: 0;
+  background: rgba(142, 229, 210, 0.12) !important;
+}
+
+.panel-main .swatch.selected::before {
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.82);
+}
+
+.panel-main .controls input[type='range'] {
+  min-height: 44px;
+  padding-block: 12px;
+}
+
+.panel-main .controls input[type='color'] {
+  width: 44px;
+  height: 44px;
+}
+
+.panel-main .field-label input[type='color'] {
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+}
+
+/* Auth and global states remain usable when the mobile keyboard or landscape
+ * viewport reduces the available height. */
+.auth-shell {
+  min-height: 100dvh;
+  padding: max(24px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left));
+}
+
+.auth-card {
+  max-height: calc(100dvh - 48px);
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.auth-button {
+  min-height: var(--panel-control-height);
+}
+
+@media (min-width: 1101px) {
+  .panel-main .controls {
+    position: sticky;
+    top: 20px;
+    max-height: calc(100dvh - 40px);
+    overflow: auto;
+    scrollbar-gutter: stable;
+  }
+}
+
+@media (min-width: 721px) {
+  .panel-sidebar {
+    position: sticky;
+    top: 0;
+    height: 100dvh;
+    max-height: 100dvh;
+  }
+}
+
+@media (max-width: 1100px) {
+  .panel-shell {
+    grid-template-columns: 208px minmax(0, 1fr);
+  }
+
+  .panel-main {
+    padding-inline: clamp(20px, 3vw, 42px);
+  }
+
+  .panel-main .rank-preview {
+    aspect-ratio: 1.72 / 1;
+  }
+
+  .panel-main .feature-grid,
+  .panel-main .quick-grid,
+  .panel-main .metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .panel-main .editor-grid,
+  .panel-main .detail-layout,
+  .panel-main .quick-setup-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .panel-main .controls,
+  .panel-main .detail-aside,
+  .panel-main .quick-setup-aside {
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
+}
+
+@media (max-width: 720px) {
+  body {
+    font-size: 14px;
+  }
+
+  .panel-shell {
+    display: block;
+  }
+
+  .panel-sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .panel-sidebar .panel-nav {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding: 2px 2px 4px;
+    scrollbar-width: thin;
+  }
+
+  .panel-sidebar .panel-nav .nav {
+    flex: 0 0 auto;
+    padding-inline: 12px;
+  }
+
+  .panel-sidebar .panel-nav .nav small {
+    display: none;
+  }
+
+  .panel-sidebar .panel-nav {
+    scrollbar-width: thin;
+  }
+
+  .panel-sidebar .nav {
+    min-height: 44px;
+  }
+
+  .panel-main {
+    padding: 24px 16px max(72px, calc(48px + env(safe-area-inset-bottom)));
+  }
+
+  .panel-header {
+    display: block;
+  }
+
+  .panel-header h1 {
+    max-width: none;
+    font-size: clamp(28px, 9vw, 36px);
+  }
+
+  .panel-main .rank-preview {
+    aspect-ratio: auto;
+    min-height: 268px;
+    max-height: none;
+    padding: 25px 18px;
+  }
+
+  .panel-main .feature-grid,
+  .panel-main .quick-grid,
+  .panel-main .metrics,
+  .panel-main .field-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .panel-main .catalog-toolbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .panel-main .rank-avatar {
+    width: 84px;
+    height: 84px;
+  }
+
+  .panel-main .rank-top {
+    display: block;
+  }
+
+  .panel-main .rank-top div {
+    margin-top: 7px;
+  }
+
+  .panel-main .rank-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .panel-main .rank-actions button {
+    width: 100%;
+  }
+
+  .panel-main .sticky-actions {
+    margin-inline: 0;
+    padding-top: 14px;
+  }
+
+  .panel-main .sticky-actions > * {
+    width: 100%;
+  }
+
+  .panel-main .table {
+    margin-inline: -1px;
+  }
+
+  .panel-main .table-head,
+  .panel-main .table-row {
+    min-width: 580px;
+  }
+
+  .panel-main .toast {
+    left: 16px;
+    right: 16px;
+    max-width: none;
+  }
+
+  .auth-shell {
+    place-items: start center;
+    padding-top: max(88px, calc(24px + env(safe-area-inset-top)));
+  }
+
+  .auth-brand {
+    top: max(18px, env(safe-area-inset-top));
+    left: max(18px, env(safe-area-inset-left));
+  }
+
+  .auth-card {
+    max-height: none;
+    padding: 28px 22px;
+  }
+}
+
+@media (max-width: 420px) {
+  .panel-main .metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .panel-main .rank-preview {
+    display: grid;
+    grid-template-columns: 1fr;
+    justify-items: center;
+    text-align: center;
+  }
+
+  .panel-main .rank-top div,
+  .panel-main .xp-meta {
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
