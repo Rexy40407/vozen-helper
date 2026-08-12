@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
                     oauth_client_secret: config.oauth_client_secret.clone(),
                     oauth_redirect_uri: config.oauth_redirect_uri.clone(),
                     oauth_success_redirect: config.oauth_success_redirect.clone(),
+                    trusted_vozen_oauth_client_id: config.trusted_vozen_oauth_client_id.clone(),
                     private_tracker_client_id: config.private_tracker_client_id.clone(),
                     private_tracker_owner_id: config.private_tracker_owner_id.clone(),
                     allow_legacy_session: config.allow_legacy_session,

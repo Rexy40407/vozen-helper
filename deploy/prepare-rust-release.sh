@@ -3,6 +3,7 @@ set -euo pipefail
 
 version="${1:?release version required}"
 oauth_secret="${DISCORD_OAUTH_CLIENT_SECRET:?set DISCORD_OAUTH_CLIENT_SECRET to the real Discord application secret}"
+vozen_oauth_client_id="${VOZEN_OAUTH_CLIENT_ID:-1523826014935842997}"
 private_tracker_client_id="${HELPER_PRIVATE_TRACKER_CLIENT_ID:-}"
 private_tracker_owner_id="${HELPER_PRIVATE_TRACKER_OWNER_ID:-}"
 root=/home/vozen/vozen-helper-rust
@@ -19,6 +20,7 @@ sed -i \
   -e '/^DISCORD_OAUTH_CLIENT_SECRET=/d' \
   -e '/^DISCORD_OAUTH_REDIRECT_URI=/d' \
   -e '/^HELPER_OAUTH_SUCCESS_REDIRECT=/d' \
+  -e '/^VOZEN_OAUTH_CLIENT_ID=/d' \
   -e '/^HELPER_PRIVATE_TRACKER_CLIENT_ID=/d' \
   -e '/^HELPER_PRIVATE_TRACKER_OWNER_ID=/d' \
   -e '/^HELPER_DATABASE_URL=/d' \
@@ -37,6 +39,7 @@ printf 'DISCORD_OAUTH_CLIENT_ID=%s\n' "$client_id" >> "$root/shared/.env"
 printf 'DISCORD_OAUTH_CLIENT_SECRET=%s\n' "$oauth_secret" >> "$root/shared/.env"
 printf 'DISCORD_OAUTH_REDIRECT_URI=https://api.vozen.org/rust/api/oauth/callback\n' >> "$root/shared/.env"
 printf 'HELPER_OAUTH_SUCCESS_REDIRECT=https://vozen.org/panel/helper-tracker/\n' >> "$root/shared/.env"
+printf 'VOZEN_OAUTH_CLIENT_ID=%s\n' "$vozen_oauth_client_id" >> "$root/shared/.env"
 printf 'HELPER_DATABASE_URL=%s/vozen-helper.db\n' "$node_root" >> "$root/shared/.env"
 printf 'HELPER_BIND_ADDR=127.0.0.1:8788\n' >> "$root/shared/.env"
 printf 'HELPER_SESSION_SECRET=%s\n' "$(openssl rand -hex 32)" >> "$root/shared/.env"

@@ -18,6 +18,7 @@ pub struct Config {
     pub oauth_client_secret: String,
     pub oauth_redirect_uri: String,
     pub oauth_success_redirect: String,
+    pub trusted_vozen_oauth_client_id: Option<String>,
     pub private_tracker_client_id: Option<String>,
     pub private_tracker_owner_id: Option<String>,
     pub allow_legacy_session: bool,
@@ -54,6 +55,7 @@ impl Config {
             oauth_redirect_uri: required("DISCORD_OAUTH_REDIRECT_URI")?,
             oauth_success_redirect: env::var("HELPER_OAUTH_SUCCESS_REDIRECT")
                 .unwrap_or_else(|_| "https://vozen.org/panel/helper-tracker/".into()),
+            trusted_vozen_oauth_client_id: optional_env("VOZEN_OAUTH_CLIENT_ID"),
             private_tracker_client_id: optional_env("HELPER_PRIVATE_TRACKER_CLIENT_ID"),
             private_tracker_owner_id: optional_env("HELPER_PRIVATE_TRACKER_OWNER_ID"),
             allow_legacy_session: env::var("HELPER_ALLOW_LEGACY_SESSION")

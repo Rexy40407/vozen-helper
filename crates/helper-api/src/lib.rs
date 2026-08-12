@@ -61,6 +61,7 @@ pub struct ApiState {
     pub oauth_client_secret: String,
     pub oauth_redirect_uri: String,
     pub oauth_success_redirect: String,
+    pub trusted_vozen_oauth_client_id: Option<String>,
     pub private_tracker_client_id: Option<String>,
     pub private_tracker_owner_id: Option<String>,
     pub allow_legacy_session: bool,
@@ -95,6 +96,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/health", get(health))
         .route("/api/v1/health", get(health))
         .route("/api/session", post(create_session))
+        .route("/api/session/vozen", post(create_vozen_account_session))
         .route(
             "/api/admin/private-tracker/session",
             post(create_private_tracker_session),
@@ -4526,8 +4528,22 @@ pub struct SessionRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct VozenAccountSessionRequest {
+    token: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct PrivateTrackerSessionRequest {
     token: String,
+}
+#[derive(Debug, Deserialize)]
+struct DiscordOAuthIdentity {
+    application: DiscordOAuthApplication,
+    scopes: Vec<String>,
+}
+#[derive(Debug, Deserialize)]
+struct DiscordOAuthApplication {
+    id: String,
 }
 #[derive(Debug, Deserialize, Serialize)]
 struct DiscordUser {
@@ -4547,6 +4563,92 @@ struct SessionResponse {
     user: DiscordUser,
     token: String,
     expires_at: String,
+}
+
+/// Exchanges the already authenticated first-party Vozen account for a
+/// short-lived Helper session. The Discord token is accepted only from
+/// `https://vozen.org`, verified against the configured Vozen OAuth app, and
+/// never returned to the browser or placed in a URL.
+async fn create_vozen_account_session(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(request): Json<VozenAccountSessionRequest>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    let expected_client_id = state
+        .trusted_vozen_oauth_client_id
+        .as_deref()
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "vozen_account_bridge_unavailable"))?;
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok());
+    if origin != Some("https://vozen.org") {
+        return Err(client_error(StatusCode::FORBIDDEN, "csrf_origin_invalid"));
+    }
+
+    let token = request.token.trim();
+    if !valid_discord_oauth_token(token) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "invalid_token"));
+    }
+
+    let identity = Client::new()
+        .get("https://discord.com/api/v10/oauth2/@me")
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_unreachable"))?;
+    if !identity.status().is_success() {
+        return Err(client_error(StatusCode::UNAUTHORIZED, "invalid_token"));
+    }
+    let identity: DiscordOAuthIdentity = identity
+        .json()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "invalid_discord_response"))?;
+    if !is_trusted_vozen_account_identity(
+        expected_client_id,
+        &identity.application.id,
+        &identity.scopes,
+    ) {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            "vozen_account_scope_missing",
+        ));
+    }
+
+    let session = create_session_inner(
+        State(state),
+        headers,
+        Json(SessionRequest {
+            token: token.to_owned(),
+            guild_id: String::new(),
+        }),
+    )
+    .await?;
+    let cookie = session
+        .headers()
+        .get(header::SET_COOKIE)
+        .cloned()
+        .ok_or_else(|| client_error(StatusCode::INTERNAL_SERVER_ERROR, "session_cookie_missing"))?;
+    let mut response = Json(serde_json::json!({ "ok": true })).into_response();
+    response.headers_mut().append(header::SET_COOKIE, cookie);
+    Ok(response)
+}
+
+pub fn is_trusted_vozen_account_identity(
+    expected_client_id: &str,
+    received_client_id: &str,
+    scopes: &[String],
+) -> bool {
+    !expected_client_id.is_empty()
+        && expected_client_id == received_client_id
+        && scopes.iter().any(|scope| scope == "identify")
+        && scopes.iter().any(|scope| scope == "guilds")
+}
+
+fn valid_discord_oauth_token(token: &str) -> bool {
+    (20..=4096).contains(&token.len())
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'~'))
 }
 
 async fn create_private_tracker_session(
@@ -11189,6 +11291,7 @@ mod tests {
             oauth_client_secret: "secret".into(),
             oauth_redirect_uri: "https://example.test/callback".into(),
             oauth_success_redirect: "https://example.test/".into(),
+            trusted_vozen_oauth_client_id: None,
             private_tracker_client_id: None,
             private_tracker_owner_id: None,
             allow_legacy_session: false,
