@@ -3,6 +3,8 @@ set -euo pipefail
 
 version="${1:?release version required}"
 oauth_secret="${DISCORD_OAUTH_CLIENT_SECRET:?set DISCORD_OAUTH_CLIENT_SECRET to the real Discord application secret}"
+private_tracker_client_id="${HELPER_PRIVATE_TRACKER_CLIENT_ID:-}"
+private_tracker_owner_id="${HELPER_PRIVATE_TRACKER_OWNER_ID:-}"
 root=/home/vozen/vozen-helper-rust
 node_root=/home/vozen/vozen-helper
 release="$root/releases/$version"
@@ -17,6 +19,8 @@ sed -i \
   -e '/^DISCORD_OAUTH_CLIENT_SECRET=/d' \
   -e '/^DISCORD_OAUTH_REDIRECT_URI=/d' \
   -e '/^HELPER_OAUTH_SUCCESS_REDIRECT=/d' \
+  -e '/^HELPER_PRIVATE_TRACKER_CLIENT_ID=/d' \
+  -e '/^HELPER_PRIVATE_TRACKER_OWNER_ID=/d' \
   -e '/^HELPER_DATABASE_URL=/d' \
   -e '/^HELPER_BIND_ADDR=/d' \
   -e '/^HELPER_SESSION_SECRET=/d' \
@@ -32,11 +36,17 @@ printf '\nDISCORD_APPLICATION_ID=%s\n' "$client_id" >> "$root/shared/.env"
 printf 'DISCORD_OAUTH_CLIENT_ID=%s\n' "$client_id" >> "$root/shared/.env"
 printf 'DISCORD_OAUTH_CLIENT_SECRET=%s\n' "$oauth_secret" >> "$root/shared/.env"
 printf 'DISCORD_OAUTH_REDIRECT_URI=https://api.vozen.org/rust/api/oauth/callback\n' >> "$root/shared/.env"
-printf 'HELPER_OAUTH_SUCCESS_REDIRECT=https://vozen.org/panel/helper/\n' >> "$root/shared/.env"
+printf 'HELPER_OAUTH_SUCCESS_REDIRECT=https://vozen.org/panel/helper-tracker/\n' >> "$root/shared/.env"
 printf 'HELPER_DATABASE_URL=%s/vozen-helper.db\n' "$node_root" >> "$root/shared/.env"
 printf 'HELPER_BIND_ADDR=127.0.0.1:8788\n' >> "$root/shared/.env"
 printf 'HELPER_SESSION_SECRET=%s\n' "$(openssl rand -hex 32)" >> "$root/shared/.env"
 printf 'HELPER_ALLOWED_ORIGIN=https://vozen.org,https://rexy40407.github.io\nHELPER_API_ONLY=false\nHELPER_ALLOW_LEGACY_SESSION=false\n' >> "$root/shared/.env"
+if [[ -n "$private_tracker_client_id" || -n "$private_tracker_owner_id" ]]; then
+  : "${private_tracker_client_id:?set HELPER_PRIVATE_TRACKER_CLIENT_ID and HELPER_PRIVATE_TRACKER_OWNER_ID together}"
+  : "${private_tracker_owner_id:?set HELPER_PRIVATE_TRACKER_CLIENT_ID and HELPER_PRIVATE_TRACKER_OWNER_ID together}"
+  printf 'HELPER_PRIVATE_TRACKER_CLIENT_ID=%s\n' "$private_tracker_client_id" >> "$root/shared/.env"
+  printf 'HELPER_PRIVATE_TRACKER_OWNER_ID=%s\n' "$private_tracker_owner_id" >> "$root/shared/.env"
+fi
 if [[ -n "${VOZEN_ENTITLEMENT_URL:-}" || -n "${VOZEN_ENTITLEMENT_SECRET:-}" ]]; then
   : "${VOZEN_ENTITLEMENT_URL:?set both VOZEN_ENTITLEMENT_URL and VOZEN_ENTITLEMENT_SECRET}"
   : "${VOZEN_ENTITLEMENT_SECRET:?set both VOZEN_ENTITLEMENT_URL and VOZEN_ENTITLEMENT_SECRET}"

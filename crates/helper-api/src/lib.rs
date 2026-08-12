@@ -61,6 +61,8 @@ pub struct ApiState {
     pub oauth_client_secret: String,
     pub oauth_redirect_uri: String,
     pub oauth_success_redirect: String,
+    pub private_tracker_client_id: Option<String>,
+    pub private_tracker_owner_id: Option<String>,
     pub allow_legacy_session: bool,
     pub allowed_origin: Option<String>,
     pub entitlements: Option<EntitlementClient>,
@@ -93,6 +95,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/health", get(health))
         .route("/api/v1/health", get(health))
         .route("/api/session", post(create_session))
+        .route(
+            "/api/admin/private-tracker/session",
+            post(create_private_tracker_session),
+        )
         .route("/api/oauth/start", post(oauth_start_post))
         .route("/api/oauth/callback", get(oauth_callback))
         .route("/api/logout", post(logout))
@@ -548,7 +554,10 @@ fn oauth_redirect_uses_cookie_session(url: &url::Url) -> bool {
             .host_str()
             .is_some_and(|host| host.eq_ignore_ascii_case("vozen.org"))
         && url.port_or_known_default() == Some(443)
-        && matches!(url.path(), "/panel/helper" | "/panel/helper/")
+        && matches!(
+            url.path(),
+            "/panel/helper-tracker" | "/panel/helper-tracker/"
+        )
         && url.query().is_none()
         && url.fragment().is_none()
 }
@@ -4515,6 +4524,11 @@ pub struct SessionRequest {
     pub token: String,
     pub guild_id: String,
 }
+
+#[derive(Debug, Deserialize)]
+struct PrivateTrackerSessionRequest {
+    token: String,
+}
 #[derive(Debug, Deserialize, Serialize)]
 struct DiscordUser {
     id: String,
@@ -4533,6 +4547,77 @@ struct SessionResponse {
     user: DiscordUser,
     token: String,
     expires_at: String,
+}
+
+async fn create_private_tracker_session(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(request): Json<PrivateTrackerSessionRequest>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    let (expected_client_id, expected_owner_id) = state
+        .private_tracker_client_id
+        .as_deref()
+        .zip(state.private_tracker_owner_id.as_deref())
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "private_tracker_unavailable"))?;
+    let token = request.token.trim();
+    if token.is_empty() {
+        return Err(client_error(StatusCode::BAD_REQUEST, "missing_token"));
+    }
+
+    let identity = Client::new()
+        .get("https://discord.com/api/v10/oauth2/@me")
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_unreachable"))?;
+    if !identity.status().is_success() {
+        return Err(client_error(StatusCode::UNAUTHORIZED, "invalid_token"));
+    }
+    let identity: serde_json::Value = identity
+        .json()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "invalid_discord_response"))?;
+    let received_client_id = identity
+        .pointer("/application/id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let received_owner_id = identity
+        .pointer("/user/id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if !is_private_tracker_identity(
+        expected_client_id,
+        expected_owner_id,
+        received_client_id,
+        received_owner_id,
+    ) {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            "private_tracker_forbidden",
+        ));
+    }
+
+    create_session_inner(
+        State(state),
+        headers,
+        Json(SessionRequest {
+            token: token.to_owned(),
+            guild_id: String::new(),
+        }),
+    )
+    .await
+}
+
+fn is_private_tracker_identity(
+    expected_client_id: &str,
+    expected_owner_id: &str,
+    received_client_id: &str,
+    received_owner_id: &str,
+) -> bool {
+    !expected_client_id.is_empty()
+        && !expected_owner_id.is_empty()
+        && expected_client_id == received_client_id
+        && expected_owner_id == received_owner_id
 }
 
 async fn create_session(
@@ -11031,10 +11116,10 @@ mod tests {
 
     #[test]
     fn first_party_helper_redirect_uses_cookie_transport() {
-        let redirect = url::Url::parse("https://vozen.org/panel/helper/").unwrap();
+        let redirect = url::Url::parse("https://vozen.org/panel/helper-tracker/").unwrap();
         assert!(oauth_redirect_uses_cookie_session(&redirect));
 
-        let slashless = url::Url::parse("https://vozen.org/panel/helper").unwrap();
+        let slashless = url::Url::parse("https://vozen.org/panel/helper-tracker").unwrap();
         assert!(oauth_redirect_uses_cookie_session(&slashless));
     }
 
@@ -11044,7 +11129,8 @@ mod tests {
             "http://vozen.org/panel/helper/",
             "https://api.vozen.org/panel/helper/",
             "https://vozen.org/panel/helper/?next=1",
-            "https://vozen.org/panel/helper/#/config/protection.antispam",
+            "https://vozen.org/panel/helper-tracker/?next=1",
+            "https://vozen.org/panel/helper-tracker/#/config/protection.antispam",
             "https://vozen.org/account",
         ] {
             assert!(
@@ -11052,6 +11138,46 @@ mod tests {
                 "{redirect} must not opt into the cookie-only transport"
             );
         }
+    }
+
+    #[test]
+    fn private_tracker_identity_requires_the_dedicated_application_and_owner() {
+        assert!(is_private_tracker_identity(
+            "1534014665187655760",
+            "1523489275155583056",
+            "1534014665187655760",
+            "1523489275155583056",
+        ));
+        assert!(!is_private_tracker_identity(
+            "1534014665187655760",
+            "1523489275155583056",
+            "another-application",
+            "1523489275155583056",
+        ));
+        assert!(!is_private_tracker_identity(
+            "1534014665187655760",
+            "1523489275155583056",
+            "1534014665187655760",
+            "another-user",
+        ));
+    }
+
+    #[tokio::test]
+    async fn private_tracker_session_is_hidden_until_its_identity_is_configured() {
+        let store = Store::open(":memory:").expect("in-memory store");
+        let response = router(state(store))
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::POST)
+                    .uri("/api/admin/private-tracker/session")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"token":"not-used"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     fn state(store: Store) -> ApiState {
@@ -11063,6 +11189,8 @@ mod tests {
             oauth_client_secret: "secret".into(),
             oauth_redirect_uri: "https://example.test/callback".into(),
             oauth_success_redirect: "https://example.test/".into(),
+            private_tracker_client_id: None,
+            private_tracker_owner_id: None,
             allow_legacy_session: false,
             allowed_origin: None,
             entitlements: None,

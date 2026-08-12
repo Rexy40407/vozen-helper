@@ -18,6 +18,8 @@ pub struct Config {
     pub oauth_client_secret: String,
     pub oauth_redirect_uri: String,
     pub oauth_success_redirect: String,
+    pub private_tracker_client_id: Option<String>,
+    pub private_tracker_owner_id: Option<String>,
     pub allow_legacy_session: bool,
     pub session_secret: String,
     pub entitlement_url: Option<String>,
@@ -51,7 +53,9 @@ impl Config {
             oauth_client_secret: required("DISCORD_OAUTH_CLIENT_SECRET")?,
             oauth_redirect_uri: required("DISCORD_OAUTH_REDIRECT_URI")?,
             oauth_success_redirect: env::var("HELPER_OAUTH_SUCCESS_REDIRECT")
-                .unwrap_or_else(|_| "https://vozen.org/panel/helper/".into()),
+                .unwrap_or_else(|_| "https://vozen.org/panel/helper-tracker/".into()),
+            private_tracker_client_id: optional_env("HELPER_PRIVATE_TRACKER_CLIENT_ID"),
+            private_tracker_owner_id: optional_env("HELPER_PRIVATE_TRACKER_OWNER_ID"),
             allow_legacy_session: env::var("HELPER_ALLOW_LEGACY_SESSION")
                 .is_ok_and(|value| value.eq_ignore_ascii_case("true")),
             session_secret: required("HELPER_SESSION_SECRET")?,
@@ -76,8 +80,20 @@ impl Config {
         if self.oauth_success_redirect.starts_with("http://") && self.environment == "production" {
             anyhow::bail!("OAuth success redirect must use HTTPS in production");
         }
+        if self.private_tracker_client_id.is_some() != self.private_tracker_owner_id.is_some() {
+            anyhow::bail!(
+                "HELPER_PRIVATE_TRACKER_CLIENT_ID and HELPER_PRIVATE_TRACKER_OWNER_ID must be configured together"
+            );
+        }
         Ok(())
     }
+}
+
+fn optional_env(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
