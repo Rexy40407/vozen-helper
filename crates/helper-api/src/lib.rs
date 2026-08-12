@@ -504,11 +504,13 @@ async fn oauth_callback(
         }),
     )
     .await?;
+    // `create_session_inner` uses this internal response header to pass the
+    // opaque session to the legacy OAuth transport. Always remove it before
+    // redirecting so a browser can only receive a session through the cookie.
     let session_token = response
         .headers_mut()
         .remove(SESSION_RESPONSE_HEADER)
-        .and_then(|value| value.to_str().ok().map(ToOwned::to_owned))
-        .ok_or_else(|| client_error(StatusCode::INTERNAL_SERVER_ERROR, "session_token_missing"))?;
+        .and_then(|value| value.to_str().ok().map(ToOwned::to_owned));
     response.headers_mut().append(
         header::SET_COOKIE,
         format!("{OAUTH_COOKIE}=; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=0")
@@ -521,7 +523,12 @@ async fn oauth_callback(
             "invalid_oauth_success_redirect",
         )
     })?;
-    success_url.set_fragment(Some(&format!("session={session_token}")));
+    if !oauth_redirect_uses_cookie_session(&success_url) {
+        let session_token = session_token.ok_or_else(|| {
+            client_error(StatusCode::INTERNAL_SERVER_ERROR, "session_token_missing")
+        })?;
+        success_url.set_fragment(Some(&format!("session={session_token}")));
+    }
     *response.status_mut() = StatusCode::SEE_OTHER;
     response.headers_mut().insert(
         header::LOCATION,
@@ -530,6 +537,20 @@ async fn oauth_callback(
         })?,
     );
     Ok(response)
+}
+
+/// The first-party Vozen Helper panel receives its session through the secure,
+/// shared `.vozen.org` cookie. Legacy redirects retain the fragment transport
+/// only for the temporary compatibility window.
+fn oauth_redirect_uses_cookie_session(url: &url::Url) -> bool {
+    url.scheme() == "https"
+        && url
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case("vozen.org"))
+        && url.port_or_known_default() == Some(443)
+        && matches!(url.path(), "/panel/helper" | "/panel/helper/")
+        && url.query().is_none()
+        && url.fragment().is_none()
 }
 
 async fn health() -> impl IntoResponse {
@@ -11007,6 +11028,31 @@ mod tests {
     };
     use helper_store::Store;
     use tower::ServiceExt;
+
+    #[test]
+    fn first_party_helper_redirect_uses_cookie_transport() {
+        let redirect = url::Url::parse("https://vozen.org/panel/helper/").unwrap();
+        assert!(oauth_redirect_uses_cookie_session(&redirect));
+
+        let slashless = url::Url::parse("https://vozen.org/panel/helper").unwrap();
+        assert!(oauth_redirect_uses_cookie_session(&slashless));
+    }
+
+    #[test]
+    fn other_oauth_redirects_keep_the_legacy_fragment_transport() {
+        for redirect in [
+            "http://vozen.org/panel/helper/",
+            "https://api.vozen.org/panel/helper/",
+            "https://vozen.org/panel/helper/?next=1",
+            "https://vozen.org/panel/helper/#/config/protection.antispam",
+            "https://vozen.org/account",
+        ] {
+            assert!(
+                !oauth_redirect_uses_cookie_session(&url::Url::parse(redirect).unwrap()),
+                "{redirect} must not opt into the cookie-only transport"
+            );
+        }
+    }
 
     fn state(store: Store) -> ApiState {
         ApiState {

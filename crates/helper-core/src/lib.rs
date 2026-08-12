@@ -51,7 +51,7 @@ impl Config {
             oauth_client_secret: required("DISCORD_OAUTH_CLIENT_SECRET")?,
             oauth_redirect_uri: required("DISCORD_OAUTH_REDIRECT_URI")?,
             oauth_success_redirect: env::var("HELPER_OAUTH_SUCCESS_REDIRECT")
-                .unwrap_or_else(|_| "https://rexy40407.github.io/painel/".into()),
+                .unwrap_or_else(|_| "https://vozen.org/panel/helper/".into()),
             allow_legacy_session: env::var("HELPER_ALLOW_LEGACY_SESSION")
                 .is_ok_and(|value| value.eq_ignore_ascii_case("true")),
             session_secret: required("HELPER_SESSION_SECRET")?,
