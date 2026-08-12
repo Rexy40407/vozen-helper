@@ -4,11 +4,11 @@
 
 use anyhow::Result;
 use axum::{
-    Json, Router,
+    Form, Json, Router,
     body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::{delete, get, post, put},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -100,6 +100,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/api/admin/private-tracker/session",
             post(create_private_tracker_session),
+        )
+        .route(
+            "/api/admin/private-tracker/handoff",
+            post(create_private_tracker_handoff),
         )
         .route("/api/oauth/start", post(oauth_start_post))
         .route("/api/oauth/callback", get(oauth_callback))
@@ -4655,6 +4659,35 @@ async fn create_private_tracker_session(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Json(request): Json<PrivateTrackerSessionRequest>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    create_private_tracker_session_inner(state, headers, request).await
+}
+
+/// First-party navigation bridge for the private TTS tracker.  A regular cross-origin fetch
+/// cannot reliably set the Helper cookie when third-party cookies are blocked, so the tracker
+/// submits a top-level form POST here.  The OAuth token stays in the request body, then this
+/// handler creates the normal Helper session and redirects to the public Helper tracker.
+async fn create_private_tracker_handoff(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Form(request): Form<PrivateTrackerSessionRequest>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    let success_redirect = state.oauth_success_redirect.clone();
+    let session = create_private_tracker_session_inner(state, headers, request).await?;
+    let cookie = session
+        .headers()
+        .get(header::SET_COOKIE)
+        .cloned()
+        .ok_or_else(|| client_error(StatusCode::INTERNAL_SERVER_ERROR, "session_cookie_missing"))?;
+    let mut response = Redirect::to(&success_redirect).into_response();
+    response.headers_mut().append(header::SET_COOKIE, cookie);
+    Ok(response)
+}
+
+async fn create_private_tracker_session_inner(
+    state: Arc<ApiState>,
+    headers: HeaderMap,
+    request: PrivateTrackerSessionRequest,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
     let (expected_client_id, expected_owner_id) = state
         .private_tracker_client_id
@@ -11274,6 +11307,24 @@ mod tests {
                     .uri("/api/admin/private-tracker/session")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"token":"not-used"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn private_tracker_handoff_is_hidden_until_its_identity_is_configured() {
+        let store = Store::open(":memory:").expect("in-memory store");
+        let response = router(state(store))
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::POST)
+                    .uri("/api/admin/private-tracker/handoff")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("token=not-used"))
                     .expect("request"),
             )
             .await
