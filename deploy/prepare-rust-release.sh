@@ -41,6 +41,7 @@ printf 'DISCORD_OAUTH_REDIRECT_URI=https://api.vozen.org/rust/api/oauth/callback
 printf 'HELPER_OAUTH_SUCCESS_REDIRECT=https://vozen.org/panel/helper-tracker/\n' >> "$root/shared/.env"
 printf 'VOZEN_OAUTH_CLIENT_ID=%s\n' "$vozen_oauth_client_id" >> "$root/shared/.env"
 printf 'HELPER_DATABASE_URL=%s/vozen-helper.db\n' "$node_root" >> "$root/shared/.env"
+printf 'HELPER_PRODUCT_ROOT=%s/current\n' "$root" >> "$root/shared/.env"
 printf 'HELPER_BIND_ADDR=127.0.0.1:8788\n' >> "$root/shared/.env"
 printf 'HELPER_SESSION_SECRET=%s\n' "$(openssl rand -hex 32)" >> "$root/shared/.env"
 printf 'HELPER_ALLOWED_ORIGIN=https://vozen.org,https://rexy40407.github.io\nHELPER_API_ONLY=false\nHELPER_ALLOW_LEGACY_SESSION=false\n' >> "$root/shared/.env"
