@@ -24,6 +24,7 @@ sed -i \
   -e '/^HELPER_PRIVATE_TRACKER_CLIENT_ID=/d' \
   -e '/^HELPER_PRIVATE_TRACKER_OWNER_ID=/d' \
   -e '/^HELPER_DATABASE_URL=/d' \
+  -e '/^HELPER_PRODUCT_ROOT=/d' \
   -e '/^HELPER_BIND_ADDR=/d' \
   -e '/^HELPER_SESSION_SECRET=/d' \
   -e '/^HELPER_ALLOWED_ORIGIN=/d' \
