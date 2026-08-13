@@ -13,6 +13,16 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
+    database_path: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageMetrics {
+    pub database_bytes: u64,
+    pub volume_used_bytes: Option<u64>,
+    pub volume_available_bytes: Option<u64>,
+    pub volume_total_bytes: Option<u64>,
 }
 
 /// Durable scheduler row kept as a tuple to preserve the runtime's small
@@ -758,14 +768,82 @@ impl Store {
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let database_path = if path.as_ref() == Path::new(":memory:") {
+            None
+        } else {
+            Some(path.as_ref().to_path_buf())
+        };
         let conn = Connection::open(path).context("open helper sqlite")?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
+            database_path,
         };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// Returns the SQLite footprint and, when the host exposes it, the free
+    /// space of the volume containing the database. This is intentionally
+    /// read-only and does not touch the database connection.
+    pub fn storage_metrics(&self) -> StorageMetrics {
+        let Some(path) = self.database_path.as_deref() else {
+            return StorageMetrics {
+                database_bytes: 0,
+                volume_used_bytes: None,
+                volume_available_bytes: None,
+                volume_total_bytes: None,
+            };
+        };
+
+        let wal = path.with_file_name(format!(
+            "{}-wal",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+        ));
+        let shm = path.with_file_name(format!(
+            "{}-shm",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+        ));
+        let database_bytes = [path.to_path_buf(), wal, shm]
+            .into_iter()
+            .filter_map(|candidate| std::fs::metadata(candidate).ok())
+            .map(|metadata| metadata.len())
+            .sum();
+
+        #[cfg(unix)]
+        let volume = {
+            let probe = path.parent().unwrap_or_else(|| Path::new("."));
+            let probe = std::ffi::CString::new(probe.as_os_str().as_encoded_bytes()).ok();
+            probe.and_then(|probe| {
+                let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+                let result = unsafe { libc::statvfs(probe.as_ptr(), stat.as_mut_ptr()) };
+                if result != 0 {
+                    return None;
+                }
+                let stat = unsafe { stat.assume_init() };
+                let block_size = stat.f_frsize.max(1) as u64;
+                let total = (stat.f_blocks as u64).saturating_mul(block_size);
+                let available = (stat.f_bavail as u64).saturating_mul(block_size);
+                Some((total.saturating_sub(available), available, total))
+            })
+        };
+        #[cfg(not(unix))]
+        let volume: Option<(u64, u64, u64)> = None;
+
+        let (volume_used_bytes, volume_available_bytes, volume_total_bytes) = volume
+            .map(|(used, available, total)| (Some(used), Some(available), Some(total)))
+            .unwrap_or((None, None, None));
+        StorageMetrics {
+            database_bytes,
+            volume_used_bytes,
+            volume_available_bytes,
+            volume_total_bytes,
+        }
     }
 
     pub fn migrate(&self) -> Result<()> {

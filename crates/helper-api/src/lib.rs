@@ -4561,6 +4561,13 @@ struct DiscordGuild {
     name: String,
     permissions: Option<String>,
 }
+#[derive(Debug, Deserialize)]
+struct DiscordBotGuild {
+    id: String,
+    name: String,
+    #[serde(default)]
+    icon: Option<String>,
+}
 #[derive(Debug, Serialize)]
 struct SessionResponse {
     ok: bool,
@@ -4784,6 +4791,7 @@ async fn create_session_inner(
     let client = Client::new();
     let discord_user = fetch_discord_user(&client, &req.token).await?;
     let guilds = fetch_discord_guilds(&client, &req.token).await?;
+    let guilds = filter_guilds_with_bot(&client, &state.discord_token, guilds).await?;
     create_session_response(state, headers, discord_user, guilds, req.guild_id)
 }
 
@@ -4844,6 +4852,64 @@ async fn fetch_discord_guilds(
         );
         client_error(StatusCode::BAD_GATEWAY, "invalid_discord_response")
     })
+}
+
+async fn fetch_bot_guild_by_id(
+    client: &Client,
+    discord_token: &str,
+    guild_id: &str,
+) -> Result<Option<DiscordBotGuild>, (StatusCode, Json<ApiError>)> {
+    if discord_token.len() < 20 {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "discord_bot_unavailable",
+        ));
+    }
+    let response = client
+        .get(format!("{DISCORD_API_BASE}/guilds/{guild_id}"))
+        .header(header::AUTHORIZATION, format!("Bot {discord_token}"))
+        .send()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_unreachable"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_response_unreadable"))?;
+    if status == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        tracing::warn!(%status, body_len = body.len(), "Discord bot guild request failed");
+        return Err(client_error(
+            StatusCode::BAD_GATEWAY,
+            "discord_bot_guild_unavailable",
+        ));
+    }
+    serde_json::from_str(&body).map(Some).map_err(|_| {
+        tracing::warn!(
+            body_len = body.len(),
+            "Discord bot guild list response was not valid JSON"
+        );
+        client_error(StatusCode::BAD_GATEWAY, "invalid_discord_response")
+    })
+}
+
+async fn filter_guilds_with_bot(
+    client: &Client,
+    discord_token: &str,
+    guilds: Vec<DiscordGuild>,
+) -> Result<Vec<DiscordGuild>, (StatusCode, Json<ApiError>)> {
+    let mut installed = Vec::with_capacity(guilds.len());
+    for guild in guilds {
+        if fetch_bot_guild_by_id(client, discord_token, &guild.id)
+            .await?
+            .is_some()
+        {
+            installed.push(guild);
+        }
+    }
+    Ok(installed)
 }
 
 fn create_session_response(
@@ -4981,15 +5047,33 @@ async fn guilds(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_auth(&state, &headers)?;
-    let guilds = state
+    let managed_guilds = state
         .store
         .session_guilds(claims.session_id)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let client = Client::new();
+    let mut installed = Vec::new();
+    for guild in managed_guilds {
+        if let Some(bot_guild) =
+            fetch_bot_guild_by_id(&client, &state.discord_token, &guild.guild_id).await?
+        {
+            let icon_url = bot_guild.icon.as_deref().map(|icon| {
+                format!(
+                    "https://cdn.discordapp.com/icons/{}/{icon}.png?size=64",
+                    bot_guild.id
+                )
+            });
+            installed.push(serde_json::json!({
+                "id": bot_guild.id,
+                "name": bot_guild.name,
+                "iconUrl": icon_url,
+                "canManage": true,
+                "botPresent": true
+            }));
+        }
+    }
     Ok(Json(serde_json::json!({
-        "guilds": guilds
-            .into_iter()
-            .map(|guild| serde_json::json!({"id": guild.guild_id, "name": guild.name, "canManage": true}))
-            .collect::<Vec<_>>()
+        "guilds": installed
     })))
 }
 
@@ -9895,9 +9979,14 @@ async fn stats(
         .store
         .recent_cases(&claims.guild_id, 200)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
-    Ok(Json(
-        serde_json::json!({"totalCases":cases.len(),"guildId":claims.guild_id}),
-    ))
+    let storage = state.store.storage_metrics();
+    Ok(Json(serde_json::json!({
+        "totalCases": cases.len(),
+        "guildId": claims.guild_id,
+        "storage": storage,
+        "activeSessions": null,
+        "activeServers": []
+    })))
 }
 
 async fn tickets(

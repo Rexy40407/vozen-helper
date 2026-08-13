@@ -33,6 +33,7 @@ rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 k256 = { version = "0.13", features = ["ecdsa"] }
+libc = "0.2"
 # Serenity 0.12.5 still pins tokio-rustls 0.25/rustls 0.22, whose
 # rustls-webpki 0.102 line has no patched release for the current advisories.
 # Use the VPS OS TLS backend for the Discord transport; the Helper API keeps

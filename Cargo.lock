@@ -856,6 +856,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "helper-contracts",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
