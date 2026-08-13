@@ -4708,10 +4708,17 @@ async fn create_private_tracker_session_inner(
     if !identity.status().is_success() {
         return Err(client_error(StatusCode::UNAUTHORIZED, "invalid_token"));
     }
-    let identity: serde_json::Value = identity
-        .json()
+    let identity_body = identity
+        .text()
         .await
-        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "invalid_discord_response"))?;
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_response_unreadable"))?;
+    let identity: serde_json::Value = serde_json::from_str(&identity_body).map_err(|_| {
+        tracing::warn!(
+            body_len = identity_body.len(),
+            "Discord OAuth identity was not valid JSON"
+        );
+        client_error(StatusCode::BAD_GATEWAY, "invalid_discord_response")
+    })?;
     let received_client_id = identity
         .pointer("/application/id")
         .and_then(serde_json::Value::as_str)
@@ -4775,30 +4782,78 @@ async fn create_session_inner(
         return Err(client_error(StatusCode::BAD_REQUEST, "missing_token"));
     }
     let client = Client::new();
+    let discord_user = fetch_discord_user(&client, &req.token).await?;
+    let guilds = fetch_discord_guilds(&client, &req.token).await?;
+    create_session_response(state, headers, discord_user, guilds, req.guild_id)
+}
+
+async fn fetch_discord_user(
+    client: &Client,
+    token: &str,
+) -> Result<DiscordUser, (StatusCode, Json<ApiError>)> {
     let user = client
         .get("https://discord.com/api/v10/users/@me")
-        .bearer_auth(&req.token)
+        .bearer_auth(token)
         .send()
         .await
         .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_unreachable"))?;
     if !user.status().is_success() {
         return Err(client_error(StatusCode::UNAUTHORIZED, "invalid_token"));
     }
-    let discord_user: DiscordUser = user
-        .json()
+    let user_body = user
+        .text()
         .await
-        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "invalid_discord_response"))?;
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_response_unreadable"))?;
+    serde_json::from_str(&user_body).map_err(|_| {
+        tracing::warn!(
+            body_len = user_body.len(),
+            "Discord user response was not valid JSON"
+        );
+        client_error(StatusCode::BAD_GATEWAY, "invalid_discord_response")
+    })
+}
+
+async fn fetch_discord_guilds(
+    client: &Client,
+    token: &str,
+) -> Result<Vec<DiscordGuild>, (StatusCode, Json<ApiError>)> {
     let guilds = client
         .get("https://discord.com/api/v10/users/@me/guilds")
-        .bearer_auth(&req.token)
+        .bearer_auth(token)
         .send()
         .await
         .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_unreachable"))?;
-    let guilds: Vec<DiscordGuild> = guilds
-        .json()
+    let guilds_status = guilds.status();
+    let guilds_body = guilds
+        .text()
         .await
-        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "invalid_discord_response"))?;
-    let selected_guild = if req.guild_id.trim().is_empty() {
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_response_unreadable"))?;
+    if !guilds_status.is_success() {
+        tracing::warn!(%guilds_status, body_len = guilds_body.len(), "Discord guild list request failed");
+        let (status, code) = match guilds_status {
+            StatusCode::UNAUTHORIZED => (StatusCode::UNAUTHORIZED, "invalid_token"),
+            StatusCode::FORBIDDEN => (StatusCode::FORBIDDEN, "discord_scope_missing"),
+            _ => (StatusCode::BAD_GATEWAY, "discord_guilds_unavailable"),
+        };
+        return Err(client_error(status, code));
+    }
+    serde_json::from_str(&guilds_body).map_err(|_| {
+        tracing::warn!(
+            body_len = guilds_body.len(),
+            "Discord guild list response was not valid JSON"
+        );
+        client_error(StatusCode::BAD_GATEWAY, "invalid_discord_response")
+    })
+}
+
+fn create_session_response(
+    state: Arc<ApiState>,
+    headers: HeaderMap,
+    discord_user: DiscordUser,
+    guilds: Vec<DiscordGuild>,
+    guild_id: String,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    let selected_guild = if guild_id.trim().is_empty() {
         guilds
             .iter()
             .find(|guild| {
@@ -4810,7 +4865,7 @@ async fn create_session_inner(
             .map(|guild| guild.id.clone())
             .ok_or_else(|| client_error(StatusCode::FORBIDDEN, "guild_not_managed"))?
     } else {
-        req.guild_id.clone()
+        guild_id
     };
     let can_manage = guilds
         .iter()
