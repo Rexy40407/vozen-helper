@@ -5,7 +5,7 @@ use chrono::{DateTime, Duration, Utc};
 use helper_contracts::{EntitlementSnapshot, SessionClaims};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use uuid::Uuid;
@@ -19,10 +19,63 @@ pub struct Store {
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageMetrics {
+    /// Total bytes occupied by the active Helper runtime and its data. This
+    /// is intentionally not the whole VPS volume.
+    pub product_bytes: u64,
     pub database_bytes: u64,
     pub volume_used_bytes: Option<u64>,
     pub volume_available_bytes: Option<u64>,
     pub volume_total_bytes: Option<u64>,
+}
+
+fn helper_product_bytes(database_path: &Path) -> u64 {
+    let total = [
+        database_path.to_path_buf(),
+        PathBuf::from(format!("{}-wal", database_path.display())),
+        PathBuf::from(format!("{}-shm", database_path.display())),
+    ]
+    .into_iter()
+    .filter_map(|path| std::fs::metadata(path).ok().map(|metadata| metadata.len()))
+    .sum::<u64>();
+    // The active release is the Helper's runtime footprint. Old releases and
+    // backups are deliberately excluded. Deployments may override the root;
+    // otherwise derive it from the running binary (current/bin/<binary>).
+    total.saturating_add(path_bytes(&helper_runtime_root()))
+}
+
+fn helper_runtime_root() -> PathBuf {
+    if let Some(root) = std::env::var_os("HELPER_PRODUCT_ROOT") {
+        return PathBuf::from(root);
+    }
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(bin) = executable.parent()
+        && let Some(root) = bin.parent()
+    {
+        return root.to_path_buf();
+    }
+    PathBuf::from("/home/vozen/vozen-helper-rust/current")
+}
+
+fn path_bytes(path: &Path) -> u64 {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if metadata.file_type().is_symlink() {
+        return std::fs::canonicalize(path)
+            .ok()
+            .map(|target| path_bytes(&target))
+            .unwrap_or(0);
+    }
+    if metadata.is_dir() {
+        return std::fs::read_dir(path)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| path_bytes(&entry.path()))
+            .sum();
+    }
+    metadata.len()
 }
 
 /// Durable scheduler row kept as a tuple to preserve the runtime's small
@@ -790,6 +843,7 @@ impl Store {
     pub fn storage_metrics(&self) -> StorageMetrics {
         let Some(path) = self.database_path.as_deref() else {
             return StorageMetrics {
+                product_bytes: 0,
                 database_bytes: 0,
                 volume_used_bytes: None,
                 volume_available_bytes: None,
@@ -839,6 +893,7 @@ impl Store {
             .map(|(used, available, total)| (Some(used), Some(available), Some(total)))
             .unwrap_or((None, None, None));
         StorageMetrics {
+            product_bytes: helper_product_bytes(path),
             database_bytes,
             volume_used_bytes,
             volume_available_bytes,
@@ -7486,5 +7541,17 @@ mod tests {
         assert!(store.temp_channel("c").unwrap().is_none());
         assert_eq!(store.active_temp_channels("g").unwrap(), 0);
         assert!(!store.remove_temp_channel("c").unwrap());
+    }
+
+    #[test]
+    fn path_bytes_counts_nested_runtime_files_and_resolves_symlinks() {
+        let root =
+            std::env::temp_dir().join(format!("vozen-helper-footprint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join("binary"), vec![0u8; 7]).unwrap();
+        std::fs::write(root.join("nested/data"), vec![0u8; 9]).unwrap();
+        assert_eq!(path_bytes(&root), 16);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
