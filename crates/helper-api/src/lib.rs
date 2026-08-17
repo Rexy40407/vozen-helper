@@ -4790,7 +4790,11 @@ async fn create_session_inner(
     }
     let client = Client::new();
     let discord_user = fetch_discord_user(&client, &req.token).await?;
-    let guilds = fetch_discord_guilds(&client, &req.token).await?;
+    // The Discord OAuth endpoint returns every guild in the account, but the
+    // Helper can only ever expose servers the account can manage.  Filtering
+    // first avoids a serial bot-presence lookup for unrelated guilds, which
+    // made the first-party account handoff exceed the browser deadline.
+    let guilds = manageable_guilds(fetch_discord_guilds(&client, &req.token).await?);
     let guilds = filter_guilds_with_bot(&client, &state.discord_token, guilds).await?;
     create_session_response(state, headers, discord_user, guilds, req.guild_id)
 }
@@ -4910,6 +4914,18 @@ async fn filter_guilds_with_bot(
         }
     }
     Ok(installed)
+}
+
+fn manageable_guilds(guilds: Vec<DiscordGuild>) -> Vec<DiscordGuild> {
+    guilds
+        .into_iter()
+        .filter(|guild| {
+            guild
+                .permissions
+                .as_deref()
+                .is_some_and(has_manage_permission)
+        })
+        .collect()
 }
 
 fn create_session_response(
@@ -11417,6 +11433,35 @@ mod tests {
                 "{redirect} must not opt into the cookie-only transport"
             );
         }
+    }
+
+    #[test]
+    fn account_handoff_checks_bot_presence_only_for_manageable_guilds() {
+        let guilds = manageable_guilds(vec![
+            DiscordGuild {
+                id: "member-only".into(),
+                name: "Member-only server".into(),
+                permissions: Some("0".into()),
+            },
+            DiscordGuild {
+                id: "managed".into(),
+                name: "Managed server".into(),
+                permissions: Some((1_u64 << 5).to_string()),
+            },
+            DiscordGuild {
+                id: "administrator".into(),
+                name: "Administrator server".into(),
+                permissions: Some((1_u64 << 3).to_string()),
+            },
+        ]);
+
+        assert_eq!(
+            guilds
+                .iter()
+                .map(|guild| guild.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["managed", "administrator"]
+        );
     }
 
     #[test]
