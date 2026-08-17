@@ -55,7 +55,7 @@ impl Config {
             oauth_redirect_uri: required("DISCORD_OAUTH_REDIRECT_URI")?,
             oauth_success_redirect: env::var("HELPER_OAUTH_SUCCESS_REDIRECT")
                 .unwrap_or_else(|_| "https://vozen.org/panel/helper-tracker/".into()),
-            trusted_vozen_oauth_client_id: optional_env("VOZEN_OAUTH_CLIENT_ID"),
+            trusted_vozen_oauth_client_id: trusted_vozen_oauth_client_id(),
             private_tracker_client_id: optional_env("HELPER_PRIVATE_TRACKER_CLIENT_ID"),
             private_tracker_owner_id: optional_env("HELPER_PRIVATE_TRACKER_OWNER_ID"),
             allow_legacy_session: env::var("HELPER_ALLOW_LEGACY_SESSION")
@@ -96,6 +96,20 @@ fn optional_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+fn trusted_vozen_oauth_client_id() -> Option<String> {
+    resolve_trusted_vozen_oauth_client_id(
+        optional_env("VOZEN_ECOSYSTEM_OAUTH_CLIENT_ID"),
+        optional_env("VOZEN_OAUTH_CLIENT_ID"),
+    )
+}
+
+fn resolve_trusted_vozen_oauth_client_id(
+    ecosystem_client_id: Option<String>,
+    legacy_client_id: Option<String>,
+) -> Option<String> {
+    ecosystem_client_id.or(legacy_client_id)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11141,6 +11155,21 @@ mod tests {
     #[test]
     fn unknown_quota_is_closed() {
         assert_eq!(quota_limit(&Plan::Free, "unknown"), 0);
+    }
+
+    #[test]
+    fn ecosystem_oauth_client_takes_precedence_over_legacy_client() {
+        assert_eq!(
+            resolve_trusted_vozen_oauth_client_id(
+                Some("1537738930722443364".into()),
+                Some("1523826014935842997".into()),
+            ),
+            Some("1537738930722443364".into())
+        );
+        assert_eq!(
+            resolve_trusted_vozen_oauth_client_id(None, Some("legacy".into())),
+            Some("legacy".into())
+        );
     }
 
     #[test]
