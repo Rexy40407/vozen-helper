@@ -537,6 +537,26 @@ impl EventHandler for Handler {
 
         let commands = vec![
             CreateCommand::new("ping").description("Check Helper latency"),
+            CreateCommand::new("language")
+                .description("View or set the Helper language")
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "locale",
+                        "Language for Helper messages",
+                    )
+                    .add_string_choice("English", "en")
+                    .add_string_choice("Português", "pt")
+                    .add_string_choice("Français", "fr")
+                    .add_string_choice("Español", "es")
+                    .add_string_choice("Deutsch", "de")
+                    .add_string_choice("Türkçe", "tr")
+                    .add_string_choice("العربية", "ar")
+                    .add_string_choice("繁體中文", "zh")
+                    .add_string_choice("Русский", "ru")
+                    .add_string_choice("한국어", "ko")
+                    .required(false),
+                ),
             CreateCommand::new("help").description("Show Helper modules"),
             CreateCommand::new("setup")
                 .description("Run the guided Helper setup for this server")
@@ -5999,6 +6019,35 @@ impl Handler {
         }
         let content = match command.data.name.as_str() {
             "ping" => "Pong — Vozen Helper is online.".to_string(),
+            "language" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
+                let guild_id = guild_id.to_string();
+                match option_string(command, "locale") {
+                    Some(locale) => {
+                        let Some((code, label)) = helper_locale(locale) else {
+                            return respond(
+                                ctx,
+                                command,
+                                "Unsupported language. Choose one of the languages offered by `/language`.",
+                            )
+                            .await;
+                        };
+                        self.store
+                            .set_setting(&guild_id, HELPER_LANGUAGE_SETTING, code)?;
+                        format!("Helper language set to {label}.")
+                    }
+                    None => {
+                        let locale = helper_locale_for_guild(&self.store, &guild_id)?;
+                        let (_, label) = helper_locale(locale)
+                            .expect("the configured Helper locale must be supported");
+                        format!(
+                            "Helper language: {label}. Use `/language locale` to change it."
+                        )
+                    }
+                }
+            }
             "help" => {
                 let guild_text = command.guild_id.map(|guild_id| guild_id.to_string());
                 if let Some(guild_id) = guild_text.as_deref()
@@ -11021,7 +11070,7 @@ fn required_permission(command: &str) -> Option<Permissions> {
         "purge" => Some(Permissions::MANAGE_MESSAGES),
         "ticket-panel" | "ticket-config" | "ticket-update" => Some(Permissions::MANAGE_CHANNELS),
         "slowmode" | "lockdown" | "unlock" => Some(Permissions::MANAGE_CHANNELS),
-        "setup" | "verify-panel" => Some(Permissions::MANAGE_GUILD),
+        "setup" | "verify-panel" | "language" => Some(Permissions::MANAGE_GUILD),
         "rolepanel" => Some(Permissions::MANAGE_ROLES),
         "join-gate" => Some(Permissions::MANAGE_ROLES),
         "anti-raid" => Some(Permissions::MANAGE_GUILD),
@@ -11039,6 +11088,39 @@ fn required_permission(command: &str) -> Option<Permissions> {
         "suggestion" => Some(Permissions::MANAGE_MESSAGES),
         _ => None,
     }
+}
+
+/// The Helper never derives its language from Discord or browser settings.
+/// A server starts in English until an administrator explicitly selects one of
+/// the locales supported by the Vozen site.
+const DEFAULT_HELPER_LOCALE: &str = "en";
+const HELPER_LANGUAGE_SETTING: &str = "core.language";
+const HELPER_LOCALES: &[(&str, &str)] = &[
+    ("en", "English"),
+    ("pt", "Português"),
+    ("fr", "Français"),
+    ("es", "Español"),
+    ("de", "Deutsch"),
+    ("tr", "Türkçe"),
+    ("ar", "العربية"),
+    ("zh", "繁體中文"),
+    ("ru", "Русский"),
+    ("ko", "한국어"),
+];
+
+fn helper_locale(locale: &str) -> Option<(&'static str, &'static str)> {
+    HELPER_LOCALES
+        .iter()
+        .copied()
+        .find(|(code, _)| *code == locale)
+}
+
+fn helper_locale_for_guild(store: &Store, guild_id: &str) -> Result<&'static str> {
+    Ok(store
+        .get_setting(guild_id, HELPER_LANGUAGE_SETTING)?
+        .as_deref()
+        .and_then(|locale| helper_locale(locale).map(|(code, _)| code))
+        .unwrap_or(DEFAULT_HELPER_LOCALE))
 }
 
 fn parse_duration(raw: &str) -> Option<i64> {
@@ -12135,14 +12217,15 @@ fn approved_wallet_contract(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenSeaCollectionInfo, account_age_days,
+        HELPER_LANGUAGE_SETTING, HELPER_LOCALES, OpenSeaCollectionInfo, account_age_days,
         adapter::{DiscordAdapter, Effect, FakeDiscordAdapter},
         command_feature_key, custom_command_channel_ignored, custom_command_is_staff,
         english_bot_text, evaluate_nickname, feature_enabled, feature_title, format_nft_collection,
-        is_destructive_audit_action, join_burst_armed, parse_custom_command, parse_duration,
-        parse_reminder_delay, parse_scheduled_event_window, reminder_repeat_interval_ms,
-        render_custom_command, rss_retry_seconds, scheduled_action_feature, shadow_mode_enabled,
-        should_cleanup_temp_channel, template_message,
+        helper_locale, helper_locale_for_guild, is_destructive_audit_action, join_burst_armed,
+        parse_custom_command, parse_duration, parse_reminder_delay, parse_scheduled_event_window,
+        reminder_repeat_interval_ms, render_custom_command, rss_retry_seconds,
+        scheduled_action_feature, shadow_mode_enabled, should_cleanup_temp_channel,
+        template_message,
     };
     use chrono::TimeZone;
     use helper_store::Store;
@@ -12150,6 +12233,29 @@ mod tests {
         collections::{HashMap, VecDeque},
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn helper_language_defaults_to_english_and_only_accepts_site_locales() {
+        let store = Store::open(":memory:").expect("open test store");
+
+        assert_eq!(helper_locale_for_guild(&store, "guild").unwrap(), "en");
+        assert_eq!(HELPER_LOCALES.len(), 10);
+        assert_eq!(helper_locale("en"), Some(("en", "English")));
+        assert_eq!(helper_locale("pt"), Some(("pt", "Português")));
+        assert_eq!(helper_locale("pt-BR"), None);
+        assert_eq!(helper_locale("ja"), None);
+
+        store
+            .set_setting("guild", HELPER_LANGUAGE_SETTING, "ru")
+            .unwrap();
+        assert_eq!(helper_locale_for_guild(&store, "guild").unwrap(), "ru");
+
+        // Old/unapproved values are never used as a fallback language.
+        store
+            .set_setting("guild", HELPER_LANGUAGE_SETTING, "pt-BR")
+            .unwrap();
+        assert_eq!(helper_locale_for_guild(&store, "guild").unwrap(), "en");
+    }
 
     #[test]
     fn translates_legacy_user_facing_messages_to_english() {
