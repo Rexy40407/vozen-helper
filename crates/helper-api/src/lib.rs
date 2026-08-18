@@ -1174,6 +1174,7 @@ async fn create_youtube_subscription(
     Json(input): Json<YouTubeSubscriptionInput>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.youtube").await?;
     let (source, target, template, mention, enabled, interval) =
         validate_youtube_subscription(input)
             .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
@@ -1230,6 +1231,7 @@ async fn update_youtube_subscription(
     Json(input): Json<YouTubeSubscriptionInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.youtube").await?;
     let (source, target, template, mention, enabled, interval) =
         validate_youtube_subscription(input)
             .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
@@ -2281,6 +2283,7 @@ async fn create_rss_subscription(
     Json(input): Json<RssSubscriptionInput>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.rss").await?;
     let (feed_url, target, template, mention, enabled, interval) = validate_rss_subscription(input)
         .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
     let Some(client) = state.rss.as_ref() else {
@@ -2326,6 +2329,7 @@ async fn update_rss_subscription(
     Json(input): Json<RssSubscriptionInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.rss").await?;
     let (feed_url, target, template, mention, enabled, interval) = validate_rss_subscription(input)
         .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
     let Some(client) = state.rss.as_ref() else {
@@ -2508,6 +2512,7 @@ async fn create_bluesky_subscription(
     Json(input): Json<BlueskySubscriptionInput>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.bluesky").await?;
     let (handle, target, template, mention, enabled, interval) =
         validate_bluesky_subscription(input)
             .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
@@ -2555,6 +2560,7 @@ async fn update_bluesky_subscription(
     Json(input): Json<BlueskySubscriptionInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.bluesky").await?;
     let (handle, target, template, mention, enabled, interval) =
         validate_bluesky_subscription(input)
             .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
@@ -2759,6 +2765,7 @@ async fn create_reddit_subscription(
     Json(input): Json<RedditSubscriptionInput>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.reddit").await?;
     let (source, target, template, mention, enabled, interval) =
         validate_reddit_subscription(input)
             .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
@@ -2803,6 +2810,7 @@ async fn update_reddit_subscription(
     Json(input): Json<RedditSubscriptionInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.reddit").await?;
     let (source, target, template, mention, enabled, interval) =
         validate_reddit_subscription(input)
             .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
@@ -3001,6 +3009,7 @@ async fn create_x_subscription(
     Json(input): Json<XSubscriptionInput>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.x").await?;
     let (source, target, template, mention, enabled, interval) = validate_x_subscription(input)
         .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
     let client = require_x_provider(&state)?;
@@ -3041,6 +3050,7 @@ async fn update_x_subscription(
     Json(input): Json<XSubscriptionInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.x").await?;
     let (source, target, template, mention, enabled, interval) = validate_x_subscription(input)
         .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
     let client = require_x_provider(&state)?;
@@ -3245,6 +3255,7 @@ async fn create_tiktok_subscription(
     Json(input): Json<TikTokSubscriptionInput>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.tiktok").await?;
     let (source, target, template, mention, enabled, interval) =
         validate_tiktok_subscription(input)
             .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
@@ -3284,6 +3295,7 @@ async fn update_tiktok_subscription(
     Json(input): Json<TikTokSubscriptionInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.tiktok").await?;
     let (source, target, template, mention, enabled, interval) =
         validate_tiktok_subscription(input)
             .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
@@ -3461,6 +3473,7 @@ async fn create_instagram_subscription(
     Json(input): Json<InstagramSubscriptionInput>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.instagram").await?;
     let (username, target, template, mention, enabled, interval) =
         validate_instagram_subscription(input)
             .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
@@ -3499,6 +3512,7 @@ async fn update_instagram_subscription(
     Json(input): Json<InstagramSubscriptionInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.instagram").await?;
     let (username, target, template, mention, enabled, interval) =
         validate_instagram_subscription(input)
             .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
@@ -3659,6 +3673,7 @@ async fn create_kick_subscription(
     Json(input): Json<KickSubscriptionInput>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.kick").await?;
     let (source, target, template, mention, enabled, interval) = validate_kick_subscription(input)
         .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
     let client = require_kick_provider(&state)?;
@@ -3696,6 +3711,7 @@ async fn update_kick_subscription(
     Json(input): Json<KickSubscriptionInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.kick").await?;
     let (source, target, template, mention, enabled, interval) = validate_kick_subscription(input)
         .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
     let _ = require_kick_provider(&state)?;
@@ -3977,6 +3993,7 @@ async fn create_twitch_subscription(
     Json(input): Json<TwitchSubscriptionInput>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.twitch").await?;
     let (login, target, template, mention, enabled) = validate_twitch_subscription(input)
         .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
     let Some(client) = state.twitch.as_ref() else {
@@ -4030,6 +4047,7 @@ async fn update_twitch_subscription(
     Json(input): Json<TwitchSubscriptionInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.twitch").await?;
     let (login, target, template, mention, enabled) = validate_twitch_subscription(input)
         .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
     let Some(client) = state.twitch.as_ref() else {
@@ -6753,6 +6771,7 @@ async fn create_role_panel(
     Json(request): Json<RolePanelRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "community.role_panels").await?;
     if !feature_enabled(&state, &claims.guild_id, "community.role_panels") {
         return Err(client_error(StatusCode::CONFLICT, "feature_disabled"));
     }
@@ -6838,6 +6857,7 @@ async fn update_role_panel(
     Json(request): Json<RolePanelRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "community.role_panels").await?;
     if !feature_enabled(&state, &claims.guild_id, "community.role_panels") {
         return Err(client_error(StatusCode::CONFLICT, "feature_disabled"));
     }
@@ -6977,6 +6997,7 @@ async fn repair_role_panel(
     Path(message_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "community.role_panels").await?;
     if message_id.parse::<u64>().is_err() {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
@@ -7338,6 +7359,8 @@ struct FeatureDefinition {
     enabled: bool,
     maturity: FeatureMaturity,
     configurable: bool,
+    premium_required: bool,
+    premium_unlocked: bool,
     config_schema_version: u32,
     revision: u64,
     issues: Vec<ValidationIssue>,
@@ -7782,6 +7805,74 @@ const FEATURE_DEFINITIONS: &[(&str, &str, &str, &str, &str, bool)] = &[
     ),
 ];
 
+// Premium is deliberately scoped to advanced server operations.  The free
+// plan keeps the core safety, welcome, basic roles, XP and activity tools;
+// Premium adds the deeper automation, customisation and feed surfaces listed
+// on the public plan comparison.  Keep this policy next to the API catalogue
+// so the cards, detail routes and write endpoints share one source of truth.
+const PREMIUM_FEATURE_KEYS: &[&str] = &[
+    "community.role_panels",
+    "community.achievements",
+    "community.leaderboard",
+    "studio.rank_card",
+    "management.templates",
+    "management.workflows",
+    "social.twitch",
+    "social.youtube",
+    "social.instagram",
+    "social.reddit",
+    "social.x",
+    "social.tiktok",
+    "social.rss",
+    "social.podcasts",
+    "social.kick",
+    "social.bluesky",
+];
+
+fn feature_requires_premium(key: &str) -> bool {
+    PREMIUM_FEATURE_KEYS.contains(&key)
+}
+
+fn entitlement_is_active(snapshot: &helper_contracts::EntitlementSnapshot) -> bool {
+    snapshot.active
+        && snapshot
+            .expires_at
+            .is_none_or(|expires_at| expires_at > Utc::now())
+}
+
+/// Premium is a server entitlement.  When the central service is configured,
+/// never fall back to a user-wide cached record: a seat assigned to guild A
+/// must not unlock guild B while the entitlement service is unavailable.
+async fn guild_has_premium(state: &ApiState, claims: &SessionClaims) -> bool {
+    if let Some(client) = &state.entitlements {
+        return client
+            .resolve(&claims.user_id, Some(&claims.guild_id))
+            .await
+            .ok()
+            .is_some_and(|snapshot| {
+                entitlement_is_active(&snapshot) && matches!(snapshot.plan, Plan::Premium { .. })
+            });
+    }
+
+    matches!(effective_plan(state, claims).await, Plan::Premium { .. })
+}
+
+async fn feature_premium_unlocked(state: &ApiState, claims: &SessionClaims, key: &str) -> bool {
+    !feature_requires_premium(key) || guild_has_premium(state, claims).await
+}
+
+async fn require_feature_premium(
+    state: &ApiState,
+    claims: &SessionClaims,
+    key: &str,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if feature_premium_unlocked(state, claims, key).await {
+        Ok(())
+    } else {
+        Err(client_error(StatusCode::FORBIDDEN, "premium_required"))
+    }
+}
+
 fn feature_key(key: &str) -> String {
     format!("feature.{key}")
 }
@@ -7800,6 +7891,7 @@ async fn feature_config(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_auth(&state, &headers)?;
+    let premium_enabled = guild_has_premium(&state, &claims).await;
     let rows = FEATURE_DEFINITIONS
         .iter()
         .map(
@@ -7822,7 +7914,9 @@ async fn feature_config(
                 // Use the same provider/maturity guard used by feature detail
                 // and runtime checks.  A stale legacy flag must never make a
                 // blocked or dependency-down feature appear active.
-                let enabled = feature_enabled(&state, &claims.guild_id, key);
+                let premium_required = feature_requires_premium(key);
+                let premium_unlocked = !premium_required || premium_enabled;
+                let enabled = premium_unlocked && feature_enabled(&state, &claims.guild_id, key);
                 let adapter = feature_adapter(key).map(|value| value.descriptor());
                 let health = FeatureHealthSummary {
                     status: feature_health_status(
@@ -7856,6 +7950,8 @@ async fn feature_config(
                     enabled,
                     maturity,
                     configurable,
+                    premium_required,
+                    premium_unlocked,
                     config_schema_version: FEATURE_SCHEMA_VERSION,
                     revision: stored.as_ref().map(|value| value.revision).unwrap_or(0),
                     issues,
@@ -8659,6 +8755,34 @@ async fn feature_detail(
     if feature_definition(&key).is_none() {
         return Err(client_error(StatusCode::NOT_FOUND, "unknown_feature"));
     }
+    let premium_required = feature_requires_premium(&key);
+    let premium_unlocked = feature_premium_unlocked(&state, &claims, &key).await;
+    if premium_required && !premium_unlocked {
+        return Ok(Json(serde_json::json!({
+            "guildId": claims.guild_id,
+            "key": key,
+            "enabled": false,
+            "config": {},
+            "defaults": feature_defaults(&key),
+            "schema": feature_schema(&key),
+            "revision": 0,
+            "maturity": effective_feature_maturity(&state, &key),
+            "configurable": feature_configurable_for(&state, &key),
+            "premiumRequired": true,
+            "premiumUnlocked": false,
+            "schemaVersion": FEATURE_SCHEMA_VERSION,
+            "health": {
+                "status": "premium_required",
+                "operational": false,
+                "issues": [{
+                    "path": "plan",
+                    "code": "premium_required",
+                    "message": "This feature is available with Vozen Premium on this server.",
+                    "severity": "error"
+                }]
+            }
+        })));
+    }
     let stored = state
         .store
         .get_feature_setting(&claims.guild_id, &key)
@@ -8718,6 +8842,8 @@ async fn feature_detail(
         "revision": revision,
         "maturity": maturity,
         "configurable": feature_configurable_for(&state, &key),
+        "premiumRequired": premium_required,
+        "premiumUnlocked": premium_unlocked,
         "schemaVersion": FEATURE_SCHEMA_VERSION,
         "health": {"maturity": maturity, "status": health_status, "adapter": adapter.as_ref().map(|value| value.source.clone()), "dependencies": adapter.as_ref().map(|value| value.dependencies.clone()).unwrap_or_default(), "operational": feature_is_operational(&state, &key, maturity, &health_issues) && preflight_ok, "issues": health_issues, "preflight": preflight},
     })))
@@ -8841,6 +8967,9 @@ async fn update_feature_detail(
     let Some(_definition) = feature_definition(&key) else {
         return Err(client_error(StatusCode::BAD_REQUEST, "unknown_feature"));
     };
+    if update.enabled {
+        require_feature_premium(&state, &claims, &key).await?;
+    }
     if !feature_configurable_for(&state, &key) {
         return Err(client_error(
             StatusCode::NOT_IMPLEMENTED,
@@ -9576,6 +9705,9 @@ async fn feature_rollback(
     else {
         return Err(client_error(StatusCode::NOT_FOUND, "revision_not_found"));
     };
+    if previous.enabled {
+        require_feature_premium(&state, &claims, &key).await?;
+    }
     let config: serde_json::Value = serde_json::from_str(&previous.config_json)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid_stored_config"))?;
     // Rollback is a mutation just like a fresh publish: re-run the same
@@ -9874,6 +10006,9 @@ async fn update_feature_config(
     let claims = require_mutation_auth(&state, &headers)?;
     if feature_definition(&update.key).is_none() {
         return Err(client_error(StatusCode::BAD_REQUEST, "unknown_feature"));
+    }
+    if update.enabled {
+        require_feature_premium(&state, &claims, &update.key).await?;
     }
     // Provider-backed integrations are promoted dynamically once their
     // official client and approval gate are ready.  Use the same decision as
@@ -10322,6 +10457,7 @@ async fn create_studio_template(
     Json(input): Json<StudioTemplateInput>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "management.templates").await?;
     if !validate_template_input(&input) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template"));
     }
@@ -10362,6 +10498,7 @@ async fn update_studio_template(
     Json(input): Json<StudioTemplateInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "management.templates").await?;
     if !valid_template_id(&id) || !validate_template_input(&input) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_template"));
     }
@@ -10426,6 +10563,7 @@ async fn rollback_studio_template(
     Json(input): Json<StudioTemplateRollbackInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "management.templates").await?;
     if !valid_template_id(&id) || input.revision == 0 {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
@@ -10629,6 +10767,7 @@ async fn update_studio_rank_card(
     Json(config): Json<RankCardConfig>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "studio.rank_card").await?;
     if !valid_rank_card_config(&config) {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_rank_card"));
     }
@@ -11184,6 +11323,7 @@ async fn create_workflow(
     Json(request): Json<WorkflowRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "management.workflows").await?;
     if !(1..=50).contains(&request.name.trim().len())
         || request.trigger != "message"
         || request.action != "reply"
@@ -11566,6 +11706,12 @@ mod tests {
         }
     }
 
+    fn grant_premium(store: &Store, session: &SessionClaims) {
+        let mut entitlement = helper_contracts::EntitlementSnapshot::free(session.user_id.clone());
+        entitlement.plan = Plan::Premium { guild_limit: 1 };
+        store.save_entitlement(&entitlement).unwrap();
+    }
+
     #[test]
     fn preflight_collects_array_resources_and_level_reward_roles() {
         let config = serde_json::json!({
@@ -11868,6 +12014,17 @@ mod tests {
             .unwrap();
         assert_eq!(anti_spam["health"]["adapter"], "anti_spam_adapter_v1");
         assert_eq!(anti_spam["health"]["operational"], true);
+        assert_eq!(anti_spam["premium_required"], false);
+        assert_eq!(anti_spam["premium_unlocked"], true);
+        let premium_workflows = body["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["key"] == "management.workflows")
+            .unwrap();
+        assert_eq!(premium_workflows["premium_required"], true);
+        assert_eq!(premium_workflows["premium_unlocked"], false);
+        assert_eq!(premium_workflows["enabled"], false);
         let levels = body["features"]
             .as_array()
             .unwrap()
@@ -11901,6 +12058,52 @@ mod tests {
         assert_eq!(
             store
                 .get_setting("guild-a", "feature.community.levels")
+                .unwrap()
+                .as_deref(),
+            Some("true")
+        );
+
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config/features")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"key":"management.workflows","enabled":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                .unwrap();
+        assert_eq!(body["code"], "premium_required");
+
+        let mut entitlement = helper_contracts::EntitlementSnapshot::free(session.user_id.clone());
+        entitlement.plan = Plan::Premium { guild_limit: 1 };
+        store.save_entitlement(&entitlement).unwrap();
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config/features")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"key":"management.workflows","enabled":true}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            store
+                .get_setting("guild-a", "feature.management.workflows")
                 .unwrap()
                 .as_deref(),
             Some("true")
@@ -11965,10 +12168,21 @@ mod tests {
                     .unwrap();
             assert_eq!(body["key"], *key);
             assert_eq!(body["configurable"], true, "{key} must remain discoverable");
-            assert!(body["adapter"].as_str().is_some(), "{key} has no adapter");
             assert!(body["schema"].is_object(), "{key} has no schema");
             assert!(body["defaults"].is_object(), "{key} has no defaults");
             assert!(body["health"]["status"].as_str().is_some());
+            if feature_requires_premium(key) {
+                assert_eq!(
+                    body["premiumRequired"], true,
+                    "{key} must advertise Premium"
+                );
+                assert_eq!(body["premiumUnlocked"], false, "{key} must be locked");
+                assert_eq!(body["health"]["status"], "premium_required");
+            } else {
+                assert!(body["adapter"].as_str().is_some(), "{key} has no adapter");
+                assert_eq!(body["premiumRequired"], false);
+                assert_eq!(body["premiumUnlocked"], true);
+            }
         }
     }
 
@@ -12404,6 +12618,7 @@ mod tests {
         let session = claims("guild-a");
         let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
         store.save_session(&session).unwrap();
+        grant_premium(&store, &session);
         store
             .replace_session_guilds(
                 session.session_id,
@@ -12624,6 +12839,7 @@ mod tests {
         let session = claims("guild-a");
         let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
         store.save_session(&session).unwrap();
+        grant_premium(&store, &session);
 
         let config = serde_json::json!({
             "font": "poppins",
@@ -12873,6 +13089,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["brand"]["primary_color"], "#123ABC");
 
+        grant_premium(&store, &session);
         let template_input = serde_json::json!({
             "name": "Gaming onboarding",
             "description": "Safe defaults for a gaming community",
@@ -13081,12 +13298,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_enforces_free_workflow_quota() {
+    async fn api_enforces_premium_workflow_quota() {
         let store = Store::open(":memory:").unwrap();
         let session = claims("guild-a");
         store.save_session(&session).unwrap();
+        grant_premium(&store, &session);
         let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
-        for index in 0..3 {
+        for index in 0..25 {
             store
                 .create_workflow(
                     "guild-a",
