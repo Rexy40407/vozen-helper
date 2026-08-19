@@ -3541,6 +3541,8 @@ impl EventHandler for Handler {
         }
         if feature_enabled(&self.store, &guild_text, "protection.antispam", None) {
             let policy = anti_spam_policy_for_store(&self.store, &guild_text);
+            let (link_count, uppercase_letters, letter_count) =
+                anti_spam_content_metrics(&message.content);
             let window_seconds = policy.window_seconds;
             let now = Instant::now();
             let key = format!("{}:{}", guild_id, message.author.id);
@@ -3587,6 +3589,9 @@ impl EventHandler for Handler {
                     message_count: count as u32,
                     duplicate_count: duplicate_count as u32,
                     mention_count: message.mentions.len() as u32,
+                    link_count,
+                    uppercase_letters,
+                    letter_count,
                 },
             );
             if !decision.ignored && !decision.matched.is_empty() {
@@ -3614,7 +3619,7 @@ impl EventHandler for Handler {
                         &message.author.id.to_string(),
                         &message.author.id.to_string(),
                         &format!(
-                            "Spam detected ({signals}): {count} messages/{window_seconds}s, {duplicate_count} duplicates, {mention_count} mentions",
+                            "Spam detected ({signals}): {count} messages/{window_seconds}s, {duplicate_count} duplicates, {mention_count} mentions, {link_count} links, {uppercase_letters}/{letter_count} uppercase letters",
                             signals = decision.matched.join(", "),
                             mention_count = message.mentions.len(),
                         ),
@@ -3642,6 +3647,9 @@ impl EventHandler for Handler {
                             .await;
                     }
                     if decision.should_act {
+                        if decision.should_delete {
+                            let _ = message.delete(&ctx.http).await;
+                        }
                         if decision.timeout_seconds > 0 {
                             let until = (chrono::Utc::now()
                                 + chrono::Duration::seconds(decision.timeout_seconds as i64))
@@ -11702,11 +11710,47 @@ fn anti_spam_policy_for_store(store: &Store, guild_id: &str) -> AntiSpamPolicy {
         "windowSeconds": setting_u64(store, guild_id, "security.antispam.window_seconds", 10),
         "duplicateLimit": setting_u64(store, guild_id, "security.antispam.duplicate_limit", 3),
         "mentionLimit": setting_u64(store, guild_id, "security.antispam.mention_limit", 5),
+        "maxLinks": setting_u64(store, guild_id, "security.antispam.max_links", 5),
+        "capsPercent": setting_u64(store, guild_id, "security.antispam.caps_percent", 80),
+        "capsMinLetters": setting_u64(store, guild_id, "security.antispam.caps_min_letters", 8),
         "timeoutSeconds": setting_u64(store, guild_id, "security.antispam.timeout_seconds", 60),
         "ignoredChannels": csv("security.antispam.ignored_channels"),
         "ignoredRoles": csv("security.antispam.ignored_roles"),
         "alertOnly": setting_bool(store, guild_id, "security.antispam.alert_only", false),
+        "deleteMessage": setting_bool(store, guild_id, "security.antispam.delete_message", false),
     }))
+}
+
+/// Measure content once before entering the shared anti-spam evaluator. URL
+/// tokens count toward the link rule but do not distort the uppercase ratio.
+fn anti_spam_content_metrics(content: &str) -> (u32, u32, u32) {
+    let mut links = 0_u32;
+    let mut uppercase_letters = 0_u32;
+    let mut letters = 0_u32;
+
+    for raw_token in content.split_whitespace() {
+        let token = raw_token.trim_matches(|character: char| {
+            character.is_ascii_punctuation() && character != '/' && character != ':'
+        });
+        let normalized = token.to_ascii_lowercase();
+        if normalized.starts_with("http://")
+            || normalized.starts_with("https://")
+            || normalized.starts_with("www.")
+        {
+            links = links.saturating_add(1);
+            continue;
+        }
+        for character in token.chars() {
+            if character.is_alphabetic() {
+                letters = letters.saturating_add(1);
+                if character.is_uppercase() {
+                    uppercase_letters = uppercase_letters.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    (links, uppercase_letters, letters)
 }
 
 fn scam_policy_for_store(store: &Store, guild_id: &str) -> helper_core::ScamPolicy {
@@ -12219,13 +12263,13 @@ mod tests {
     use super::{
         HELPER_LANGUAGE_SETTING, HELPER_LOCALES, OpenSeaCollectionInfo, account_age_days,
         adapter::{DiscordAdapter, Effect, FakeDiscordAdapter},
-        command_feature_key, custom_command_channel_ignored, custom_command_is_staff,
-        english_bot_text, evaluate_nickname, feature_enabled, feature_title, format_nft_collection,
-        helper_locale, helper_locale_for_guild, is_destructive_audit_action, join_burst_armed,
-        parse_custom_command, parse_duration, parse_reminder_delay, parse_scheduled_event_window,
-        reminder_repeat_interval_ms, render_custom_command, rss_retry_seconds,
-        scheduled_action_feature, shadow_mode_enabled, should_cleanup_temp_channel,
-        template_message,
+        anti_spam_content_metrics, command_feature_key, custom_command_channel_ignored,
+        custom_command_is_staff, english_bot_text, evaluate_nickname, feature_enabled,
+        feature_title, format_nft_collection, helper_locale, helper_locale_for_guild,
+        is_destructive_audit_action, join_burst_armed, parse_custom_command, parse_duration,
+        parse_reminder_delay, parse_scheduled_event_window, reminder_repeat_interval_ms,
+        render_custom_command, rss_retry_seconds, scheduled_action_feature, shadow_mode_enabled,
+        should_cleanup_temp_channel, template_message,
     };
     use chrono::TimeZone;
     use helper_store::Store;
@@ -12255,6 +12299,14 @@ mod tests {
             .set_setting("guild", HELPER_LANGUAGE_SETTING, "pt-BR")
             .unwrap();
         assert_eq!(helper_locale_for_guild(&store, "guild").unwrap(), "en");
+    }
+
+    #[test]
+    fn anti_spam_content_metrics_counts_links_without_skewing_caps_detection() {
+        assert_eq!(
+            anti_spam_content_metrics("LOUD https://vozen.org/docs, www.vozen.org"),
+            (2, 4, 4)
+        );
     }
 
     #[test]

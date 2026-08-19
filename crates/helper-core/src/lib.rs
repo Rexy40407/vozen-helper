@@ -206,6 +206,15 @@ pub fn anti_spam_policy_from_json(value: &serde_json::Value) -> AntiSpamPolicy {
     if let Some(value) = number("mentionLimit") {
         policy.mention_limit = value.clamp(1, 30) as u32;
     }
+    if let Some(value) = number("maxLinks") {
+        policy.max_links = value.clamp(1, 20) as u32;
+    }
+    if let Some(value) = number("capsPercent") {
+        policy.caps_percent = value.clamp(50, 100) as u32;
+    }
+    if let Some(value) = number("capsMinLetters") {
+        policy.caps_min_letters = value.clamp(4, 100) as u32;
+    }
     if let Some(value) = number("timeoutSeconds") {
         policy.timeout_seconds = value.min(86_400);
     }
@@ -231,6 +240,12 @@ pub fn anti_spam_policy_from_json(value: &serde_json::Value) -> AntiSpamPolicy {
     }
     if let Some(value) = object.get("alertOnly").and_then(serde_json::Value::as_bool) {
         policy.alert_only = value;
+    }
+    if let Some(value) = object
+        .get("deleteMessage")
+        .and_then(serde_json::Value::as_bool)
+    {
+        policy.delete_message = value;
     }
     policy
 }
@@ -275,6 +290,9 @@ pub fn anti_spam_observation_from_json(value: &serde_json::Value) -> AntiSpamObs
         message_count: number("messageCount", "message_count", 6),
         duplicate_count: number("duplicateCount", "duplicate_count", 3),
         mention_count: number("mentionCount", "mention_count", 5),
+        link_count: number("linkCount", "link_count", 0),
+        uppercase_letters: number("uppercaseLetters", "uppercase_letters", 0),
+        letter_count: number("letterCount", "letter_count", 0),
     }
 }
 
@@ -9105,11 +9123,12 @@ impl AntiSpamAdapter {
             "sections": [
                 {
                     "title": "Resposta automática",
-                    "description": "Deteta padrões de flood, repetição e menções com limites seguros.",
+                    "description": "Deteta flood, repetição, menções, excesso de links e caps com limites seguros.",
                     "fields": [
                         {"key":"floodCount","label":"Mensagens no intervalo","kind":"number","min":3,"max":30,"help":"Número de mensagens do mesmo membro antes de sinalizar."},
                         {"key":"windowSeconds","label":"Janela de tempo (segundos)","kind":"number","min":3,"max":60,"help":"As mensagens antigas saem automaticamente desta janela."},
                         {"key":"duplicateLimit","label":"Repetições iguais","kind":"number","min":2,"max":12,"help":"Quantas mensagens iguais acionam a regra."},
+                        {"key":"maxLinks","label":"Limite de links por mensagem","kind":"number","min":1,"max":20,"help":"Quantos links numa mensagem acionam a regra."},
                         {"key":"timeoutSeconds","label":"Timeout inicial (segundos)","kind":"number","min":0,"max":86400,"help":"Usa 0 para apenas registar o incidente."}
                     ]
                 },
@@ -9118,10 +9137,13 @@ impl AntiSpamAdapter {
                     "description": "Escolhe recursos reais do servidor para evitar falsos positivos e receber contexto.",
                     "fields": [
                         {"key":"mentionLimit","label":"Limite de menções por mensagem","kind":"number","min":1,"max":30,"advanced":true},
+                        {"key":"capsPercent","label":"Percentagem máxima de maiúsculas","kind":"number","min":50,"max":100,"advanced":true},
+                        {"key":"capsMinLetters","label":"Mínimo de letras para avaliar caps","kind":"number","min":4,"max":100,"advanced":true},
                         {"key":"ignoredChannels","label":"Canais ignorados","kind":"channels","help":"Mensagens nestes canais não entram no avaliador.","advanced":true},
                         {"key":"ignoredRoles","label":"Cargos ignorados","kind":"roles","help":"Membros com um destes cargos não entram no avaliador.","advanced":true},
                         {"key":"logChannel","label":"Canal de registo","kind":"channel","help":"O Helper publica aqui o motivo e o modo da decisão.","advanced":true},
-                        {"key":"alertOnly","label":"Apenas alertar, sem aplicar castigo","kind":"toggle","help":"Mantém a deteção e auditoria, mas não aplica timeout.","advanced":true}
+                        {"key":"alertOnly","label":"Apenas alertar, sem aplicar castigo","kind":"toggle","help":"Mantém a deteção e auditoria, mas não aplica timeout.","advanced":true},
+                        {"key":"deleteMessage","label":"Apagar a mensagem que acionou a regra","kind":"toggle","help":"Só apaga quando a ação estiver ativa; nunca no modo apenas alertar.","advanced":true}
                     ]
                 }
             ]
@@ -9135,10 +9157,14 @@ impl AntiSpamAdapter {
             "duplicateLimit": 3,
             "timeoutSeconds": 60,
             "mentionLimit": 5,
+            "maxLinks": 5,
+            "capsPercent": 80,
+            "capsMinLetters": 8,
             "ignoredChannels": [],
             "ignoredRoles": [],
             "logChannel": "",
-            "alertOnly": false
+            "alertOnly": false,
+            "deleteMessage": false
         })
     }
 }
@@ -9172,6 +9198,9 @@ impl FeatureAdapter for AntiSpamAdapter {
             ("duplicateLimit", 2, 12),
             ("timeoutSeconds", 0, 86_400),
             ("mentionLimit", 1, 30),
+            ("maxLinks", 1, 20),
+            ("capsPercent", 50, 100),
+            ("capsMinLetters", 4, 100),
         ] {
             if let Some(value) = config.get(name).and_then(serde_json::Value::as_i64)
                 && !(min..=max).contains(&value)
@@ -9184,16 +9213,18 @@ impl FeatureAdapter for AntiSpamAdapter {
                 });
             }
         }
-        if config
-            .get("alertOnly")
-            .is_some_and(|value| !value.is_boolean())
-        {
-            issues.push(ValidationIssue {
-                path: "alertOnly".into(),
-                code: "boolean_required".into(),
-                message: "Apenas alertar tem de ser verdadeiro ou falso.".into(),
-                severity: "error".into(),
-            });
+        for (field, label) in [
+            ("alertOnly", "Apenas alertar"),
+            ("deleteMessage", "Apagar mensagem"),
+        ] {
+            if config.get(field).is_some_and(|value| !value.is_boolean()) {
+                issues.push(ValidationIssue {
+                    path: field.into(),
+                    code: "boolean_required".into(),
+                    message: format!("{label} tem de ser verdadeiro ou falso."),
+                    severity: "error".into(),
+                });
+            }
         }
         for field in ["ignoredChannels", "ignoredRoles"] {
             if let Some(value) = config.get(field) {
@@ -9245,6 +9276,9 @@ impl FeatureAdapter for AntiSpamAdapter {
             ("duplicateLimit", "security.antispam.duplicate_limit"),
             ("timeoutSeconds", "security.antispam.timeout_seconds"),
             ("mentionLimit", "security.antispam.mention_limit"),
+            ("maxLinks", "security.antispam.max_links"),
+            ("capsPercent", "security.antispam.caps_percent"),
+            ("capsMinLetters", "security.antispam.caps_min_letters"),
         ] {
             if let Some(value) = object.get(field).and_then(serde_json::Value::as_i64) {
                 add(setting, value.to_string());
@@ -9268,8 +9302,13 @@ impl FeatureAdapter for AntiSpamAdapter {
                 );
             }
         }
-        if let Some(value) = object.get("alertOnly").and_then(serde_json::Value::as_bool) {
-            add("security.antispam.alert_only", value.to_string());
+        for (field, setting) in [
+            ("alertOnly", "security.antispam.alert_only"),
+            ("deleteMessage", "security.antispam.delete_message"),
+        ] {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_bool) {
+                add(setting, value.to_string());
+            }
         }
         pairs
     }
@@ -9289,17 +9328,30 @@ impl FeatureAdapter for AntiSpamAdapter {
         } else {
             "monitor-only"
         };
-        let action = if decision.should_act && decision.timeout_seconds > 0 {
-            format!(" and apply a {} second timeout", decision.timeout_seconds)
-        } else {
+        let mut actions = Vec::new();
+        if decision.should_delete {
+            actions.push("delete the matching message".to_string());
+        }
+        if decision.should_act && decision.timeout_seconds > 0 {
+            actions.push(format!(
+                "apply a {} second timeout",
+                decision.timeout_seconds
+            ));
+        }
+        let action = if actions.is_empty() {
             String::new()
+        } else {
+            format!(" and {}", actions.join(" and "))
         };
         let mut effects = vec![format!(
-            "Record {} in {mode} mode{action} ({} messages, {} duplicate(s), {} mention(s)).",
+            "Record {} in {mode} mode{action} ({} messages, {} duplicate(s), {} mention(s), {} link(s), {} uppercase letters out of {} letters).",
             decision.matched.join(", "),
             observation.message_count,
             observation.duplicate_count,
-            observation.mention_count
+            observation.mention_count,
+            observation.link_count,
+            observation.uppercase_letters,
+            observation.letter_count
         )];
         if let Some(channel) = config
             .get("logChannel")
@@ -10991,6 +11043,7 @@ pub fn evaluate_anti_spam(
             ignored: true,
             matched: Vec::new(),
             should_act: false,
+            should_delete: false,
             timeout_seconds: 0,
             reason: "channel_or_role_exempt".into(),
         };
@@ -11005,6 +11058,15 @@ pub fn evaluate_anti_spam(
     if observation.mention_count >= policy.mention_limit {
         matched.push("mentions".into());
     }
+    if observation.link_count >= policy.max_links {
+        matched.push("links".into());
+    }
+    if observation.letter_count >= policy.caps_min_letters
+        && (observation.uppercase_letters as u64).saturating_mul(100)
+            >= (policy.caps_percent as u64).saturating_mul(observation.letter_count as u64)
+    {
+        matched.push("caps".into());
+    }
     let should_act = !matched.is_empty() && !policy.alert_only;
     let reason = if matched.is_empty() {
         "no_match".into()
@@ -11015,6 +11077,7 @@ pub fn evaluate_anti_spam(
         ignored: false,
         matched,
         should_act,
+        should_delete: should_act && policy.delete_message,
         timeout_seconds: if should_act {
             policy.timeout_seconds
         } else {
@@ -11666,6 +11729,9 @@ mod tests {
                 message_count: 5,
                 duplicate_count: 2,
                 mention_count: 4,
+                link_count: 0,
+                uppercase_letters: 0,
+                letter_count: 0,
             },
         );
         assert_eq!(decision.matched, vec!["flood", "duplicate", "mentions"]);
@@ -11685,11 +11751,44 @@ mod tests {
                 message_count: 5,
                 duplicate_count: 0,
                 mention_count: 0,
+                link_count: 0,
+                uppercase_letters: 0,
+                letter_count: 0,
             },
         );
         assert!(!decision.should_act);
+        assert!(!decision.should_delete);
         assert_eq!(decision.timeout_seconds, 0);
         assert_eq!(decision.matched, vec!["flood"]);
+    }
+
+    #[test]
+    fn anti_spam_detects_link_and_caps_bursts_and_can_delete_the_message() {
+        let policy = anti_spam_policy_from_json(&serde_json::json!({
+            "maxLinks": 3,
+            "capsPercent": 75,
+            "capsMinLetters": 8,
+            "deleteMessage": true,
+            "timeoutSeconds": 300,
+        }));
+        let decision = evaluate_anti_spam(
+            &policy,
+            &AntiSpamObservation {
+                channel_id: "general".into(),
+                role_ids: vec![],
+                message_count: 1,
+                duplicate_count: 1,
+                mention_count: 0,
+                link_count: 3,
+                uppercase_letters: 9,
+                letter_count: 10,
+            },
+        );
+
+        assert_eq!(decision.matched, vec!["links", "caps"]);
+        assert!(decision.should_act);
+        assert!(decision.should_delete);
+        assert_eq!(decision.timeout_seconds, 300);
     }
 
     #[test]
@@ -11708,6 +11807,9 @@ mod tests {
                     message_count: 99,
                     duplicate_count: 99,
                     mention_count: 99,
+                    link_count: 99,
+                    uppercase_letters: 99,
+                    letter_count: 99,
                 },
             );
             assert!(decision.ignored);
@@ -11722,23 +11824,42 @@ mod tests {
         let descriptor = adapter.descriptor();
         assert_eq!(descriptor.source, "anti_spam_adapter_v1");
         assert_eq!(descriptor.defaults["floodCount"], 6);
+        assert_eq!(descriptor.defaults["maxLinks"], 5);
+        assert_eq!(descriptor.defaults["capsPercent"], 80);
+        assert_eq!(descriptor.defaults["deleteMessage"], false);
         assert!(descriptor.schema["sections"].as_array().unwrap().len() >= 2);
         let issues = adapter.validate(&serde_json::json!({
             "floodCount": 2,
+            "maxLinks": 0,
+            "capsPercent": 101,
+            "capsMinLetters": 1,
+            "deleteMessage": "yes",
             "ignoredChannels": [""],
             "logChannel": "not-a-discord-id",
             "alertOnly": "true"
         }));
         assert!(issues.iter().any(|issue| issue.path == "floodCount"));
+        assert!(issues.iter().any(|issue| issue.path == "maxLinks"));
+        assert!(issues.iter().any(|issue| issue.path == "capsPercent"));
+        assert!(issues.iter().any(|issue| issue.path == "capsMinLetters"));
+        assert!(issues.iter().any(|issue| issue.path == "deleteMessage"));
         assert!(issues.iter().any(|issue| issue.path == "ignoredChannels"));
         assert!(issues.iter().any(|issue| issue.path == "logChannel"));
         assert!(issues.iter().any(|issue| issue.path == "alertOnly"));
         let projection = adapter.runtime_projection(&serde_json::json!({
             "floodCount": 8,
+            "maxLinks": 4,
+            "capsPercent": 70,
+            "capsMinLetters": 10,
+            "deleteMessage": true,
             "ignoredChannels": ["123"],
             "alertOnly": true
         }));
         assert!(projection.contains(&("security.antispam.flood_count".into(), "8".into())));
+        assert!(projection.contains(&("security.antispam.max_links".into(), "4".into())));
+        assert!(projection.contains(&("security.antispam.caps_percent".into(), "70".into())));
+        assert!(projection.contains(&("security.antispam.caps_min_letters".into(), "10".into())));
+        assert!(projection.contains(&("security.antispam.delete_message".into(), "true".into())));
         assert!(projection.contains(&("security.antispam.ignored_channels".into(), "123".into())));
         assert!(projection.contains(&("security.antispam.alert_only".into(), "true".into())));
         assert!(feature_adapter("community.levels").is_some());

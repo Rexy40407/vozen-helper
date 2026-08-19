@@ -114,10 +114,14 @@ pub struct AntiSpamPolicy {
     pub window_seconds: u64,
     pub duplicate_limit: u32,
     pub mention_limit: u32,
+    pub max_links: u32,
+    pub caps_percent: u32,
+    pub caps_min_letters: u32,
     pub timeout_seconds: u64,
     pub ignored_channels: Vec<String>,
     pub ignored_roles: Vec<String>,
     pub alert_only: bool,
+    pub delete_message: bool,
 }
 
 impl Default for AntiSpamPolicy {
@@ -127,10 +131,16 @@ impl Default for AntiSpamPolicy {
             window_seconds: 10,
             duplicate_limit: 3,
             mention_limit: 5,
+            max_links: 5,
+            caps_percent: 80,
+            caps_min_letters: 8,
             timeout_seconds: 60,
             ignored_channels: Vec::new(),
             ignored_roles: Vec::new(),
             alert_only: false,
+            // Do not silently change the enforcement of existing guilds. New
+            // configurations can explicitly opt in to deletion.
+            delete_message: false,
         }
     }
 }
@@ -143,6 +153,12 @@ pub struct AntiSpamObservation {
     pub message_count: u32,
     pub duplicate_count: u32,
     pub mention_count: u32,
+    #[serde(default)]
+    pub link_count: u32,
+    #[serde(default)]
+    pub uppercase_letters: u32,
+    #[serde(default)]
+    pub letter_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -150,6 +166,8 @@ pub struct AntiSpamDecision {
     pub ignored: bool,
     pub matched: Vec<String>,
     pub should_act: bool,
+    #[serde(default)]
+    pub should_delete: bool,
     pub timeout_seconds: u64,
     pub reason: String,
 }

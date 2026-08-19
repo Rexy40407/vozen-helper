@@ -9562,6 +9562,9 @@ async fn test_feature(
         message_count: 6,
         duplicate_count: 3,
         mention_count: 5,
+        link_count: 0,
+        uppercase_letters: 0,
+        letter_count: 0,
     });
     let adapter_fixture = serde_json::json!({
         "content": test.content.clone(),
@@ -9570,6 +9573,9 @@ async fn test_feature(
         "messageCount": anti_spam_fixture.message_count,
         "duplicateCount": anti_spam_fixture.duplicate_count,
         "mentionCount": anti_spam_fixture.mention_count,
+        "linkCount": anti_spam_fixture.link_count,
+        "uppercaseLetters": anti_spam_fixture.uppercase_letters,
+        "letterCount": anti_spam_fixture.letter_count,
         "reactionCount": test.reaction_count,
         "reactorIds": test.reactor_ids,
         "authorId": test.author_id.clone(),
@@ -12287,6 +12293,10 @@ mod tests {
                 "windowSeconds": 12,
                 "duplicateLimit": 2,
                 "mentionLimit": 3,
+                "maxLinks": 3,
+                "capsPercent": 75,
+                "capsMinLetters": 8,
+                "deleteMessage": true,
                 "timeoutSeconds": 90,
                 "alertOnly": false
             },
@@ -12295,7 +12305,10 @@ mod tests {
                 "role_ids": [],
                 "message_count": 4,
                 "duplicate_count": 2,
-                "mention_count": 3
+                "mention_count": 3,
+                "link_count": 3,
+                "uppercase_letters": 9,
+                "letter_count": 10
             }
         });
         let response = router(state(store))
@@ -12316,9 +12329,10 @@ mod tests {
         assert_eq!(response["result"]["would_apply"], true);
         assert_eq!(
             response["decision"]["matched"],
-            serde_json::json!(["flood", "duplicate", "mentions"])
+            serde_json::json!(["flood", "duplicate", "mentions", "links", "caps"])
         );
         assert_eq!(response["decision"]["timeout_seconds"], 90);
+        assert_eq!(response["decision"]["should_delete"], true);
         assert!(
             response["adapterEffects"]
                 .as_array()
@@ -12333,6 +12347,13 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("timeout")
+        );
+        assert!(
+            response["result"]["effects"]
+                .as_array()
+                .is_some_and(|effects| effects
+                    .iter()
+                    .any(|effect| { effect.as_str().is_some_and(|text| text.contains("delete")) }))
         );
     }
 
@@ -12769,12 +12790,22 @@ mod tests {
                 .unwrap();
         assert_eq!(body["schema"]["source"], "anti_spam_adapter_v1");
         assert_eq!(body["defaults"]["floodCount"], 6);
+        assert_eq!(body["defaults"]["maxLinks"], 5);
+        assert_eq!(body["defaults"]["deleteMessage"], false);
         assert!(
             body["schema"]["sections"][1]["fields"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|field| field["kind"] == "channels")
+        );
+        assert!(
+            body["schema"]["sections"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|section| section["fields"].as_array().unwrap())
+                .any(|field| field["key"] == "deleteMessage")
         );
     }
 
