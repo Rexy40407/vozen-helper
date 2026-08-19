@@ -1601,6 +1601,14 @@ impl EventHandler for Handler {
                         "Sliding window in seconds (3-60)",
                     )
                     .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::Integer,
+                        "incident_minutes",
+                        "Temporary containment duration in minutes (1-120)",
+                    )
+                    .required(false),
                 ),
             CreateCommand::new("security-mode")
                 .description("Enable or disable shadow mode for high-risk security responses")
@@ -2746,6 +2754,13 @@ impl EventHandler for Handler {
         let audit_config = serde_json::json!({
             "threshold": threshold as i64,
             "windowSeconds": window_seconds as i64,
+            "incidentMinutes": setting_u64(
+                &self.store,
+                &guild_text,
+                "security.anti_nuke.incident_minutes",
+                10,
+            )
+            .clamp(1, 120) as i64,
             "shadowMode": shadow_mode_enabled(
                 self.store
                     .get_setting(&guild_text, "security.shadow_mode")
@@ -2806,28 +2821,51 @@ impl EventHandler for Handler {
             }
             return;
         }
-        // Containment is intentionally reversible and non-destructive: latch the
-        // join gate and ask staff to review the executor before any role removal.
-        let _ = self
-            .store
-            .set_setting(&guild_text, "security.join_gate.enabled", "true");
+        // Containment is intentionally reversible and non-destructive. It uses
+        // the same durable latch as anti-raid so overlapping incidents keep the
+        // gate closed until the latest deadline, then restore its prior state.
+        let gate_until = anti_nuke_containment_deadline(
+            Utc::now().timestamp(),
+            audit_decision.incident_minutes as u64,
+        );
+        let contained = match self.store.arm_anti_raid_latch(&guild_text, gate_until) {
+            Ok(()) => true,
+            Err(error) => {
+                warn!(%guild_text, %error, "could not arm anti-nuke containment");
+                false
+            }
+        };
         let _ = self.store.record_case(
             &guild_text,
             "anti_nuke",
             &executor,
             "helper",
-            &format!(
-                "{threshold} destructive actions in {window_seconds}s; join gate enabled for review"
-            ),
+            &if contained {
+                format!(
+                    "{threshold} destructive actions in {window_seconds}s; join gate enabled for {} minutes before automatic restoration",
+                    audit_decision.incident_minutes
+                )
+            } else {
+                format!(
+                    "{threshold} destructive actions in {window_seconds}s; containment could not be armed"
+                )
+            },
             None,
         );
         if let Some(channel_id) = audit_alert_channel {
             let _ = channel_id
                 .say(
                     &ctx.http,
-                    format!(
-                        "🚨 Possible nuke attack: <@{executor}> performed {threshold} destructive actions in {window_seconds}s. The join gate was enabled; review the Audit Log before removing roles."
-                    ),
+                    if contained {
+                        format!(
+                            "🚨 Possible nuke attack: <@{executor}> performed {threshold} destructive actions in {window_seconds}s. The join gate was enabled for {} minutes and will then restore its earlier state; review the Audit Log before removing roles.",
+                            audit_decision.incident_minutes
+                        )
+                    } else {
+                        format!(
+                            "🚨 Possible nuke attack: <@{executor}> performed {threshold} destructive actions in {window_seconds}s. The Helper could not arm temporary containment; review the Audit Log immediately."
+                        )
+                    },
                 )
                 .await;
         }
@@ -7831,6 +7869,9 @@ impl Handler {
                 let enabled = option_bool(command, "enabled").unwrap_or(false);
                 let actions = option_i64(command, "actions").unwrap_or(3).clamp(2, 25);
                 let window_seconds = option_i64(command, "window_seconds").unwrap_or(10).clamp(3, 60);
+                let incident_minutes = option_i64(command, "incident_minutes")
+                    .unwrap_or(10)
+                    .clamp(1, 120);
                 let guild_text = guild_id.to_string();
                 self.store.set_setting(
                     &guild_text,
@@ -7849,11 +7890,16 @@ impl Handler {
                 )?;
                 self.store.set_setting(
                     &guild_text,
+                    "security.anti_nuke.incident_minutes",
+                    &incident_minutes.to_string(),
+                )?;
+                self.store.set_setting(
+                    &guild_text,
                     "feature.management.audit",
                     if enabled { "true" } else { "false" },
                 )?;
                 if enabled {
-                    format!("Anti-nuke enabled: {actions} destructive actions in {window_seconds}s trigger containment and an alert.")
+                    format!("Anti-nuke enabled: {actions} destructive actions in {window_seconds}s trigger temporary containment for {incident_minutes} minutes and an alert.")
                 } else {
                     "Anti-nuke disabled; Audit Log events do not trigger automatic containment.".to_string()
                 }
@@ -11229,6 +11275,10 @@ fn shadow_mode_enabled(raw: Option<&str>) -> bool {
     raw.is_some_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
+fn anti_nuke_containment_deadline(now_seconds: i64, incident_minutes: u64) -> i64 {
+    now_seconds + i64::try_from(incident_minutes.clamp(1, 120)).unwrap_or(120) * 60
+}
+
 /// Capture a bounded baseline for invite attribution before member events are
 /// processed. Discord does not include an invite code in
 /// `guild_member_addition`, therefore a missing baseline would make the first
@@ -12327,14 +12377,14 @@ mod tests {
     use super::{
         HELPER_LANGUAGE_SETTING, HELPER_LOCALES, OpenSeaCollectionInfo, account_age_days,
         adapter::{DiscordAdapter, Effect, FakeDiscordAdapter},
-        anti_spam_content_metrics, command_feature_key, custom_command_channel_ignored,
-        custom_command_is_staff, english_bot_text, evaluate_join_gate_verification,
-        evaluate_nickname, feature_enabled, feature_title, format_nft_collection, helper_locale,
-        helper_locale_for_guild, is_destructive_audit_action, join_burst_armed,
-        parse_custom_command, parse_duration, parse_reminder_delay, parse_scheduled_event_window,
-        reminder_repeat_interval_ms, render_custom_command, rss_retry_seconds,
-        scheduled_action_feature, shadow_mode_enabled, should_cleanup_temp_channel,
-        template_message,
+        anti_nuke_containment_deadline, anti_spam_content_metrics, command_feature_key,
+        custom_command_channel_ignored, custom_command_is_staff, english_bot_text,
+        evaluate_join_gate_verification, evaluate_nickname, feature_enabled, feature_title,
+        format_nft_collection, helper_locale, helper_locale_for_guild, is_destructive_audit_action,
+        join_burst_armed, parse_custom_command, parse_duration, parse_reminder_delay,
+        parse_scheduled_event_window, reminder_repeat_interval_ms, render_custom_command,
+        rss_retry_seconds, scheduled_action_feature, shadow_mode_enabled,
+        should_cleanup_temp_channel, template_message,
     };
     use chrono::TimeZone;
     use helper_store::Store;
@@ -12730,6 +12780,13 @@ mod tests {
         assert!(!is_destructive_audit_action(
             serenity::model::guild::audit_log::Action::GuildUpdate
         ));
+    }
+
+    #[test]
+    fn anti_nuke_containment_deadline_is_temporary_and_bounded() {
+        assert_eq!(anti_nuke_containment_deadline(1_000, 10), 1_600);
+        assert_eq!(anti_nuke_containment_deadline(1_000, 0), 1_060);
+        assert_eq!(anti_nuke_containment_deadline(1_000, 999), 8_200);
     }
 
     #[test]

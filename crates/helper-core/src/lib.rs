@@ -3577,6 +3577,7 @@ pub struct AuditDecision {
     pub shadow_mode: bool,
     pub threshold: i64,
     pub window_seconds: i64,
+    pub incident_minutes: i64,
     pub log_channel_id: Option<String>,
     pub include_content: bool,
     pub reason_code: &'static str,
@@ -3599,6 +3600,11 @@ pub fn evaluate_audit(config: &serde_json::Value, destructive_actions: i64) -> A
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(10)
         .clamp(3, 60);
+    let incident_minutes = object
+        .and_then(|values| values.get("incidentMinutes"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(10)
+        .clamp(1, 120);
     let shadow_mode = object
         .and_then(|values| values.get("shadowMode"))
         .and_then(serde_json::Value::as_bool)
@@ -3622,6 +3628,7 @@ pub fn evaluate_audit(config: &serde_json::Value, destructive_actions: i64) -> A
             shadow_mode,
             threshold,
             window_seconds,
+            incident_minutes,
             log_channel_id: None,
             include_content,
             reason_code: "invalid_log_channel",
@@ -3634,6 +3641,7 @@ pub fn evaluate_audit(config: &serde_json::Value, destructive_actions: i64) -> A
             shadow_mode,
             threshold,
             window_seconds,
+            incident_minutes,
             log_channel_id,
             include_content,
             reason_code: "below_threshold",
@@ -3647,6 +3655,7 @@ pub fn evaluate_audit(config: &serde_json::Value, destructive_actions: i64) -> A
         shadow_mode,
         threshold,
         window_seconds,
+        incident_minutes,
         log_channel_id,
         include_content,
         reason_code: if shadow_mode {
@@ -3692,13 +3701,14 @@ impl FeatureAdapter for AuditAdapter {
                     "fields": [
                         {"key":"threshold","label":"Actions before containment","kind":"number","min":2,"max":25},
                         {"key":"windowSeconds","label":"Detection window (seconds)","kind":"number","min":3,"max":60},
+                        {"key":"incidentMinutes","label":"Containment duration (minutes)","kind":"number","min":1,"max":120,"help":"The join gate restores its earlier state when this temporary containment expires."},
                         {"key":"shadowMode","label":"Shadow mode","kind":"toggle","help":"Record and alert without automatic containment."},
                         {"key":"logChannel","label":"Audit log channel (optional)","kind":"channel","advanced":true},
                         {"key":"includeContent","label":"Include cached message content","kind":"toggle","advanced":true,"help":"Off by default. Discord may not provide content for every edit/delete event."}
                     ]
                 }]
             }),
-            defaults: serde_json::json!({"threshold": 3, "windowSeconds": 10, "shadowMode": false, "logChannel": "", "includeContent": false}),
+            defaults: serde_json::json!({"threshold": 3, "windowSeconds": 10, "incidentMinutes": 10, "shadowMode": false, "logChannel": "", "includeContent": false}),
             dependencies: vec!["view_audit_log".into()],
         }
     }
@@ -3716,6 +3726,7 @@ impl FeatureAdapter for AuditAdapter {
         for (field, min, max, label) in [
             ("threshold", 2_i64, 25_i64, "Threshold"),
             ("windowSeconds", 3_i64, 60_i64, "Window"),
+            ("incidentMinutes", 1_i64, 120_i64, "Containment duration"),
         ] {
             if let Some(value) = object.get(field) {
                 if let Some(value) = value.as_i64() {
@@ -3792,6 +3803,15 @@ impl FeatureAdapter for AuditAdapter {
             ));
         }
         if let Some(value) = object
+            .get("incidentMinutes")
+            .and_then(serde_json::Value::as_i64)
+        {
+            projection.push((
+                "security.anti_nuke.incident_minutes".into(),
+                value.to_string(),
+            ));
+        }
+        if let Some(value) = object
             .get("shadowMode")
             .and_then(serde_json::Value::as_bool)
         {
@@ -3819,8 +3839,8 @@ impl FeatureAdapter for AuditAdapter {
             )]
         } else if decision.should_contain {
             vec![format!(
-                "Contain the executor after {} destructive actions in {}s by enabling the join gate and recording an audit case.",
-                decision.threshold, decision.window_seconds
+                "Contain the executor after {} destructive actions in {}s by enabling the join gate for {} minutes and recording an audit case.",
+                decision.threshold, decision.window_seconds, decision.incident_minutes
             )]
         } else if decision.shadow_mode && actions >= decision.threshold {
             vec![format!(
@@ -12381,14 +12401,19 @@ mod tests {
 
         let audit = feature_adapter("management.audit").expect("audit adapter");
         assert_eq!(audit.descriptor().defaults["threshold"], 3);
+        assert_eq!(audit.descriptor().defaults["incidentMinutes"], 10);
         let audit_projection = audit.runtime_projection(&serde_json::json!({
             "threshold": 5,
             "windowSeconds": 20,
+            "incidentMinutes": 15,
             "shadowMode": true,
             "logChannel": "123",
             "includeContent": true
         }));
         assert!(audit_projection.contains(&("security.anti_nuke.actions".into(), "5".into())));
+        assert!(
+            audit_projection.contains(&("security.anti_nuke.incident_minutes".into(), "15".into()))
+        );
         assert!(audit_projection.contains(&("security.shadow_mode".into(), "true".into())));
         assert!(audit_projection.contains(&("management.audit.log_channel".into(), "123".into())));
         assert!(
@@ -12399,6 +12424,12 @@ mod tests {
                 .validate(&serde_json::json!({"logChannel": "not-a-channel"}))
                 .iter()
                 .any(|issue| issue.path == "logChannel")
+        );
+        assert!(
+            audit
+                .validate(&serde_json::json!({"incidentMinutes": 0}))
+                .iter()
+                .any(|issue| issue.path == "incidentMinutes")
         );
         let shadow_preview = audit.simulate(
             &serde_json::json!({
