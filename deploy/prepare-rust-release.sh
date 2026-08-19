@@ -2,13 +2,30 @@
 set -euo pipefail
 
 version="${1:?release version required}"
-oauth_secret="${DISCORD_OAUTH_CLIENT_SECRET:?set DISCORD_OAUTH_CLIENT_SECRET to the real Discord application secret}"
-vozen_oauth_client_id="${VOZEN_ECOSYSTEM_OAUTH_CLIENT_ID:-1537738930722443364}"
-private_tracker_client_id="${HELPER_PRIVATE_TRACKER_CLIENT_ID:-}"
-private_tracker_owner_id="${HELPER_PRIVATE_TRACKER_OWNER_ID:-}"
 root=/home/vozen/vozen-helper-rust
 node_root=/home/vozen/vozen-helper
 release="$root/releases/$version"
+
+# A release starts from the legacy Node environment, but the owner-only tracker
+# identity belongs to the Rust service. Preserve it from the active Rust env so
+# a routine deploy cannot silently disable the private administration panel.
+read_existing_env_value() {
+  local key="$1"
+  local source value
+  for source in "$root/shared/.env" "$node_root/.env"; do
+    [[ -f "$source" ]] || continue
+    value="$(awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); found=$0 } END { print found }' "$source")"
+    if [[ -n "$value" ]]; then
+      printf '%s' "$value"
+      return 0
+    fi
+  done
+}
+
+oauth_secret="${DISCORD_OAUTH_CLIENT_SECRET:?set DISCORD_OAUTH_CLIENT_SECRET to the real Discord application secret}"
+vozen_oauth_client_id="${VOZEN_ECOSYSTEM_OAUTH_CLIENT_ID:-1537738930722443364}"
+private_tracker_client_id="${HELPER_PRIVATE_TRACKER_CLIENT_ID:-$(read_existing_env_value HELPER_PRIVATE_TRACKER_CLIENT_ID)}"
+private_tracker_owner_id="${HELPER_PRIVATE_TRACKER_OWNER_ID:-$(read_existing_env_value HELPER_PRIVATE_TRACKER_OWNER_ID)}"
 
 mkdir -p "$release" "$root/shared/data"
 tar -xzf /home/vozen/helper-release.tgz -C "$release"
