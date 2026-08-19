@@ -6129,14 +6129,23 @@ async fn preflight(
     Json(request): Json<PreflightRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_auth(&state, &headers)?;
-    if request.operation != "protection.antispam.publish" {
-        return Err(client_error(
-            StatusCode::BAD_REQUEST,
-            "unknown_preflight_operation",
-        ));
-    }
+    let key = match request.operation.as_str() {
+        "protection.antispam.publish" | "protection.antispam.rollback" => "protection.antispam",
+        "protection.antiscam.publish" | "protection.antiscam.rollback" => "protection.antiscam",
+        _ => {
+            return Err(client_error(
+                StatusCode::BAD_REQUEST,
+                "unknown_preflight_operation",
+            ));
+        }
+    };
+    let protection_name = if key == "protection.antispam" {
+        "anti-spam"
+    } else {
+        "anti-scam"
+    };
 
-    let mut issues = validate_feature_config("protection.antispam", &request.config);
+    let mut issues = validate_feature_config(key, &request.config);
     let guild = state
         .store
         .session_guilds(claims.session_id)
@@ -6168,8 +6177,18 @@ async fn preflight(
         .config
         .get("deleteMessage")
         .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
+        // Anti-scam historically deleted confirmed matches. Keep that safe
+        // default for older revisions that predate the explicit toggle.
+        .unwrap_or(key == "protection.antiscam")
         && !alert_only;
+    let selected_log_channel = request
+        .config
+        .get("logChannel")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    // Anti-spam gives immediate feedback in the originating channel, while
+    // anti-scam only speaks when an administrator selected a log channel.
+    let requires_send_messages = key == "protection.antispam" || selected_log_channel.is_some();
     if request.enabled && !bot_context_available {
         issues.push(ValidationIssue {
             path: "permissions.bot_context".into(),
@@ -6191,15 +6210,17 @@ async fn preflight(
         issues.push(ValidationIssue {
             path: "permissions.bot_moderate_members".into(),
             code: "missing_bot_permission".into(),
-            message: "The Helper bot needs Moderate Members and a manageable role below its highest role to apply timeouts.".into(),
+            message: format!("The Helper bot needs Moderate Members and a manageable role below its highest role to apply {protection_name} timeouts."),
             severity: "error".into(),
         });
     }
-    if request.enabled && !bot_send_messages {
+    if request.enabled && requires_send_messages && !bot_send_messages {
         issues.push(ValidationIssue {
             path: "permissions.bot_send_messages".into(),
             code: "missing_bot_permission".into(),
-            message: "The Helper bot needs Send Messages to publish anti-spam alerts.".into(),
+            message: format!(
+                "The Helper bot needs Send Messages to publish {protection_name} alerts."
+            ),
             severity: "error".into(),
         });
     }
@@ -6207,7 +6228,7 @@ async fn preflight(
         issues.push(ValidationIssue {
             path: "permissions.bot_manage_messages".into(),
             code: "missing_bot_permission".into(),
-            message: "The Helper bot needs Manage Messages to delete anti-spam matches. Disable message deletion or grant that permission before publishing.".into(),
+            message: format!("The Helper bot needs Manage Messages to delete {protection_name} matches. Disable message deletion or grant that permission before publishing."),
             severity: "error".into(),
         });
     }
@@ -6219,11 +6240,13 @@ async fn preflight(
             severity: "error".into(),
         });
     }
-    if request.enabled && !permission_bit(&permissions, 11) {
+    if request.enabled && requires_send_messages && !permission_bit(&permissions, 11) {
         issues.push(ValidationIssue {
             path: "permissions.send_messages".into(),
             code: "missing_permission".into(),
-            message: "The Send Messages permission is required to publish anti-spam alerts.".into(),
+            message: format!(
+                "The Send Messages permission is required to publish {protection_name} alerts."
+            ),
             severity: "error".into(),
         });
     }
@@ -6241,11 +6264,6 @@ async fn preflight(
             severity: "error".into(),
         });
     }
-    let selected_log_channel = request
-        .config
-        .get("logChannel")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty());
     let mut selected_channel_send_messages = None;
     if let Some(channel_id) = selected_log_channel.filter(|value| value.parse::<u64>().is_ok()) {
         let channel = discord_snapshot
@@ -6323,7 +6341,7 @@ async fn feature_preflight(
     if key == "management.nickname" {
         return nickname_preflight(State(state), headers, request).await;
     }
-    if key == "protection.antispam" {
+    if matches!(key.as_str(), "protection.antispam" | "protection.antiscam") {
         return preflight(
             State(state),
             headers,
@@ -9094,7 +9112,7 @@ async fn update_feature_detail(
             },
         )
         .await?
-    } else if key == "protection.antispam" {
+    } else if matches!(key.as_str(), "protection.antispam" | "protection.antiscam") {
         preflight(
             State(state.clone()),
             headers.clone(),
@@ -9838,7 +9856,7 @@ async fn feature_rollback(
             },
         )
         .await?
-    } else if key == "protection.antispam" {
+    } else if matches!(key.as_str(), "protection.antispam" | "protection.antiscam") {
         preflight(
             State(state.clone()),
             headers.clone(),
@@ -12574,6 +12592,64 @@ mod tests {
             !issues
                 .iter()
                 .any(|issue| issue["path"] == "permissions.moderate_members")
+        );
+    }
+
+    #[tokio::test]
+    async fn anti_scam_preflight_allows_monitoring_without_moderation_permissions() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        store
+            .replace_session_guilds(
+                session.session_id,
+                &[("guild-a".into(), "Alpha".into(), Some("0".into()))],
+            )
+            .unwrap();
+
+        let response = router(state(store))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/preflight")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "operation": "protection.antiscam.publish",
+                            "enabled": true,
+                            "config": {
+                                "alertOnly": true,
+                                "deleteMessage": true,
+                                "timeoutSeconds": 300
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                .unwrap();
+        let issues = body["issues"].as_array().unwrap();
+        assert!(
+            !issues
+                .iter()
+                .any(|issue| issue["path"] == "permissions.bot_manage_messages")
+        );
+        assert!(
+            !issues
+                .iter()
+                .any(|issue| issue["path"] == "permissions.bot_moderate_members")
+        );
+        assert!(
+            !issues
+                .iter()
+                .any(|issue| issue["path"] == "permissions.bot_send_messages")
         );
     }
 

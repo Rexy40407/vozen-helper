@@ -304,6 +304,9 @@ pub struct ScamPolicy {
     pub ignored_channels: Vec<String>,
     pub ignored_roles: Vec<String>,
     pub alert_only: bool,
+    /// Keep enforcement reversible: administrators can timeout a member
+    /// without automatically deleting the original message.
+    pub delete_message: bool,
     pub timeout_seconds: u64,
 }
 
@@ -321,6 +324,9 @@ impl Default for ScamPolicy {
             ignored_channels: Vec::new(),
             ignored_roles: Vec::new(),
             alert_only: false,
+            // Preserve the existing anti-scam behaviour unless an
+            // administrator explicitly opts out in the dashboard.
+            delete_message: true,
             timeout_seconds: 300,
         }
     }
@@ -389,6 +395,12 @@ pub fn scam_policy_from_json(value: &serde_json::Value) -> ScamPolicy {
         policy.alert_only = value;
     }
     if let Some(value) = object
+        .get("deleteMessage")
+        .and_then(serde_json::Value::as_bool)
+    {
+        policy.delete_message = value;
+    }
+    if let Some(value) = object
         .get("timeoutSeconds")
         .and_then(serde_json::Value::as_u64)
     {
@@ -402,6 +414,7 @@ pub struct ScamDecision {
     pub ignored: bool,
     pub matched: Vec<String>,
     pub should_act: bool,
+    pub should_delete: bool,
     pub timeout_seconds: u64,
     pub reason: String,
 }
@@ -428,6 +441,7 @@ pub fn evaluate_scam_with_roles(
             ignored: true,
             matched: Vec::new(),
             should_act: false,
+            should_delete: false,
             timeout_seconds: 0,
             reason: "ignored_channel".into(),
         };
@@ -452,6 +466,7 @@ pub fn evaluate_scam_with_roles(
         ignored: false,
         matched,
         should_act,
+        should_delete: should_act && policy.delete_message,
         timeout_seconds: if should_act {
             policy.timeout_seconds
         } else {
@@ -7490,6 +7505,7 @@ impl FeatureAdapter for AntiScamAdapter {
                         {"key":"ignoredRoles","label":"Ignored roles","kind":"roles","max":100,"advanced":true},
                         {"key":"logChannel","label":"Log channel","kind":"channel","advanced":true},
                         {"key":"timeoutSeconds","label":"Timeout (seconds)","kind":"number","min":0,"max":86400,"advanced":true},
+                        {"key":"deleteMessage","label":"Delete matched messages","kind":"toggle","advanced":true},
                         {"key":"alertOnly","label":"Monitor only","kind":"toggle","advanced":true}
                     ]
                 }]
@@ -7502,9 +7518,14 @@ impl FeatureAdapter for AntiScamAdapter {
                 "ignoredRoles": [],
                 "logChannel": "",
                 "timeoutSeconds": 300,
+                "deleteMessage": true,
                 "alertOnly": false
             }),
-            dependencies: vec!["message_content_intent".into(), "manage_messages".into()],
+            // Message deletion and timeouts are optional controls. Their
+            // exact Discord permissions are checked against the published
+            // configuration by the API preflight, rather than shown as an
+            // unconditional requirement in the panel.
+            dependencies: vec!["message_content_intent".into()],
         }
     }
 
@@ -7518,7 +7539,7 @@ impl FeatureAdapter for AntiScamAdapter {
             }];
         };
         let mut issues = Vec::new();
-        for field in ["blockInvites", "alertOnly"] {
+        for field in ["blockInvites", "alertOnly", "deleteMessage"] {
             if object.get(field).is_some_and(|value| !value.is_boolean()) {
                 issues.push(ValidationIssue {
                     path: field.into(),
@@ -7616,6 +7637,12 @@ impl FeatureAdapter for AntiScamAdapter {
         if let Some(value) = object.get("alertOnly").and_then(serde_json::Value::as_bool) {
             pairs.push(("security.antiscam.alert_only".into(), value.to_string()));
         }
+        if let Some(value) = object
+            .get("deleteMessage")
+            .and_then(serde_json::Value::as_bool)
+        {
+            pairs.push(("security.antiscam.delete_message".into(), value.to_string()));
+        }
         if let Some(value) = object.get("logChannel").and_then(serde_json::Value::as_str) {
             pairs.push(("security.antiscam.log_channel".into(), value.to_string()));
         }
@@ -7681,9 +7708,14 @@ impl FeatureAdapter for AntiScamAdapter {
             vec!["No scam pattern matched; keep the message.".into()]
         } else if decision.should_act {
             vec![format!(
-                "Match {} and apply the configured action (timeout: {}s).",
+                "Match {} and apply the configured action (timeout: {}s; {}).",
                 decision.matched.join(", "),
-                decision.timeout_seconds
+                decision.timeout_seconds,
+                if decision.should_delete {
+                    "delete the matching message"
+                } else {
+                    "keep the matching message"
+                }
             )]
         } else {
             vec![format!(
@@ -12691,6 +12723,7 @@ mod tests {
     fn scam_policy_is_bounded_and_explainable() {
         let adapter = feature_adapter("protection.antiscam").expect("anti-scam adapter");
         assert_eq!(adapter.descriptor().source, "anti_scam_adapter_v1");
+        assert_eq!(adapter.descriptor().dependencies, vec!["message_content_intent"]);
         assert!(
             adapter
                 .validate(&serde_json::json!({"blockedDomains": ["bad/domain"]}))
@@ -12735,6 +12768,34 @@ mod tests {
                 .ignored
         );
         assert!(evaluate_scam(&policy, "123", "hello").matched.is_empty());
+    }
+
+    #[test]
+    fn scam_policy_separates_alert_timeout_and_message_deletion() {
+        let policy = ScamPolicy {
+            timeout_seconds: 90,
+            delete_message: false,
+            ..ScamPolicy::default()
+        };
+        let decision = evaluate_scam(&policy, "123", "Claim your free nitro now");
+        assert!(decision.should_act);
+        assert!(!decision.should_delete);
+        assert_eq!(decision.timeout_seconds, 90);
+
+        let deleting = ScamPolicy {
+            delete_message: true,
+            ..policy.clone()
+        };
+        assert!(evaluate_scam(&deleting, "123", "Claim your free nitro now").should_delete);
+
+        let monitor_only = ScamPolicy {
+            alert_only: true,
+            ..deleting
+        };
+        let monitor_decision = evaluate_scam(&monitor_only, "123", "Claim your free nitro now");
+        assert!(!monitor_decision.should_act);
+        assert!(!monitor_decision.should_delete);
+        assert_eq!(monitor_decision.timeout_seconds, 0);
     }
 
     #[test]

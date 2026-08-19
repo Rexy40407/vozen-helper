@@ -3288,7 +3288,9 @@ impl EventHandler for Handler {
                 .await;
         }
         if decision.should_act {
-            let _ = event.channel_id.delete_message(&ctx.http, event.id).await;
+            if decision.should_delete {
+                let _ = event.channel_id.delete_message(&ctx.http, event.id).await;
+            }
             if decision.timeout_seconds > 0
                 && let Ok(user_id) = author_id.parse::<u64>()
             {
@@ -3728,7 +3730,9 @@ impl EventHandler for Handler {
                         .await;
                 }
                 if decision.should_act {
-                    let _ = message.delete(&ctx.http).await;
+                    if decision.should_delete {
+                        let _ = message.delete(&ctx.http).await;
+                    }
                     if decision.timeout_seconds > 0 {
                         let until = (chrono::Utc::now()
                             + chrono::Duration::seconds(decision.timeout_seconds as i64))
@@ -11771,6 +11775,7 @@ fn scam_policy_for_store(store: &Store, guild_id: &str) -> helper_core::ScamPoli
         "ignoredRoles": list("security.antiscam.ignored_roles"),
         "logChannel": setting_string(store, guild_id, "security.antiscam.log_channel").unwrap_or_default(),
         "timeoutSeconds": setting_u64(store, guild_id, "security.antiscam.timeout_seconds", 300),
+        "deleteMessage": setting_bool(store, guild_id, "security.antiscam.delete_message", true),
         "alertOnly": setting_bool(store, guild_id, "security.antiscam.alert_only", false),
     }))
 }
