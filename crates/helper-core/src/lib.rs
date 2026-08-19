@@ -12723,7 +12723,10 @@ mod tests {
     fn scam_policy_is_bounded_and_explainable() {
         let adapter = feature_adapter("protection.antiscam").expect("anti-scam adapter");
         assert_eq!(adapter.descriptor().source, "anti_scam_adapter_v1");
-        assert_eq!(adapter.descriptor().dependencies, vec!["message_content_intent"]);
+        assert_eq!(
+            adapter.descriptor().dependencies,
+            vec!["message_content_intent"]
+        );
         assert!(
             adapter
                 .validate(&serde_json::json!({"blockedDomains": ["bad/domain"]}))
