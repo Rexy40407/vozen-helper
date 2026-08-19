@@ -408,6 +408,10 @@ impl EventHandler for Handler {
             tokio::spawn(async move {
                 run_nickname_worker(nickname_http, nickname_store).await;
             });
+            let anti_raid_store = self.store.clone();
+            tokio::spawn(async move {
+                run_anti_raid_expiry_worker(anti_raid_store).await;
+            });
             if let Some(youtube) = self.youtube.clone() {
                 let store = self.store.clone();
                 let http = ctx.http.clone();
@@ -2109,33 +2113,17 @@ impl EventHandler for Handler {
             "security.anti_raid.latch_active",
             false,
         );
-        if raid_latched
-            && self
-                .store
-                .get_setting(&guild_text, "security.anti_raid.gate_until")
-                .ok()
-                .flatten()
-                .and_then(|value| value.parse::<i64>().ok())
-                .is_some_and(|until| until <= now)
-        {
-            raid_latched = false;
-            let previous_gate = self
-                .store
-                .get_setting(&guild_text, "security.anti_raid.previous_gate_enabled")
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| "false".to_string());
-            let _ = self
-                .store
-                .set_setting(&guild_text, "security.anti_raid.latch_active", "false");
-            let _ =
-                self.store
-                    .set_setting(&guild_text, "security.join_gate.enabled", &previous_gate);
-            let _ = self.store.set_setting(
-                &guild_text,
-                "security.anti_raid.previous_gate_enabled",
-                "false",
-            );
+        if raid_latched {
+            match self.store.release_expired_anti_raid_latch(&guild_text, now) {
+                Ok(true) => {
+                    raid_latched = false;
+                    info!(%guild_text, "anti-raid containment expired and restored the prior join gate");
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    warn!(%guild_text, %error, "could not release expired anti-raid containment");
+                }
+            }
         }
         let anti_raid_enabled = feature_enabled(
             &self.store,
@@ -2220,31 +2208,13 @@ impl EventHandler for Handler {
                 // Shadow mode and an explicit alert-only policy record/alert but
                 // deliberately leave the gate unchanged.
                 if raid_decision.should_contain {
-                    raid_latched = true;
-                    let gate_was_enabled = setting_bool(
-                        &self.store,
-                        &guild_text,
-                        "security.join_gate.enabled",
-                        false,
-                    );
-                    let _ = self.store.set_setting(
-                        &guild_text,
-                        "security.anti_raid.previous_gate_enabled",
-                        &gate_was_enabled.to_string(),
-                    );
-                    let _ =
-                        self.store
-                            .set_setting(&guild_text, "security.join_gate.enabled", "true");
-                    let _ = self.store.set_setting(
-                        &guild_text,
-                        "security.anti_raid.gate_until",
-                        &(now + (raid_decision.incident_minutes as i64) * 60).to_string(),
-                    );
-                    let _ = self.store.set_setting(
-                        &guild_text,
-                        "security.anti_raid.latch_active",
-                        "true",
-                    );
+                    let gate_until = now + (raid_decision.incident_minutes as i64) * 60;
+                    match self.store.arm_anti_raid_latch(&guild_text, gate_until) {
+                        Ok(()) => raid_latched = true,
+                        Err(error) => {
+                            warn!(%guild_text, %error, "could not arm anti-raid containment");
+                        }
+                    }
                 }
                 let reason = format!(
                     "Anti-raid: {threshold} joins within {window_seconds}s; {}",
@@ -4590,10 +4560,36 @@ async fn run_crypto_stats_worker(
     }
 }
 
-/// Keep the optional statistics channel in sync with the same daily snapshots
-/// used by `/serverstats`.  The dashboard only stores a channel ID and bounded
-/// refresh interval; this worker owns the Discord mutation so a saved setting
-/// cannot be mistaken for a live feature.
+/// Ensure temporary anti-raid containment always restores the server's prior
+/// join-gate state, including after a gateway reconnect when no member joins.
+async fn run_anti_raid_expiry_worker(store: Store) {
+    let mut interval = tokio::time::interval(Duration::from_secs(15));
+    loop {
+        interval.tick().await;
+        let guilds = match store.active_anti_raid_latch_guilds(1_000) {
+            Ok(guilds) => guilds,
+            Err(error) => {
+                warn!(%error, "anti-raid expiry worker could not load active latches");
+                continue;
+            }
+        };
+        let now = Utc::now().timestamp();
+        for guild_id in guilds {
+            match store.release_expired_anti_raid_latch(&guild_id, now) {
+                Ok(true) => {
+                    info!(%guild_id, "anti-raid containment expired and restored the prior join gate");
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    warn!(%guild_id, %error, "anti-raid expiry worker could not release containment");
+                }
+            }
+        }
+    }
+}
+
+/// Keep the configured Helper nickname synchronized with the live Discord
+/// member state, including removal after a feature is disabled.
 async fn run_nickname_worker(http: Arc<serenity::http::Http>, store: Store) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {

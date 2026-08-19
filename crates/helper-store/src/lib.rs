@@ -3583,6 +3583,135 @@ impl Store {
         Ok(())
     }
 
+    /// Arms the temporary anti-raid containment gate. The original manual
+    /// gate state is captured only once, so repeated bursts can extend the
+    /// deadline without accidentally making the temporary gate permanent.
+    pub fn arm_anti_raid_latch(&self, guild_id: &str, gate_until: i64) -> Result<()> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let latch_active: Option<String> = tx
+            .query_row(
+                "SELECT value FROM settings WHERE guild_id=?1 AND key='security.anti_raid.latch_active'",
+                [guild_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let now = Utc::now().timestamp_millis();
+        if latch_active.as_deref() != Some("true") {
+            let gate_enabled: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM settings WHERE guild_id=?1 AND key='security.join_gate.enabled'",
+                    [guild_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let previous_gate = gate_enabled
+                .as_deref()
+                .and_then(|value| value.parse::<bool>().ok())
+                .unwrap_or(false);
+            tx.execute(
+                "INSERT INTO settings(guild_id,key,value,updated_at) VALUES(?1,'security.anti_raid.previous_gate_enabled',?2,?3) ON CONFLICT(guild_id,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                params![guild_id, previous_gate.to_string(), now],
+            )?;
+        }
+        for (key, value) in [
+            ("security.join_gate.enabled", "true".to_string()),
+            ("security.anti_raid.gate_until", gate_until.to_string()),
+            ("security.anti_raid.latch_active", "true".to_string()),
+        ] {
+            tx.execute(
+                "INSERT INTO settings(guild_id,key,value,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(guild_id,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                params![guild_id, key, value, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Returns guilds with an active anti-raid latch. This is deliberately
+    /// independent of the feature toggle, because a stale latch must be
+    /// restored even after an administrator turns anti-raid off.
+    pub fn active_anti_raid_latch_guilds(&self, limit: usize) -> Result<Vec<String>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut statement = conn.prepare(
+            "SELECT guild_id FROM settings WHERE key='security.anti_raid.latch_active' AND value='true' ORDER BY updated_at ASC LIMIT ?1",
+        )?;
+        let rows = statement.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Releases a containment latch only after its deadline. Missing or
+    /// malformed deadlines are treated as expired so persisted corruption can
+    /// never leave a server permanently locked after a restart.
+    pub fn release_expired_anti_raid_latch(
+        &self,
+        guild_id: &str,
+        now_seconds: i64,
+    ) -> Result<bool> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let latch_active: Option<String> = tx
+            .query_row(
+                "SELECT value FROM settings WHERE guild_id=?1 AND key='security.anti_raid.latch_active'",
+                [guild_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if latch_active.as_deref() != Some("true") {
+            return Ok(false);
+        }
+        let gate_until: Option<String> = tx
+            .query_row(
+                "SELECT value FROM settings WHERE guild_id=?1 AND key='security.anti_raid.gate_until'",
+                [guild_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let expired = match gate_until
+            .as_deref()
+            .and_then(|value| value.parse::<i64>().ok())
+        {
+            Some(gate_until) => gate_until <= now_seconds,
+            None => true,
+        };
+        if !expired {
+            return Ok(false);
+        }
+        let previous_gate: Option<String> = tx
+            .query_row(
+                "SELECT value FROM settings WHERE guild_id=?1 AND key='security.anti_raid.previous_gate_enabled'",
+                [guild_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let previous_gate = previous_gate
+            .as_deref()
+            .and_then(|value| value.parse::<bool>().ok())
+            .unwrap_or(false);
+        let updated_at = Utc::now().timestamp_millis();
+        for (key, value) in [
+            ("security.anti_raid.latch_active", "false".to_string()),
+            ("security.join_gate.enabled", previous_gate.to_string()),
+            (
+                "security.anti_raid.previous_gate_enabled",
+                "false".to_string(),
+            ),
+        ] {
+            tx.execute(
+                "INSERT INTO settings(guild_id,key,value,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(guild_id,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                params![guild_id, key, value, updated_at],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Replace a setting only when its current serialized value is exactly the
     /// value read by the caller. This is the compare-and-swap primitive used by
     /// editors that expose optimistic revisions (for example Studio templates)
@@ -7541,6 +7670,82 @@ mod tests {
         assert!(store.temp_channel("c").unwrap().is_none());
         assert_eq!(store.active_temp_channels("g").unwrap(), 0);
         assert!(!store.remove_temp_channel("c").unwrap());
+    }
+
+    #[test]
+    fn anti_raid_latch_preserves_the_original_gate_until_its_last_expiry() {
+        let store = Store::open(":memory:").unwrap();
+        store
+            .set_setting("guild", "security.join_gate.enabled", "false")
+            .unwrap();
+
+        store.arm_anti_raid_latch("guild", 100).unwrap();
+        // A second burst extends containment, but must not overwrite the
+        // original manual join-gate state with the temporary `true` value.
+        store.arm_anti_raid_latch("guild", 120).unwrap();
+
+        assert_eq!(
+            store
+                .get_setting("guild", "security.anti_raid.previous_gate_enabled")
+                .unwrap()
+                .as_deref(),
+            Some("false")
+        );
+        assert!(!store.release_expired_anti_raid_latch("guild", 119).unwrap());
+        assert!(store.release_expired_anti_raid_latch("guild", 120).unwrap());
+        assert_eq!(
+            store
+                .get_setting("guild", "security.join_gate.enabled")
+                .unwrap()
+                .as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            store
+                .get_setting("guild", "security.anti_raid.latch_active")
+                .unwrap()
+                .as_deref(),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn expired_or_malformed_anti_raid_latches_are_released_for_recovery() {
+        let store = Store::open(":memory:").unwrap();
+        store
+            .set_setting("expired", "security.join_gate.enabled", "true")
+            .unwrap();
+        store
+            .set_setting(
+                "expired",
+                "security.anti_raid.previous_gate_enabled",
+                "false",
+            )
+            .unwrap();
+        store
+            .set_setting("expired", "security.anti_raid.latch_active", "true")
+            .unwrap();
+        store
+            .set_setting(
+                "expired",
+                "security.anti_raid.gate_until",
+                "not-a-timestamp",
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.active_anti_raid_latch_guilds(10).unwrap(),
+            vec!["expired".to_string()]
+        );
+        assert!(store.release_expired_anti_raid_latch("expired", 1).unwrap());
+        assert_eq!(
+            store
+                .get_setting("expired", "security.join_gate.enabled")
+                .unwrap()
+                .as_deref(),
+            Some("false")
+        );
+        assert!(store.active_anti_raid_latch_guilds(10).unwrap().is_empty());
     }
 
     #[test]
