@@ -7741,8 +7741,12 @@ impl Handler {
                 let guild_text = guild_id.to_string();
                 let enabled = self.store.get_setting(&guild_text, "security.join_gate.enabled")?
                     .is_some_and(|value| value == "true");
-                let Some(role_id) = self.store.get_setting(&guild_text, "security.join_gate.role_id")? else {
-                    return respond(ctx, command, "Configura primeiro `/join-gate` com um cargo de verificação.").await;
+                let Some(verified_role_id) = setting_u64_optional(
+                    &self.store,
+                    &guild_text,
+                    "security.join_gate.auto_role_id",
+                ) else {
+                    return respond(ctx, command, "Configure a verified-member role in Join Gate before posting a verification panel.").await;
                 };
                 if !enabled {
                     return respond(ctx, command, "Ativa primeiro o `/join-gate`; o painel não deve ficar exposto enquanto o gate está desligado.").await;
@@ -7752,7 +7756,7 @@ impl Handler {
                     serenity::all::CreateMessage::new()
                         .content("Click the button to receive the verified member role.")
                         .components(vec![CreateActionRow::Buttons(vec![
-                            CreateButton::new(format!("verify:{guild_text}:{role_id}"))
+                            CreateButton::new(format!("verify:{guild_text}:{verified_role_id}"))
                                 .label("Verify")
                                 .style(ButtonStyle::Success),
                         ])]),
@@ -9060,20 +9064,52 @@ impl Handler {
             }
             let mut parts = raw.split(':');
             let expected_guild = parts.next().unwrap_or_default();
-            let role_id = parts.next().and_then(|value| value.parse::<u64>().ok());
             if expected_guild != guild_id.to_string() {
                 return respond_component(ctx, component, "Este painel pertence a outro servidor.")
                     .await;
             }
-            let Some(role_id) = role_id else {
-                return respond_component(ctx, component, "Painel de verificação inválido.").await;
+            let Some(verified_role_id) = setting_u64_optional(
+                &self.store,
+                &guild_id.to_string(),
+                "security.join_gate.auto_role_id",
+            ) else {
+                return respond_component(
+                    ctx,
+                    component,
+                    "This verification panel needs a configured verified-member role.",
+                )
+                .await;
             };
             let member = guild_id.member(&ctx.http, component.user.id).await?;
-            let role = RoleId::new(role_id);
-            if member.roles.contains(&role) {
-                return respond_component(ctx, component, "Já estás verificado.").await;
+            let decision = evaluate_join_gate_verification(
+                &member.roles,
+                setting_u64_optional(
+                    &self.store,
+                    &guild_id.to_string(),
+                    "security.join_gate.role_id",
+                )
+                .map(RoleId::new),
+                RoleId::new(verified_role_id),
+            );
+            if decision.remove_quarantine_role
+                && let Some(quarantine_role_id) = setting_u64_optional(
+                    &self.store,
+                    &guild_id.to_string(),
+                    "security.join_gate.role_id",
+                )
+            {
+                member
+                    .remove_role(&ctx.http, RoleId::new(quarantine_role_id))
+                    .await?;
             }
-            member.add_role(&ctx.http, role).await?;
+            if decision.assign_verified_role {
+                member
+                    .add_role(&ctx.http, RoleId::new(verified_role_id))
+                    .await?;
+            }
+            if decision.already_verified {
+                return respond_component(ctx, component, "You are already verified.").await;
+            }
             return respond_component(ctx, component, "Verification complete; role assigned.")
                 .await;
         }
@@ -11537,6 +11573,33 @@ fn should_cleanup_temp_channel(new_channel_id: Option<serenity::all::ChannelId>)
     new_channel_id.is_none()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct JoinGateVerificationDecision {
+    assign_verified_role: bool,
+    remove_quarantine_role: bool,
+    already_verified: bool,
+}
+
+/// A verification panel promotes a member to the configured verified role and
+/// removes the distinct quarantine role, if it is still present. The role IDs
+/// are read from the current server configuration rather than trusted from an
+/// old button payload, so stale panels cannot grant a changed role.
+fn evaluate_join_gate_verification(
+    member_roles: &[RoleId],
+    quarantine_role: Option<RoleId>,
+    verified_role: RoleId,
+) -> JoinGateVerificationDecision {
+    let already_verified = member_roles.contains(&verified_role);
+    let remove_quarantine_role = quarantine_role
+        .filter(|role| *role != verified_role)
+        .is_some_and(|role| member_roles.contains(&role));
+    JoinGateVerificationDecision {
+        assign_verified_role: !already_verified,
+        remove_quarantine_role,
+        already_verified,
+    }
+}
+
 fn setting_string(store: &Store, guild_id: &str, key: &str) -> Option<String> {
     store.get_setting(guild_id, key).ok().flatten()
 }
@@ -12265,12 +12328,13 @@ mod tests {
         HELPER_LANGUAGE_SETTING, HELPER_LOCALES, OpenSeaCollectionInfo, account_age_days,
         adapter::{DiscordAdapter, Effect, FakeDiscordAdapter},
         anti_spam_content_metrics, command_feature_key, custom_command_channel_ignored,
-        custom_command_is_staff, english_bot_text, evaluate_nickname, feature_enabled,
-        feature_title, format_nft_collection, helper_locale, helper_locale_for_guild,
-        is_destructive_audit_action, join_burst_armed, parse_custom_command, parse_duration,
-        parse_reminder_delay, parse_scheduled_event_window, reminder_repeat_interval_ms,
-        render_custom_command, rss_retry_seconds, scheduled_action_feature, shadow_mode_enabled,
-        should_cleanup_temp_channel, template_message,
+        custom_command_is_staff, english_bot_text, evaluate_join_gate_verification,
+        evaluate_nickname, feature_enabled, feature_title, format_nft_collection, helper_locale,
+        helper_locale_for_guild, is_destructive_audit_action, join_burst_armed,
+        parse_custom_command, parse_duration, parse_reminder_delay, parse_scheduled_event_window,
+        reminder_repeat_interval_ms, render_custom_command, rss_retry_seconds,
+        scheduled_action_feature, shadow_mode_enabled, should_cleanup_temp_channel,
+        template_message,
     };
     use chrono::TimeZone;
     use helper_store::Store;
@@ -12308,6 +12372,29 @@ mod tests {
             anti_spam_content_metrics("LOUD https://vozen.org/docs, www.vozen.org"),
             (2, 4, 4)
         );
+    }
+
+    #[test]
+    fn verification_panel_promotes_members_and_clears_the_quarantine_role() {
+        let decision = evaluate_join_gate_verification(
+            &[serenity::all::RoleId::new(7)],
+            Some(serenity::all::RoleId::new(7)),
+            serenity::all::RoleId::new(9),
+        );
+
+        assert!(decision.assign_verified_role);
+        assert!(decision.remove_quarantine_role);
+        assert!(!decision.already_verified);
+    }
+
+    #[test]
+    fn verification_panel_never_removes_the_verified_role_when_roles_are_misconfigured() {
+        let role = serenity::all::RoleId::new(7);
+        let decision = evaluate_join_gate_verification(&[role], Some(role), role);
+
+        assert!(!decision.assign_verified_role);
+        assert!(!decision.remove_quarantine_role);
+        assert!(decision.already_verified);
     }
 
     #[test]

@@ -9009,6 +9009,34 @@ impl FeatureAdapter for JoinGateAdapter {
                 severity: "error".into(),
             });
         }
+        let action = object
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("quarantine");
+        let quarantine_role = object
+            .get("verifiedRole")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty());
+        let verified_role = object
+            .get("autoRole")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty());
+        if action == "quarantine" && quarantine_role.is_none() {
+            issues.push(ValidationIssue {
+                path: "verifiedRole".into(),
+                code: "quarantine_role_required".into(),
+                message: "Choose a quarantine role before enabling the quarantine action.".into(),
+                severity: "error".into(),
+            });
+        }
+        if quarantine_role.is_some() && quarantine_role == verified_role {
+            issues.push(ValidationIssue {
+                path: "autoRole".into(),
+                code: "join_gate_roles_must_differ".into(),
+                message: "The verified member role must differ from the quarantine role.".into(),
+                severity: "error".into(),
+            });
+        }
         if let Some(patterns) = object.get("blockedNamePatterns") {
             let valid = patterns.as_array().is_some_and(|values| {
                 values.len() <= 20
@@ -13060,6 +13088,20 @@ mod tests {
             gate.validate(&serde_json::json!({"minimumAccountDays": 400}))
                 .iter()
                 .any(|issue| issue.path == "minimumAccountDays")
+        );
+        assert!(
+            gate.validate(&serde_json::json!({"action": "quarantine"}))
+                .iter()
+                .any(|issue| issue.code == "quarantine_role_required")
+        );
+        assert!(
+            gate.validate(&serde_json::json!({
+                "action": "quarantine",
+                "verifiedRole": "123",
+                "autoRole": "123"
+            }))
+            .iter()
+            .any(|issue| issue.code == "join_gate_roles_must_differ")
         );
         assert!(
             gate.runtime_projection(&serde_json::json!({
