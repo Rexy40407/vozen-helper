@@ -6159,6 +6159,17 @@ async fn preflight(
         .get("alertOnly")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    let timeout_seconds = request
+        .config
+        .get("timeoutSeconds")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(60);
+    let delete_message = request
+        .config
+        .get("deleteMessage")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        && !alert_only;
     if request.enabled && !bot_context_available {
         issues.push(ValidationIssue {
             path: "permissions.bot_context".into(),
@@ -6170,10 +6181,13 @@ async fn preflight(
     let bot_moderate_members = bot_permission_string
         .as_deref()
         .is_some_and(|value| permission_bit(value, 40));
+    let bot_manage_messages = bot_permission_string
+        .as_deref()
+        .is_some_and(|value| permission_bit(value, 13));
     let bot_send_messages = bot_permission_string
         .as_deref()
         .is_some_and(|value| permission_bit(value, 11));
-    if request.enabled && !alert_only && !bot_moderate_members {
+    if request.enabled && !alert_only && timeout_seconds > 0 && !bot_moderate_members {
         issues.push(ValidationIssue {
             path: "permissions.bot_moderate_members".into(),
             code: "missing_bot_permission".into(),
@@ -6189,7 +6203,15 @@ async fn preflight(
             severity: "error".into(),
         });
     }
-    if request.enabled && !alert_only && !permission_bit(&permissions, 40) {
+    if request.enabled && delete_message && !bot_manage_messages {
+        issues.push(ValidationIssue {
+            path: "permissions.bot_manage_messages".into(),
+            code: "missing_bot_permission".into(),
+            message: "The Helper bot needs Manage Messages to delete anti-spam matches. Disable message deletion or grant that permission before publishing.".into(),
+            severity: "error".into(),
+        });
+    }
+    if request.enabled && !alert_only && timeout_seconds > 0 && !permission_bit(&permissions, 40) {
         issues.push(ValidationIssue {
             path: "permissions.moderate_members".into(),
             code: "missing_permission".into(),
@@ -6280,6 +6302,7 @@ async fn preflight(
             "botContextAvailable": bot_context_available,
             "botPermissionBitfieldAvailable": bot_permissions.is_some(),
             "botModerateMembers": bot_moderate_members,
+            "botManageMessages": bot_manage_messages,
             "botSendMessages": bot_send_messages,
             "selectedLogChannelSendMessages": selected_channel_send_messages,
             "discordResourcesFresh": discord_snapshot.channels_ready && discord_snapshot.roles_ready,
@@ -12503,6 +12526,54 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|issue| issue["path"] == "permissions.send_messages")
+        );
+    }
+
+    #[tokio::test]
+    async fn anti_spam_preflight_requires_manage_messages_only_when_deletion_is_enabled() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        store
+            .replace_session_guilds(
+                session.session_id,
+                &[("guild-a".into(), "Alpha".into(), Some("0".into()))],
+            )
+            .unwrap();
+
+        let response = router(state(store))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/preflight")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "operation": "protection.antispam.publish",
+                            "enabled": true,
+                            "config": {"timeoutSeconds": 0, "deleteMessage": true}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                .unwrap();
+        let issues = body["issues"].as_array().unwrap();
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue["path"] == "permissions.bot_manage_messages")
+        );
+        assert!(
+            !issues
+                .iter()
+                .any(|issue| issue["path"] == "permissions.moderate_members")
         );
     }
 
