@@ -38,6 +38,7 @@ use helper_store::{
     YouTubeSubscriptionWrite,
 };
 use hmac::{Hmac, Mac};
+use rand::RngCore;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -48,6 +49,8 @@ use uuid::Uuid;
 type HmacSha256 = Hmac<Sha256>;
 const COOKIE: &str = "vh_session";
 const OAUTH_COOKIE: &str = "vh_oauth_verifier";
+const INSTALL_FLOW_MARKER: &str = "install";
+const HELPER_INSTALL_PERMISSIONS: &str = "1099780071606";
 const SESSION_RESPONSE_HEADER: &str = "x-vozen-session";
 const SESSION_MAX_HOURS: i64 = 8;
 const IDLE_MINUTES: i64 = 30;
@@ -106,6 +109,7 @@ pub fn router(state: ApiState) -> Router {
             post(create_private_tracker_handoff),
         )
         .route("/api/oauth/start", post(oauth_start_post))
+        .route("/api/install/start", get(oauth_install_start))
         .route("/api/oauth/callback", get(oauth_callback))
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
@@ -360,16 +364,49 @@ struct OAuthStartResponse {
     state: String,
 }
 
+#[derive(Clone, Copy)]
+enum OAuthFlow {
+    Account,
+    Install,
+}
+
 async fn oauth_start_post(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<OAuthStartRequest>,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    if request.guild_id == INSTALL_FLOW_MARKER {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_oauth_request",
+        ));
+    }
     oauth_start_inner(
         &state,
         &request.guild_id,
         &request.code_challenge,
         &request.code_verifier,
+        OAuthFlow::Account,
     )
+}
+
+/// Starts the Helper bot-installation flow from a first-party endpoint.
+///
+/// Discord only accepts registered OAuth callback URIs. Keeping the flow here
+/// means the panel never has to guess at a static callback URL, and lets us
+/// safely create the panel session after Discord adds the bot to a server.
+async fn oauth_install_start(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    let code_verifier = new_code_verifier();
+    let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
+    let authorization_url = oauth_authorization_url(
+        &state,
+        INSTALL_FLOW_MARKER,
+        &code_challenge,
+        &code_verifier,
+        OAuthFlow::Install,
+    )?;
+    Ok(Redirect::temporary(authorization_url.as_str()).into_response())
 }
 
 fn oauth_start_inner(
@@ -377,7 +414,39 @@ fn oauth_start_inner(
     guild_id: &str,
     code_challenge: &str,
     code_verifier: &str,
+    flow: OAuthFlow,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    let authorization_url =
+        oauth_authorization_url(state, guild_id, code_challenge, code_verifier, flow)?;
+    let state_token = authorization_url
+        .query_pairs()
+        .find(|(key, _)| key == "state")
+        .map(|(_, value)| value.into_owned())
+        .expect("OAuth authorization URLs always include state");
+    let mut response = Json(OAuthStartResponse {
+        authorization_url: authorization_url.into(),
+        state: state_token,
+    })
+    .into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        format!(
+            "{OAUTH_COOKIE}={}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=600",
+            code_verifier
+        )
+        .parse()
+        .unwrap(),
+    );
+    Ok(response)
+}
+
+fn oauth_authorization_url(
+    state: &ApiState,
+    guild_id: &str,
+    code_challenge: &str,
+    code_verifier: &str,
+    flow: OAuthFlow,
+) -> Result<url::Url, (StatusCode, Json<ApiError>)> {
     if !(43..=128).contains(&code_verifier.len()) || code_challenge.trim().len() < 43 {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
@@ -400,29 +469,33 @@ fn oauth_start_inner(
         .register_oauth_state(&state_hash, expires, code_verifier)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     let mut url = url::Url::parse("https://discord.com/oauth2/authorize").expect("static URL");
-    url.query_pairs_mut()
+    let mut query = url.query_pairs_mut();
+    query
         .append_pair("client_id", &state.oauth_client_id)
         .append_pair("response_type", "code")
         .append_pair("redirect_uri", &state.oauth_redirect_uri)
-        .append_pair("scope", "identify guilds")
         .append_pair("state", &state_token)
         .append_pair("code_challenge", code_challenge)
         .append_pair("code_challenge_method", "S256");
-    let mut response = Json(OAuthStartResponse {
-        authorization_url: url.into(),
-        state: state_token,
-    })
-    .into_response();
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        format!(
-            "{OAUTH_COOKIE}={}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=600",
-            code_verifier
-        )
-        .parse()
-        .unwrap(),
-    );
-    Ok(response)
+    match flow {
+        OAuthFlow::Account => {
+            query.append_pair("scope", "identify guilds");
+        }
+        OAuthFlow::Install => {
+            query
+                .append_pair("permissions", HELPER_INSTALL_PERMISSIONS)
+                .append_pair("scope", "bot applications.commands identify guilds")
+                .append_pair("integration_type", "0");
+        }
+    }
+    drop(query);
+    Ok(url)
+}
+
+fn new_code_verifier() -> String {
+    let mut bytes = [0_u8; 48];
+    rand::rng().fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 #[derive(Debug, Deserialize)]
@@ -430,6 +503,7 @@ struct OAuthCallbackQuery {
     code: String,
     state: String,
     code_verifier: Option<String>,
+    guild_id: Option<String>,
 }
 
 async fn oauth_callback(
@@ -464,7 +538,6 @@ async fn oauth_callback(
         .or_else(|| cookie_value(&headers, OAUTH_COOKIE))
         .or(stored_verifier)
         .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "missing_pkce_verifier"))?;
-    let guild_id = parts[0].to_string();
     let client = Client::new();
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
     if challenge != parts[2] {
@@ -506,6 +579,18 @@ async fn oauth_callback(
             "oauth_token_missing",
         ));
     }
+    let guild_id = if parts[0] == INSTALL_FLOW_MARKER {
+        token
+            .get("guild")
+            .and_then(|guild| guild.get("id"))
+            .and_then(|id| id.as_str())
+            .or(query.guild_id.as_deref())
+            .filter(|id| is_discord_snowflake(id))
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "missing_installed_guild"))?
+    } else {
+        parts[0].to_string()
+    };
     let success_redirect = state.oauth_success_redirect.clone();
     let mut response = create_session_inner(
         State(state),
@@ -11521,6 +11606,10 @@ fn has_manage_permission(value: &str) -> bool {
         .map(|bits| bits & (1 << 5) != 0 || bits & (1 << 3) != 0)
         .unwrap_or(false)
 }
+
+fn is_discord_snowflake(value: &str) -> bool {
+    (17..=22).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_digit())
+}
 fn client_error(status: StatusCode, code: &str) -> (StatusCode, Json<ApiError>) {
     (
         status,
@@ -13478,6 +13567,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(get_response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn install_start_uses_the_registered_api_callback() {
+        let response = router(state(Store::open(":memory:").unwrap()))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/install/start")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let authorization = url::Url::parse(location).unwrap();
+        let parameter = |name: &str| {
+            authorization
+                .query_pairs()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.into_owned())
+                .unwrap()
+        };
+        assert_eq!(parameter("client_id"), "client");
+        assert_eq!(parameter("redirect_uri"), "https://example.test/callback");
+        assert_eq!(parameter("permissions"), HELPER_INSTALL_PERMISSIONS);
+        assert_eq!(parameter("integration_type"), "0");
+        assert_eq!(
+            parameter("scope"),
+            "bot applications.commands identify guilds"
+        );
+        assert!(parameter("state").contains('.'));
+        assert!(parameter("code_challenge").len() >= 43);
+    }
+
+    #[test]
+    fn install_callback_requires_a_discord_snowflake() {
+        assert!(is_discord_snowflake("123456789012345678"));
+        assert!(!is_discord_snowflake("guild-a"));
+        assert!(!is_discord_snowflake("1234567890123456"));
+        assert!(!is_discord_snowflake("12345678901234567890123"));
     }
 
     #[test]

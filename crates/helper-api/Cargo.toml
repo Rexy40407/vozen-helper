@@ -17,6 +17,7 @@ helper-modules = { path = "../helper-modules" }
 helper-store = { path = "../helper-store" }
 http.workspace = true
 reqwest.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
