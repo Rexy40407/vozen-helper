@@ -11238,14 +11238,16 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "utility.temp_channels"
         | "community.economy"
         | "studio.rank_card"
+        // RSS and podcasts share the same public RSS/Atom transport, including
+        // SSRF protection, bounded payloads, deduplication and test delivery.
+        // Neither requires provider credentials to operate.
+        | "social.rss"
+        | "social.podcasts"
         | "social.bluesky"
         | "web3.crypto_stats"
         | "web3.crypto_queries" => FeatureMaturity::Operational,
-        "social.youtube" | "social.rss" | "social.twitch" | "web3.gas_tracker"
+        "social.youtube" | "social.twitch" | "web3.gas_tracker"
         | "web3.nft_stats" | "web3.nft_queries" | "web3.nft_sales" => FeatureMaturity::Beta,
-        // Podcast feeds reuse the official RSS/Atom transport and its SSRF
-        // protection, so they do not require a second provider or secret.
-        "social.podcasts" => FeatureMaturity::Operational,
         // Providers without an approved adapter or credentials must never be
         // presented as configurable, even if a legacy setting exists.
         "social.instagram"
@@ -11688,6 +11690,20 @@ mod tests {
             // configured and health checks succeed.
             assert_eq!(feature_maturity(key), FeatureMaturity::Beta);
         }
+    }
+
+    #[test]
+    fn rss_alerts_are_operational_without_provider_credentials() {
+        let rss = feature_adapter("social.rss").expect("rss adapter");
+
+        assert_eq!(feature_maturity("social.rss"), FeatureMaturity::Operational);
+        assert_eq!(rss.descriptor().source, "rss_atom_adapter_v1");
+        assert!(
+            rss.descriptor()
+                .dependencies
+                .iter()
+                .any(|dependency| dependency == "outbound_https")
+        );
     }
 
     #[test]

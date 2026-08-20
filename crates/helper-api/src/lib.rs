@@ -12168,8 +12168,8 @@ mod tests {
                 .filter(|item| item["maturity"] == value)
                 .count()
         };
-        assert_eq!(maturity_count("operational"), 38);
-        assert_eq!(maturity_count("beta"), 7);
+        assert_eq!(maturity_count("operational"), 39);
+        assert_eq!(maturity_count("beta"), 6);
         assert_eq!(maturity_count("blocked"), 7);
         assert_eq!(maturity_count("planned"), 0);
         assert!(
