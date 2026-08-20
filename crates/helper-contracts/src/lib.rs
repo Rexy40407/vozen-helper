@@ -7,6 +7,28 @@ use uuid::Uuid;
 pub const API_VERSION: &str = "v1";
 pub const PRODUCT_ID: &str = "vozen-helper";
 
+/// The panel only offers Unicode reactions. Custom emoji references embed a
+/// guild-specific ID and would make an exported workflow non-portable.
+pub const WORKFLOW_REACTION_MAX_CHARS: usize = 16;
+
+/// Accept one short, visible Unicode reaction and reject Discord's custom
+/// emoji syntax, whitespace and control characters. Discord remains the
+/// final authority for whether a particular Unicode sequence is a valid
+/// reaction, but this shared guard keeps the API, imports and gateway on the
+/// same safe contract.
+pub fn is_valid_workflow_reaction(raw: &str) -> bool {
+    let value = raw.trim();
+    let character_count = value.chars().count();
+    (1..=WORKFLOW_REACTION_MAX_CHARS).contains(&character_count)
+        && !value.is_ascii()
+        && value
+            .chars()
+            .all(|character| !character.is_control() && !character.is_whitespace())
+        && !value.contains('<')
+        && !value.contains('>')
+        && !value.contains(':')
+}
+
 /// Lifecycle state exposed by the configuration catalogue.  The panel must
 /// never infer this state from a boolean toggle: a feature can be configured
 /// without having a runtime adapter, or can be temporarily unhealthy.

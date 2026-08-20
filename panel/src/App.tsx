@@ -4698,8 +4698,8 @@ function WorkflowManager({
       setError(`Reply must be ${maxReplyLength} characters or fewer.`);
       return;
     }
-    if (action === 'react' && (trimmedPayload.length > 16 || /[<>]/.test(trimmedPayload))) {
-      setError('Reactions use one Unicode emoji or a short safe token (maximum 16 characters).');
+    if (action === 'react' && (trimmedPayload.length > 16 || !/[^\x00-\x7F]/.test(trimmedPayload) || /[\s<>:]/.test(trimmedPayload))) {
+      setError('Reactions use one Unicode emoji (maximum 16 characters); custom emojis are not supported.');
       return;
     }
     setBusy(true);

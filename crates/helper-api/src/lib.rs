@@ -9,14 +9,14 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
-    routing::{delete, get, post, put},
+    routing::{get, patch, post, put},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use helper_contracts::Plan;
 use helper_contracts::{
     AntiSpamDecision, AntiSpamObservation, ApiError, FeatureMaturity, RANK_CARD_BACKGROUND_PRESETS,
-    RankCardConfig, SessionClaims, SimulationResult, ValidationIssue,
+    RankCardConfig, SessionClaims, SimulationResult, ValidationIssue, is_valid_workflow_reaction,
 };
 use helper_core::{
     Capability, FEATURE_SCHEMA_VERSION, LeaderboardEntry, ReminderObservation,
@@ -304,7 +304,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/privacy/delete", post(privacy_delete))
         .route("/api/config/import", post(import_config))
         .route("/api/workflows", get(workflows).post(create_workflow))
-        .route("/api/workflows/{id}", delete(delete_workflow))
+        .route(
+            "/api/workflows/{id}",
+            patch(update_workflow).delete(delete_workflow),
+        )
         .route(
             "/api/custom-commands",
             get(custom_commands).post(create_custom_command),
@@ -11257,6 +11260,11 @@ struct WorkflowRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct WorkflowUpdateRequest {
+    enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct CustomCommandRequest {
     name: String,
     content: String,
@@ -11287,6 +11295,27 @@ fn custom_command_limits(state: &ApiState, guild_id: &str) -> (u32, usize) {
     (
         read_u64("management.custom_commands.max_tags", 100).clamp(1, 100) as u32,
         read_u64("management.custom_commands.max_response_length", 1_000).clamp(1, 2_000) as usize,
+    )
+}
+
+fn workflow_limits(state: &ApiState, guild_id: &str, plan: &Plan) -> (u64, u64, usize) {
+    let read_u64 = |key: &str, fallback: u64| {
+        state
+            .store
+            .get_setting(guild_id, key)
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(fallback)
+    };
+    let plan_limit = quota_limit(plan, "workflows");
+    let configured_limit = read_u64("management.workflows.max_workflows", plan_limit).clamp(1, 100);
+    let max_reply_length =
+        read_u64("management.workflows.max_reply_length", 1_000).clamp(1, 1_500) as usize;
+    (
+        plan_limit,
+        plan_limit.min(configured_limit),
+        max_reply_length,
     )
 }
 
@@ -11442,11 +11471,21 @@ async fn workflows(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_auth(&state, &headers)?;
+    let plan = effective_plan(&state, &claims).await;
+    let (plan_limit, max_workflows, max_reply_length) =
+        workflow_limits(&state, &claims.guild_id, &plan);
     let rows = state
         .store
         .workflows(&claims.guild_id, 100)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
-    Ok(Json(serde_json::json!({"workflows": rows})))
+    Ok(Json(serde_json::json!({
+        "guildId": claims.guild_id,
+        "enabled": feature_enabled(&state, &claims.guild_id, "management.workflows"),
+        "planLimit": plan_limit,
+        "maxWorkflows": max_workflows,
+        "maxReplyLength": max_reply_length,
+        "workflows": rows,
+    })))
 }
 
 async fn create_workflow(
@@ -11456,17 +11495,24 @@ async fn create_workflow(
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
     require_feature_premium(&state, &claims, "management.workflows").await?;
+    if !feature_enabled(&state, &claims.guild_id, "management.workflows") {
+        return Err(client_error(StatusCode::CONFLICT, "feature_disabled"));
+    }
+    let plan = effective_plan(&state, &claims).await;
+    let (_, workflow_limit, max_reply_length) = workflow_limits(&state, &claims.guild_id, &plan);
+    let payload = request.payload.trim();
+    let payload_is_valid = match request.action.as_str() {
+        "reply" => (1..=max_reply_length).contains(&payload.len()),
+        "react" => is_valid_workflow_reaction(payload),
+        _ => false,
+    };
     if !(1..=50).contains(&request.name.trim().len())
         || request.trigger != "message"
-        || request.action != "reply"
-        || request.payload.trim().is_empty()
-        || request.payload.len() > 1_000
+        || !payload_is_valid
         || request.condition.as_deref().unwrap_or_default().len() > 200
     {
         return Err(client_error(StatusCode::BAD_REQUEST, "invalid_workflow"));
     }
-    let plan = effective_plan(&state, &claims).await;
-    let workflow_limit = quota_limit(&plan, "workflows");
     let Some(id) = state
         .store
         .create_workflow_bounded(
@@ -11475,7 +11521,7 @@ async fn create_workflow(
             &request.trigger,
             request.condition.as_deref().unwrap_or_default(),
             &request.action,
-            request.payload.trim(),
+            payload,
             workflow_limit,
         )
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
@@ -11488,12 +11534,42 @@ async fn create_workflow(
     Ok((StatusCode::CREATED, Json(serde_json::json!({"id": id}))))
 }
 
+async fn update_workflow(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(request): Json<WorkflowUpdateRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "management.workflows").await?;
+    if !feature_enabled(&state, &claims.guild_id, "management.workflows") {
+        return Err(client_error(StatusCode::CONFLICT, "feature_disabled"));
+    }
+    if id <= 0 {
+        return Err(client_error(StatusCode::BAD_REQUEST, "workflow_not_found"));
+    }
+    let updated = state
+        .store
+        .set_workflow_enabled(&claims.guild_id, id, request.enabled)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    if !updated {
+        return Err(client_error(StatusCode::NOT_FOUND, "workflow_not_found"));
+    }
+    Ok(Json(
+        serde_json::json!({"ok": true, "id": id, "enabled": request.enabled}),
+    ))
+}
+
 async fn delete_workflow(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "management.workflows").await?;
+    if !feature_enabled(&state, &claims.guild_id, "management.workflows") {
+        return Err(client_error(StatusCode::CONFLICT, "feature_disabled"));
+    }
     let deleted = state
         .store
         .delete_workflow(&claims.guild_id, id)
@@ -13570,6 +13646,9 @@ mod tests {
         let session = claims("guild-a");
         store.save_session(&session).unwrap();
         grant_premium(&store, &session);
+        store
+            .set_setting("guild-a", "feature.management.workflows", "true")
+            .unwrap();
         let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
         for index in 0..25 {
             store
@@ -13605,6 +13684,103 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn api_creates_unicode_reaction_workflows() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        store.save_session(&session).unwrap();
+        grant_premium(&store, &session);
+        store
+            .set_setting("guild-a", "feature.management.workflows", "true")
+            .unwrap();
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/workflows")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "thank-you-reaction",
+                            "trigger": "message",
+                            "condition": "thanks",
+                            "action": "react",
+                            "payload": "✅"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let workflow = store
+            .active_workflows("guild-a", "message")
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("stored reaction workflow");
+        assert_eq!(workflow.action, "react");
+        assert_eq!(workflow.payload, "✅");
+
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/workflows/{}", workflow.id))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            store
+                .active_workflows("guild-a", "message")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_endpoint_reports_the_enabled_state_and_effective_limits() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        store.save_session(&session).unwrap();
+        grant_premium(&store, &session);
+        for (key, value) in [
+            ("feature.management.workflows", "true"),
+            ("management.workflows.max_workflows", "4"),
+            ("management.workflows.max_reply_length", "240"),
+        ] {
+            store.set_setting("guild-a", key, value).unwrap();
+        }
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        let response = router(state(store))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/workflows")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                .unwrap();
+        assert_eq!(body["enabled"], true);
+        assert_eq!(body["planLimit"], 25);
+        assert_eq!(body["maxWorkflows"], 4);
+        assert_eq!(body["maxReplyLength"], 240);
     }
 
     #[tokio::test]

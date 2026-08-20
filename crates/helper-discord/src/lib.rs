@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, FixedOffset, TimeZone, Utc};
-use helper_contracts::{AntiSpamObservation, AntiSpamPolicy, Plan};
+use helper_contracts::{AntiSpamObservation, AntiSpamPolicy, Plan, is_valid_workflow_reaction};
 use helper_core::{
     AchievementPolicy, AntiRaidPolicy, Config, JoinGateObservation, JoinGatePolicy,
     LeaderboardEntry, ModerationObservation, ModerationPolicy, ReminderObservation, ReminderPolicy,
@@ -41,7 +41,7 @@ use serenity::{
         CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage,
         CreateMessage, EditChannel, EditMessage, EventHandler, GatewayIntents, Interaction,
         MessageId, MessageUpdateEvent, PermissionOverwrite, PermissionOverwriteType, Permissions,
-        Ready, RoleId,
+        ReactionType, Ready, RoleId,
     },
     async_trait,
 };
@@ -1314,7 +1314,15 @@ impl EventHandler for Handler {
                         "reply",
                         "Reply text; use {user} and {message}",
                     )
-                    .required(true),
+                    .required(false),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        serenity::all::CommandOptionType::String,
+                        "emoji",
+                        "One Unicode emoji to add as a reaction",
+                    )
+                    .required(false),
                 )
                 .add_option(
                     CreateCommandOption::new(
@@ -3799,6 +3807,11 @@ impl EventHandler for Handler {
                 };
                 if let Some(reply) = decision.reply {
                     let _ = message.channel_id.say(&ctx.http, reply).await;
+                }
+                if let Some(reaction) = decision.reaction {
+                    let _ = message
+                        .react(&ctx.http, ReactionType::Unicode(reaction))
+                        .await;
                 }
             }
         }
@@ -8377,7 +8390,34 @@ impl Handler {
                 }
                 let name = option_string(command, "name").unwrap_or_default().trim();
                 let condition = option_string(command, "contains").unwrap_or_default().trim();
-                let reply = option_string(command, "reply").unwrap_or_default().trim();
+                let reply = option_string(command, "reply")
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+                let emoji = option_string(command, "emoji")
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+                let (action, payload) = match (reply, emoji) {
+                    (Some(reply), None) => ("reply", reply),
+                    (None, Some(emoji)) if is_valid_workflow_reaction(&emoji) => ("react", emoji),
+                    (None, Some(_)) => {
+                        return respond(
+                            ctx,
+                            command,
+                            "The emoji must be one short Unicode emoji; custom emojis are not supported.",
+                        )
+                        .await;
+                    }
+                    _ => {
+                        return respond(
+                            ctx,
+                            command,
+                            "Choose either reply text or one Unicode emoji reaction.",
+                        )
+                        .await;
+                    }
+                };
                 let max_reply_length = setting_u64(
                     &self.store,
                     &guild_text,
@@ -8386,7 +8426,7 @@ impl Handler {
                 )
                 .clamp(1, 1_500) as usize;
                 if !(1..=50).contains(&name.len())
-                    || !(1..=max_reply_length).contains(&reply.len())
+                    || (action == "reply" && !(1..=max_reply_length).contains(&payload.len()))
                     || condition.len() > 200
                 {
                     return respond(ctx, command, "Nome, condição ou resposta inválidos.").await;
@@ -8407,8 +8447,8 @@ impl Handler {
                     name,
                     "message",
                     condition,
-                    "reply",
-                    reply,
+                    action,
+                    &payload,
                     workflow_limit,
                 )? else {
                     return respond(
@@ -8420,7 +8460,10 @@ impl Handler {
                     )
                     .await;
                 };
-                format!("Workflow #{id} created. It runs when a message matches the condition.")
+                format!(
+                    "Workflow #{id} created. It {} when a message matches the condition.",
+                    if action == "react" { "reacts" } else { "replies" }
+                )
             }
             "workflow-list" => {
                 let Some(guild_id) = command.guild_id else {
@@ -8443,21 +8486,41 @@ impl Handler {
                 let Some(workflow) = self.store.workflow(&guild_id.to_string(), id)? else {
                     return respond(ctx, command, "Workflow não encontrado neste servidor.").await;
                 };
-                let matches = workflow.trigger == "message"
-                    && (workflow.condition.is_empty()
-                        || sample
-                            .to_lowercase()
-                            .contains(&workflow.condition.to_lowercase()));
-                if !matches {
+                let policy = WorkflowPolicy {
+                    max_reply_length: setting_u64(
+                        &self.store,
+                        &guild_id.to_string(),
+                        "management.workflows.max_reply_length",
+                        1_000,
+                    )
+                    .clamp(1, 1_500) as usize,
+                    allow_mentions: setting_bool(
+                        &self.store,
+                        &guild_id.to_string(),
+                        "management.workflows.allow_mentions",
+                        false,
+                    ),
+                };
+                let decision = evaluate_workflow(
+                    &policy,
+                    &WorkflowObservation {
+                        enabled: workflow.enabled,
+                        trigger: workflow.trigger.clone(),
+                        condition: workflow.condition.clone(),
+                        action: workflow.action.clone(),
+                        payload: workflow.payload.clone(),
+                        message_content: sample.to_string(),
+                        user_mention: format!("<@{}>", command.user.id),
+                    },
+                );
+                if !decision.matched {
                     format!("Dry run: workflow **{}** would not run.", workflow.name)
-                } else if workflow.action == "reply" {
-                    let preview = workflow
-                        .payload
-                        .replace("{user}", &format!("<@{}>", command.user.id))
-                        .replace("{message}", &truncate(sample, 500));
-                    format!("Dry run: workflow **{}** would reply:\n> {}", workflow.name, truncate(&preview, 1_500))
+                } else if let Some(reply) = decision.reply {
+                    format!("Dry run: workflow **{}** would reply:\n> {}", workflow.name, reply)
+                } else if let Some(reaction) = decision.reaction {
+                    format!("Dry run: workflow **{}** would react with {}.", workflow.name, reaction)
                 } else {
-                    format!("Dry run: workflow **{}** matched, but the action `{}` is not supported.", workflow.name, workflow.action)
+                    format!("Dry run: workflow **{}** would not run ({}).", workflow.name, decision.reason)
                 }
             }
             "workflow-toggle" => {

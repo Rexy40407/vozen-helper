@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use helper_contracts::{
     AntiSpamDecision, AntiSpamObservation, AntiSpamPolicy, FeatureAdapterDescriptor,
     FeatureMaturity, Plan, RANK_CARD_BACKGROUND_PRESETS, RankCardConfig, ValidationIssue,
+    is_valid_workflow_reaction,
 };
 use serde::Deserialize;
 use std::{collections::HashSet, env, net::IpAddr, path::PathBuf, str::FromStr};
@@ -984,12 +985,13 @@ pub struct WorkflowDecision {
     pub matched: bool,
     pub should_run: bool,
     pub reply: Option<String>,
+    pub reaction: Option<String>,
     pub reason: String,
 }
 
-/// Evaluate one bounded message workflow.  Only the existing allow-listed
-/// `message` + `reply` path is executable; unsupported actions are reported
-/// as a non-match rather than silently being treated as successful.
+/// Evaluate one bounded message workflow. The supported actions are a
+/// bounded reply or a short Unicode reaction; unsupported actions are
+/// reported as a non-match rather than silently being treated as successful.
 pub fn evaluate_workflow(
     policy: &WorkflowPolicy,
     observation: &WorkflowObservation,
@@ -1000,6 +1002,7 @@ pub fn evaluate_workflow(
             matched: false,
             should_run: false,
             reply: None,
+            reaction: None,
             reason: "disabled".into(),
         };
     }
@@ -1008,6 +1011,7 @@ pub fn evaluate_workflow(
             matched: false,
             should_run: false,
             reply: None,
+            reaction: None,
             reason: "unsupported_trigger".into(),
         };
     }
@@ -1020,31 +1024,56 @@ pub fn evaluate_workflow(
             matched: false,
             should_run: false,
             reply: None,
+            reaction: None,
             reason: "condition_not_met".into(),
         };
     }
-    if observation.action != "reply" {
-        return WorkflowDecision {
-            matched: true,
-            should_run: false,
-            reply: None,
-            reason: "unsupported_action".into(),
-        };
-    }
-    let mut reply = observation
-        .payload
-        .replace("{user}", &observation.user_mention)
-        .replace("{message}", &truncate_chars(content, 500));
-    if !policy.allow_mentions {
-        reply = reply
-            .replace("@everyone", "@\u{200b}everyone")
-            .replace("@here", "@\u{200b}here");
-    }
-    let reply = truncate_chars(&reply, policy.max_reply_length.clamp(1, 1_500));
+    let (reply, reaction) = match observation.action.as_str() {
+        "reply" => {
+            let mut reply = observation
+                .payload
+                .replace("{user}", &observation.user_mention)
+                .replace("{message}", &truncate_chars(content, 500));
+            if !policy.allow_mentions {
+                reply = reply
+                    .replace("@everyone", "@\u{200b}everyone")
+                    .replace("@here", "@\u{200b}here");
+            }
+            (
+                Some(truncate_chars(
+                    &reply,
+                    policy.max_reply_length.clamp(1, 1_500),
+                )),
+                None,
+            )
+        }
+        "react" if is_valid_workflow_reaction(&observation.payload) => {
+            (None, Some(observation.payload.trim().to_string()))
+        }
+        "react" => {
+            return WorkflowDecision {
+                matched: true,
+                should_run: false,
+                reply: None,
+                reaction: None,
+                reason: "invalid_reaction".into(),
+            };
+        }
+        _ => {
+            return WorkflowDecision {
+                matched: true,
+                should_run: false,
+                reply: None,
+                reaction: None,
+                reason: "unsupported_action".into(),
+            };
+        }
+    };
     WorkflowDecision {
         matched: true,
         should_run: true,
-        reply: Some(reply),
+        reply,
+        reaction,
         reason: "matched".into(),
     }
 }
@@ -6737,6 +6766,8 @@ impl FeatureAdapter for WorkflowAdapter {
             vec![format!(
                 "Workflow matched and would send this bounded reply: {reply}"
             )]
+        } else if let Some(reaction) = decision.reaction {
+            vec![format!("Workflow matched and would react with: {reaction}")]
         } else {
             vec![format!(
                 "Workflow would not send a reply ({}).",
@@ -11463,6 +11494,49 @@ mod tests {
         assert!(reply.contains("<@42>"));
         assert!(reply.contains("@\u{200b}everyone"));
         assert!(!reply.contains("@everyone"));
+    }
+
+    #[test]
+    fn workflow_evaluator_runs_a_safe_unicode_reaction() {
+        let decision = evaluate_workflow(
+            &WorkflowPolicy::default(),
+            &WorkflowObservation {
+                enabled: true,
+                trigger: "message".into(),
+                condition: "thanks".into(),
+                action: "react".into(),
+                payload: "✅".into(),
+                message_content: "Thanks for the help!".into(),
+                user_mention: "<@42>".into(),
+            },
+        );
+
+        assert!(decision.matched);
+        assert!(decision.should_run);
+        assert_eq!(decision.reply, None);
+        assert_eq!(decision.reaction.as_deref(), Some("✅"));
+        assert_eq!(decision.reason, "matched");
+    }
+
+    #[test]
+    fn workflow_evaluator_rejects_custom_emoji_reactions() {
+        let decision = evaluate_workflow(
+            &WorkflowPolicy::default(),
+            &WorkflowObservation {
+                enabled: true,
+                trigger: "message".into(),
+                condition: String::new(),
+                action: "react".into(),
+                payload: "<:unsafe:123456789>".into(),
+                message_content: "hello".into(),
+                user_mention: "<@42>".into(),
+            },
+        );
+
+        assert!(decision.matched);
+        assert!(!decision.should_run);
+        assert_eq!(decision.reaction, None);
+        assert_eq!(decision.reason, "invalid_reaction");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Duration, Utc};
-use helper_contracts::{EntitlementSnapshot, SessionClaims};
+use helper_contracts::{EntitlementSnapshot, SessionClaims, is_valid_workflow_reaction};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
     path::{Path, PathBuf},
@@ -4368,15 +4368,19 @@ impl Store {
                 .get("enabled")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true);
+            let payload_is_valid = match action.as_str() {
+                "reply" => (1..=1_000).contains(&payload.len()),
+                "react" => is_valid_workflow_reaction(&payload),
+                _ => false,
+            };
             if !(1..=50).contains(&name.len())
                 || trigger != "message"
-                || action != "reply"
+                || !payload_is_valid
                 || condition.len() > 200
-                || !(1..=1_000).contains(&payload.len())
             {
                 bail!("unsupported_workflow");
             }
-            parsed_workflows.push((name, condition, payload, enabled));
+            parsed_workflows.push((name, condition, action, payload, enabled));
         }
 
         let mut parsed_birthdays = Vec::with_capacity(birthdays.len());
@@ -4418,14 +4422,14 @@ impl Store {
                 params![guild_id, name, content, author_id, Utc::now().timestamp_millis()],
             )?;
         }
-        for (name, condition, payload, enabled) in &parsed_workflows {
+        for (name, condition, action, payload, enabled) in &parsed_workflows {
             tx.execute(
                 "DELETE FROM workflows WHERE guild_id=?1 AND name=?2 AND trigger='message'",
                 params![guild_id, name],
             )?;
             tx.execute(
-                "INSERT INTO workflows(guild_id,name,trigger,condition,action,payload,enabled,created_at) VALUES(?1,?2,'message',?3,'reply',?4,?5,?6)",
-                params![guild_id, name, condition, payload, i64::from(*enabled), Utc::now().timestamp_millis()],
+                "INSERT INTO workflows(guild_id,name,trigger,condition,action,payload,enabled,created_at) VALUES(?1,?2,'message',?3,?4,?5,?6,?7)",
+                params![guild_id, name, condition, action, payload, i64::from(*enabled), Utc::now().timestamp_millis()],
             )?;
         }
         for (user_id, month, day) in &parsed_birthdays {
@@ -7229,6 +7233,26 @@ mod tests {
             "value": "must-reject"
         }]);
         assert!(store.import_guild_config("target", &secret).is_err());
+    }
+
+    #[test]
+    fn guild_config_import_preserves_unicode_reaction_workflows() {
+        let store = Store::open(":memory:").unwrap();
+        store
+            .create_workflow("source", "thank-you", "message", "thanks", "react", "✅")
+            .unwrap();
+        let export = store.export_guild("source").unwrap();
+
+        store.import_guild_config("target", &export).unwrap();
+
+        let workflow = store
+            .active_workflows("target", "message")
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("imported reaction workflow");
+        assert_eq!(workflow.action, "react");
+        assert_eq!(workflow.payload, "✅");
     }
 
     #[test]
