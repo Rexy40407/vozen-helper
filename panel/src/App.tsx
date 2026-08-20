@@ -4652,6 +4652,20 @@ function RemindersManager({
   );
 }
 
+function isSafeWorkflowReaction(value: string): boolean {
+  const characters = Array.from(value);
+  return characters.length > 0
+    && characters.length <= 16
+    && characters.every((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint > 0x7f
+        && !/\s/u.test(character)
+        && character !== '<'
+        && character !== '>'
+        && character !== ':';
+    });
+}
+
 function WorkflowManager({
   enabled,
   localPreviewMode,
@@ -4698,7 +4712,7 @@ function WorkflowManager({
       setError(`Reply must be ${maxReplyLength} characters or fewer.`);
       return;
     }
-    if (action === 'react' && (trimmedPayload.length > 16 || !/[^\x00-\x7F]/.test(trimmedPayload) || /[\s<>:]/.test(trimmedPayload))) {
+    if (action === 'react' && !isSafeWorkflowReaction(trimmedPayload)) {
       setError('Reactions use one Unicode emoji (maximum 16 characters); custom emojis are not supported.');
       return;
     }

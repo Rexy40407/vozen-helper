@@ -28,7 +28,7 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
-      - run: npx vitest run
+      - run: npm test
       - name: Install dashboard panel
         working-directory: panel
         run: npm ci --ignore-scripts --no-audit
