@@ -26,8 +26,8 @@ use helper_core::{
 use helper_modules::{
     BlueskyClient, CoinGeckoClient, EntitlementClient, EthereumRpcClient, GasClient,
     InstagramClient, KickClient, OpenSeaClient, RedditClient, RssClient, SiweVerifier,
-    StripeConnectClient, TikTokClient, TwitchClient, XClient, YouTubeClient, format_rss_message,
-    format_twitch_message, format_youtube_message,
+    StripeConnectClient, TikTokClient, TwitchClient, XClient, YouTubeClient, env_flag_is_true,
+    first_env_flag_is_true, format_rss_message, format_twitch_message, format_youtube_message,
 };
 use helper_store::{
     BlueskySubscriptionRecord, BlueskySubscriptionWrite, InstagramSubscriptionRecord,
@@ -2782,9 +2782,7 @@ fn reddit_record_json(record: RedditSubscriptionRecord) -> serde_json::Value {
 }
 
 fn reddit_approved() -> bool {
-    std::env::var("REDDIT_COMMERCIAL_APPROVED")
-        .ok()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+    env_flag_is_true("REDDIT_COMMERCIAL_APPROVED")
 }
 
 async fn reddit_health(
@@ -3029,10 +3027,7 @@ fn x_record_json(record: XSubscriptionRecord) -> serde_json::Value {
 }
 
 fn x_approved() -> bool {
-    std::env::var("X_API_APPROVED")
-        .ok()
-        .or_else(|| std::env::var("X_COMMERCIAL_APPROVED").ok())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+    first_env_flag_is_true(&["X_API_APPROVED", "X_COMMERCIAL_APPROVED"])
 }
 
 async fn x_health(
@@ -3273,10 +3268,7 @@ fn tiktok_record_json(record: TikTokSubscriptionRecord) -> serde_json::Value {
 }
 
 fn tiktok_approved() -> bool {
-    std::env::var("TIKTOK_APP_APPROVED")
-        .ok()
-        .or_else(|| std::env::var("TIKTOK_DISPLAY_API_APPROVED").ok())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+    first_env_flag_is_true(&["TIKTOK_APP_APPROVED", "TIKTOK_DISPLAY_API_APPROVED"])
 }
 
 async fn tiktok_health(
@@ -3500,19 +3492,14 @@ fn instagram_record_json(record: InstagramSubscriptionRecord) -> serde_json::Val
 }
 
 fn instagram_approved() -> bool {
-    std::env::var("META_APP_APPROVED")
-        .ok()
-        .or_else(|| std::env::var("META_INSTAGRAM_APP_APPROVED").ok())
-        .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
+    first_env_flag_is_true(&["META_APP_APPROVED", "META_INSTAGRAM_APP_APPROVED"])
 }
 
 /// Allows an explicitly configured Meta/Instagram tester account to be used
 /// while the app is still in development mode. This never changes the
 /// production approval flag and must be opted into by the operator.
 fn instagram_development_mode() -> bool {
-    std::env::var("META_INSTAGRAM_DEVELOPMENT_MODE")
-        .ok()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+    env_flag_is_true("META_INSTAGRAM_DEVELOPMENT_MODE")
 }
 
 fn instagram_access_allowed(approved: bool, development_mode: bool) -> bool {
@@ -3729,10 +3716,7 @@ fn kick_record_json(record: KickSubscriptionRecord) -> serde_json::Value {
     serde_json::json!({"id":record.id,"guildId":record.guild_id,"sourceHandle":record.source_handle,"targetChannelId":record.target_channel_id,"messageTemplate":record.message_template,"mention":record.mention,"enabled":record.enabled,"intervalSeconds":record.interval_seconds,"lastStreamId":record.last_stream_id,"nextPollAt":record.next_poll_at,"failureCount":record.failure_count,"lastError":record.last_error,"createdBy":record.created_by,"createdAt":record.created_at,"updatedAt":record.updated_at})
 }
 fn kick_approved() -> bool {
-    std::env::var("KICK_APP_APPROVED")
-        .ok()
-        .or_else(|| std::env::var("KICK_API_APPROVED").ok())
-        .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
+    first_env_flag_is_true(&["KICK_APP_APPROVED", "KICK_API_APPROVED"])
 }
 async fn kick_health(
     State(state): State<Arc<ApiState>>,
@@ -4404,9 +4388,7 @@ async fn test_twitch_delivery(
 }
 
 fn stripe_approved() -> bool {
-    std::env::var("STRIPE_CONNECT_APPROVED")
-        .ok()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+    env_flag_is_true("STRIPE_CONNECT_APPROVED")
 }
 
 async fn stripe_health(

@@ -23,8 +23,8 @@ use helper_modules::{
     EthereumRpcClient, GasClient, GasQuote, InstagramClient, InstagramMedia, KickClient,
     KickStream, OpenSeaClient, OpenSeaCollectionInfo, OpenSeaCollectionStats, OpenSeaSale,
     RedditClient, RedditPost, RssClient, TikTokClient, TikTokVideo, TwitchChannelSearchResult,
-    TwitchClient, XClient, XPost, YouTubeClient, YouTubeSearchResult, format_rss_message,
-    format_twitch_message, format_youtube_message,
+    TwitchClient, XClient, XPost, YouTubeClient, YouTubeSearchResult, env_flag_is_true,
+    first_env_flag_is_true, format_rss_message, format_twitch_message, format_youtube_message,
 };
 use helper_store::{
     BlueskySubscriptionRecord, InstagramSubscriptionRecord, KickSubscriptionRecord,
@@ -4896,10 +4896,7 @@ async fn run_reddit_worker(http: Arc<serenity::http::Http>, store: Store, reddit
     let mut interval = tokio::time::interval(Duration::from_secs(15));
     loop {
         interval.tick().await;
-        if !std::env::var("REDDIT_COMMERCIAL_APPROVED")
-            .ok()
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
-        {
+        if !env_flag_is_true("REDDIT_COMMERCIAL_APPROVED") {
             continue;
         }
         let due = match store.due_reddit_subscriptions(Utc::now().timestamp_millis(), 25) {
@@ -5003,11 +5000,7 @@ async fn run_x_worker(http: Arc<serenity::http::Http>, store: Store, x: XClient)
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
         interval.tick().await;
-        if !std::env::var("X_API_APPROVED")
-            .ok()
-            .or_else(|| std::env::var("X_COMMERCIAL_APPROVED").ok())
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
-        {
+        if !first_env_flag_is_true(&["X_API_APPROVED", "X_COMMERCIAL_APPROVED"]) {
             continue;
         }
         let due = match store.due_x_subscriptions(Utc::now().timestamp_millis(), 25) {
@@ -5105,11 +5098,7 @@ async fn run_tiktok_worker(http: Arc<serenity::http::Http>, store: Store, tiktok
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
         interval.tick().await;
-        if !std::env::var("TIKTOK_APP_APPROVED")
-            .ok()
-            .or_else(|| std::env::var("TIKTOK_DISPLAY_API_APPROVED").ok())
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
-        {
+        if !first_env_flag_is_true(&["TIKTOK_APP_APPROVED", "TIKTOK_DISPLAY_API_APPROVED"]) {
             continue;
         }
         let due = match store.due_tiktok_subscriptions(Utc::now().timestamp_millis(), 25) {
@@ -5336,11 +5325,7 @@ async fn run_kick_worker(http: Arc<serenity::http::Http>, store: Store, kick: Ki
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
         interval.tick().await;
-        if !std::env::var("KICK_APP_APPROVED")
-            .ok()
-            .or_else(|| std::env::var("KICK_API_APPROVED").ok())
-            .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
-        {
+        if !first_env_flag_is_true(&["KICK_APP_APPROVED", "KICK_API_APPROVED"]) {
             continue;
         }
         let due = match store.due_kick_subscriptions(Utc::now().timestamp_millis(), 25) {
@@ -11415,16 +11400,8 @@ fn instagram_access_allowed(approved: bool, development_mode: bool) -> bool {
 }
 
 fn instagram_runtime_allowed() -> bool {
-    let approved = ["META_APP_APPROVED", "META_INSTAGRAM_APP_APPROVED"]
-        .iter()
-        .any(|name| {
-            std::env::var(name)
-                .ok()
-                .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
-        });
-    let development_mode = std::env::var("META_INSTAGRAM_DEVELOPMENT_MODE")
-        .ok()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"));
+    let approved = first_env_flag_is_true(&["META_APP_APPROVED", "META_INSTAGRAM_APP_APPROVED"]);
+    let development_mode = env_flag_is_true("META_INSTAGRAM_DEVELOPMENT_MODE");
     instagram_access_allowed(approved, development_mode)
 }
 
@@ -11435,13 +11412,7 @@ fn feature_maturity_allows_runtime(key: &str) -> bool {
             .is_some_and(|value| !value.trim().is_empty())
     };
     let any_configured = |names: &[&str]| names.iter().any(|name| configured(name));
-    let approved = |names: &[&str]| {
-        names.iter().any(|name| {
-            std::env::var(name)
-                .ok()
-                .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
-        })
-    };
+    let approved = |names: &[&str]| first_env_flag_is_true(names);
     // `feature_is_configurable` answers whether the panel can show a setup
     // page. It must not override a globally blocked provider: a stale or
     // hand-written setting is never permission to run without the official

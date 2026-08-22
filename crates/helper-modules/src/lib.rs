@@ -26,6 +26,26 @@ use std::{
 use tokio::{sync::Mutex as AsyncMutex, task::JoinHandle};
 use url::Url;
 
+/// Reads a boolean provider gate using the same tolerant representation in
+/// every runtime boundary. Secrets and other values are never returned.
+pub fn env_flag_value_is_true(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+}
+
+/// Read one environment-backed approval flag without leaking its value.
+pub fn env_flag_is_true(name: &str) -> bool {
+    env_flag_value_is_true(std::env::var(name).ok().as_deref())
+}
+
+/// Read a primary flag and only fall back to aliases when the primary is not
+/// present. A present `false` value must not be overridden by a legacy alias.
+pub fn first_env_flag_is_true(names: &[&str]) -> bool {
+    names
+        .iter()
+        .find_map(|name| std::env::var(name).ok())
+        .is_some_and(|value| env_flag_value_is_true(Some(&value)))
+}
+
 /// Small, server-side client for the official YouTube Data API.
 ///
 /// The API key is read only from the process environment. It is never part
@@ -2794,6 +2814,36 @@ fn valid_channel_id(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_flag_parser_is_case_insensitive_and_trimmed() {
+        assert!(env_flag_value_is_true(Some(" true ")));
+        assert!(env_flag_value_is_true(Some("TRUE")));
+        assert!(!env_flag_value_is_true(Some("false")));
+        assert!(!env_flag_value_is_true(Some("1")));
+        assert!(!env_flag_value_is_true(None));
+    }
+
+    #[test]
+    fn provider_flag_aliases_keep_primary_false_as_a_hard_gate() {
+        assert!(first_env_flag_is_true_from_values(&[
+            Some("true"),
+            Some("false"),
+        ]));
+        assert!(!first_env_flag_is_true_from_values(&[
+            Some("false"),
+            Some("true"),
+        ]));
+        assert!(first_env_flag_is_true_from_values(&[None, Some(" true ")]));
+        assert!(!first_env_flag_is_true_from_values(&[None, None]));
+    }
+
+    fn first_env_flag_is_true_from_values(values: &[Option<&str>]) -> bool {
+        values
+            .iter()
+            .find_map(|value| *value)
+            .is_some_and(|value| env_flag_value_is_true(Some(value)))
+    }
 
     #[test]
     fn youtube_payload_uses_official_camel_case_fields() {
