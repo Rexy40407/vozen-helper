@@ -7889,7 +7889,10 @@ mod tests {
         assert_eq!(grant_a.open_id, "creator-a");
         assert_eq!(grant_a.access_token_sealed, "sealed-access-a");
         assert_eq!(grant_a.display_name, "Creator A");
-        assert_eq!(store.tiktok_grant("guild-b").unwrap().unwrap().open_id, "creator-b");
+        assert_eq!(
+            store.tiktok_grant("guild-b").unwrap().unwrap().open_id,
+            "creator-b"
+        );
 
         store
             .save_tiktok_grant(

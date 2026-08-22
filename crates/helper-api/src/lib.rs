@@ -26,8 +26,9 @@ use helper_core::{
 use helper_modules::{
     BlueskyClient, CoinGeckoClient, EntitlementClient, EthereumRpcClient, GasClient,
     InstagramClient, KickClient, OpenSeaClient, RedditClient, RssClient, SiweVerifier,
-    StripeConnectClient, TikTokClient, TikTokOAuthClient, TokenCipher, TwitchClient, XClient, YouTubeClient, env_flag_is_true,
-    first_env_flag_is_true, format_rss_message, format_twitch_message, format_youtube_message,
+    StripeConnectClient, TikTokClient, TikTokOAuthClient, TokenCipher, TwitchClient, XClient,
+    YouTubeClient, env_flag_is_true, first_env_flag_is_true, format_rss_message,
+    format_twitch_message, format_youtube_message,
 };
 use helper_store::{
     BlueskySubscriptionRecord, BlueskySubscriptionWrite, InstagramSubscriptionRecord,
@@ -168,10 +169,22 @@ pub fn router(state: ApiState) -> Router {
             put(update_x_subscription).delete(delete_x_subscription),
         )
         .route("/api/providers/tiktok/health", get(tiktok_health))
-        .route("/api/providers/tiktok/oauth/status", get(tiktok_oauth_status))
-        .route("/api/providers/tiktok/oauth/start", post(tiktok_oauth_start))
-        .route("/api/providers/tiktok/oauth/callback", get(tiktok_oauth_callback))
-        .route("/api/providers/tiktok/oauth/connection", axum::routing::delete(tiktok_oauth_disconnect))
+        .route(
+            "/api/providers/tiktok/oauth/status",
+            get(tiktok_oauth_status),
+        )
+        .route(
+            "/api/providers/tiktok/oauth/start",
+            post(tiktok_oauth_start),
+        )
+        .route(
+            "/api/providers/tiktok/oauth/callback",
+            get(tiktok_oauth_callback),
+        )
+        .route(
+            "/api/providers/tiktok/oauth/connection",
+            axum::routing::delete(tiktok_oauth_disconnect),
+        )
         .route(
             "/api/config/tiktok",
             get(tiktok_subscriptions).post(create_tiktok_subscription),
@@ -678,7 +691,9 @@ async fn tiktok_oauth_status(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_auth(&state, &headers)?;
-    let grant = state.store.tiktok_grant(&claims.guild_id)
+    let grant = state
+        .store
+        .tiktok_grant(&claims.guild_id)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     Ok(Json(match grant {
         Some(grant) => serde_json::json!({
@@ -698,8 +713,12 @@ async fn tiktok_oauth_start(
     headers: HeaderMap,
 ) -> Result<Json<TikTokOAuthStartResponse>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
-    let oauth = TikTokOAuthClient::from_env()
-        .ok_or_else(|| client_error(StatusCode::SERVICE_UNAVAILABLE, "tiktok_oauth_not_configured"))?;
+    let oauth = TikTokOAuthClient::from_env().ok_or_else(|| {
+        client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "tiktok_oauth_not_configured",
+        )
+    })?;
     let expires = (Utc::now() + Duration::minutes(10)).timestamp();
     let mut nonce = [0_u8; 24];
     rand::rng().fill_bytes(&mut nonce);
@@ -707,9 +726,12 @@ async fn tiktok_oauth_start(
     let payload = format!("tiktok.{}.{}.{}", claims.guild_id, expires, nonce);
     let signed_state = sign_oauth_state(&payload, &state.session_secret);
     let state_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(signed_state.as_bytes()));
-    state.store.register_oauth_state(&state_hash, expires, &nonce)
+    state
+        .store
+        .register_oauth_state(&state_hash, expires, &nonce)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
-    let authorization_url = oauth.authorization_url(&signed_state)
+    let authorization_url = oauth
+        .authorization_url(&signed_state)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "tiktok_oauth_url_failed"))?;
     Ok(Json(TikTokOAuthStartResponse { authorization_url }))
 }
@@ -724,34 +746,73 @@ async fn tiktok_oauth_callback(
     let payload = verify_oauth_state(&query.state, &state.session_secret)
         .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "invalid_oauth_state"))?;
     let parts = payload.split('.').collect::<Vec<_>>();
-    if parts.len() != 4 || parts[0] != "tiktok" || !is_discord_snowflake(parts[1])
-        || parts[2].parse::<i64>().ok().is_none_or(|exp| exp < Utc::now().timestamp())
+    if parts.len() != 4
+        || parts[0] != "tiktok"
+        || !is_discord_snowflake(parts[1])
+        || parts[2]
+            .parse::<i64>()
+            .ok()
+            .is_none_or(|exp| exp < Utc::now().timestamp())
     {
         return Err(client_error(StatusCode::BAD_REQUEST, "expired_oauth_state"));
     }
     let state_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(query.state.as_bytes()));
-    let stored_nonce = state.store.consume_oauth_state(&state_hash, Utc::now().timestamp())
+    let stored_nonce = state
+        .store
+        .consume_oauth_state(&state_hash, Utc::now().timestamp())
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     if stored_nonce.as_deref() != Some(parts[3]) {
-        return Err(client_error(StatusCode::BAD_REQUEST, "oauth_state_replayed"));
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "oauth_state_replayed",
+        ));
     }
-    let oauth = TikTokOAuthClient::from_env()
-        .ok_or_else(|| client_error(StatusCode::SERVICE_UNAVAILABLE, "tiktok_oauth_not_configured"))?;
-    let code = query.code.as_deref().filter(|value| !value.trim().is_empty())
+    let oauth = TikTokOAuthClient::from_env().ok_or_else(|| {
+        client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "tiktok_oauth_not_configured",
+        )
+    })?;
+    let code = query
+        .code
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "tiktok_oauth_code_missing"))?;
-    let grant = oauth.exchange_code(code).await
+    let grant = oauth
+        .exchange_code(code)
+        .await
         .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "tiktok_oauth_exchange_failed"))?;
-    let cipher = TokenCipher::new(&state.session_secret)
-        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "token_cipher_unavailable"))?;
+    let cipher = TokenCipher::new(&state.session_secret).map_err(|_| {
+        client_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "token_cipher_unavailable",
+        )
+    })?;
     let now = Utc::now().timestamp();
-    state.store.save_tiktok_grant(
-        parts[1], &grant.open_id, &grant.open_id,
-        &cipher.seal(&grant.access_token).map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "token_seal_failed"))?,
-        &cipher.seal(&grant.refresh_token).map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "token_seal_failed"))?,
-        &grant.scope, now.saturating_add(grant.expires_in), now.saturating_add(grant.refresh_expires_in), now,
-    ).map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
-    let mut redirect = url::Url::parse(&state.oauth_success_redirect)
-        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid_oauth_success_redirect"))?;
+    state
+        .store
+        .save_tiktok_grant(
+            parts[1],
+            &grant.open_id,
+            &grant.open_id,
+            &cipher.seal(&grant.access_token).map_err(|_| {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "token_seal_failed")
+            })?,
+            &cipher.seal(&grant.refresh_token).map_err(|_| {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "token_seal_failed")
+            })?,
+            &grant.scope,
+            now.saturating_add(grant.expires_in),
+            now.saturating_add(grant.refresh_expires_in),
+            now,
+        )
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let mut redirect = url::Url::parse(&state.oauth_success_redirect).map_err(|_| {
+        client_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid_oauth_success_redirect",
+        )
+    })?;
     redirect.set_fragment(Some("/config/social.tiktok?connected=1"));
     Ok(Redirect::to(redirect.as_str()).into_response())
 }
@@ -761,7 +822,9 @@ async fn tiktok_oauth_disconnect(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
-    state.store.delete_tiktok_grant(&claims.guild_id)
+    state
+        .store
+        .delete_tiktok_grant(&claims.guild_id)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
@@ -3385,7 +3448,9 @@ async fn tiktok_health(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_auth(&state, &headers)?;
-    let connected = state.store.tiktok_grant(&claims.guild_id)
+    let connected = state
+        .store
+        .tiktok_grant(&claims.guild_id)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
         .is_some();
     let oauth_configured = TikTokOAuthClient::from_env().is_some();
@@ -3407,43 +3472,75 @@ async fn tiktok_provider_for_guild(
     state: &ApiState,
     guild_id: &str,
 ) -> Result<TikTokClient, (StatusCode, Json<ApiError>)> {
-    if let Some(mut grant) = state.store.tiktok_grant(guild_id)
+    if let Some(mut grant) = state
+        .store
+        .tiktok_grant(guild_id)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
     {
-        let cipher = TokenCipher::new(&state.session_secret)
-            .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "token_cipher_unavailable"))?;
+        let cipher = TokenCipher::new(&state.session_secret).map_err(|_| {
+            client_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "token_cipher_unavailable",
+            )
+        })?;
         let now = Utc::now().timestamp();
         if grant.access_expires_at <= now + 300 {
-            let oauth = TikTokOAuthClient::from_env()
-                .ok_or_else(|| client_error(StatusCode::SERVICE_UNAVAILABLE, "tiktok_oauth_not_configured"))?;
-            let refresh = cipher.open(&grant.refresh_token_sealed)
+            let oauth = TikTokOAuthClient::from_env().ok_or_else(|| {
+                client_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "tiktok_oauth_not_configured",
+                )
+            })?;
+            let refresh = cipher
+                .open(&grant.refresh_token_sealed)
                 .map_err(|_| client_error(StatusCode::UNAUTHORIZED, "tiktok_reconnect_required"))?;
-            let refreshed = oauth.refresh(&refresh).await
+            let refreshed = oauth
+                .refresh(&refresh)
+                .await
                 .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "tiktok_refresh_failed"))?;
-            grant.access_token_sealed = cipher.seal(&refreshed.access_token)
-                .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "token_seal_failed"))?;
-            grant.refresh_token_sealed = cipher.seal(&refreshed.refresh_token)
-                .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "token_seal_failed"))?;
+            grant.access_token_sealed = cipher.seal(&refreshed.access_token).map_err(|_| {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "token_seal_failed")
+            })?;
+            grant.refresh_token_sealed = cipher.seal(&refreshed.refresh_token).map_err(|_| {
+                client_error(StatusCode::INTERNAL_SERVER_ERROR, "token_seal_failed")
+            })?;
             grant.scopes = refreshed.scope;
             grant.access_expires_at = now.saturating_add(refreshed.expires_in);
             grant.refresh_expires_at = now.saturating_add(refreshed.refresh_expires_in);
             grant.updated_at = now;
-            state.store.save_tiktok_grant(
-                guild_id, &refreshed.open_id, &grant.display_name,
-                &grant.access_token_sealed, &grant.refresh_token_sealed, &grant.scopes,
-                grant.access_expires_at, grant.refresh_expires_at, grant.updated_at,
-            ).map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+            state
+                .store
+                .save_tiktok_grant(
+                    guild_id,
+                    &refreshed.open_id,
+                    &grant.display_name,
+                    &grant.access_token_sealed,
+                    &grant.refresh_token_sealed,
+                    &grant.scopes,
+                    grant.access_expires_at,
+                    grant.refresh_expires_at,
+                    grant.updated_at,
+                )
+                .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
         }
-        let access = cipher.open(&grant.access_token_sealed)
+        let access = cipher
+            .open(&grant.access_token_sealed)
             .map_err(|_| client_error(StatusCode::UNAUTHORIZED, "tiktok_reconnect_required"))?;
         return TikTokClient::new(access, "https://open.tiktokapis.com")
             .ok_or_else(|| client_error(StatusCode::UNAUTHORIZED, "tiktok_reconnect_required"));
     }
     if tiktok_approved() {
-        return state.tiktok.clone().ok_or_else(|| client_error(
-            StatusCode::SERVICE_UNAVAILABLE, "tiktok_provider_not_configured"));
+        return state.tiktok.clone().ok_or_else(|| {
+            client_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "tiktok_provider_not_configured",
+            )
+        });
     }
-    Err(client_error(StatusCode::PRECONDITION_REQUIRED, "tiktok_authorization_required"))
+    Err(client_error(
+        StatusCode::PRECONDITION_REQUIRED,
+        "tiktok_authorization_required",
+    ))
 }
 
 async fn tiktok_subscriptions(

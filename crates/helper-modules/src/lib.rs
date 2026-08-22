@@ -776,9 +776,8 @@ impl TikTokOAuthClient {
         let redirect_uri = redirect_uri.into().trim().to_owned();
         let authorize_url = authorize_url.into().trim().to_owned();
         let token_url = token_url.into().trim().to_owned();
-        let valid_url = |value: &str| {
-            value.starts_with("https://") || value.starts_with("http://localhost")
-        };
+        let valid_url =
+            |value: &str| value.starts_with("https://") || value.starts_with("http://localhost");
         if client_key.is_empty()
             || client_secret.len() < 8
             || !valid_url(&redirect_uri)
@@ -837,12 +836,20 @@ impl TikTokOAuthClient {
     }
 
     async fn token_request(&self, form: &[(&str, &str)]) -> anyhow::Result<TikTokTokenGrant> {
-        let response = self.http.post(self.token_url.as_ref()).form(form).send().await?;
+        let response = self
+            .http
+            .post(self.token_url.as_ref())
+            .form(form)
+            .send()
+            .await?;
         if !response.status().is_success() {
             anyhow::bail!("tiktok_oauth_error:{}", response.status());
         }
         let grant: TikTokTokenGrant = response.json().await?;
-        if grant.access_token.is_empty() || grant.refresh_token.is_empty() || grant.open_id.is_empty() {
+        if grant.access_token.is_empty()
+            || grant.refresh_token.is_empty()
+            || grant.open_id.is_empty()
+        {
             anyhow::bail!("tiktok_oauth_invalid_grant");
         }
         Ok(grant)
@@ -3325,10 +3332,12 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(cipher.open(&first).unwrap(), "token-value");
         assert_eq!(cipher.open(&second).unwrap(), "token-value");
-        assert!(TokenCipher::new("another-production-session-secret")
-            .unwrap()
-            .open(&first)
-            .is_err());
+        assert!(
+            TokenCipher::new("another-production-session-secret")
+                .unwrap()
+                .open(&first)
+                .is_err()
+        );
     }
 
     #[test]
@@ -3344,8 +3353,14 @@ mod tests {
         let url = Url::parse(&oauth.authorization_url("signed-state").unwrap()).unwrap();
         assert_eq!(url.host_str(), Some("www.tiktok.com"));
         let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
-        assert_eq!(query.get("client_key").map(String::as_str), Some("client-key"));
-        assert_eq!(query.get("scope").map(String::as_str), Some("user.info.basic,video.list"));
+        assert_eq!(
+            query.get("client_key").map(String::as_str),
+            Some("client-key")
+        );
+        assert_eq!(
+            query.get("scope").map(String::as_str),
+            Some("user.info.basic,video.list")
+        );
         assert_eq!(query.get("state").map(String::as_str), Some("signed-state"));
         assert_eq!(query.get("response_type").map(String::as_str), Some("code"));
     }

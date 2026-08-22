@@ -22,9 +22,10 @@ use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
     EthereumRpcClient, GasClient, GasQuote, InstagramClient, InstagramMedia, KickClient,
     KickStream, OpenSeaClient, OpenSeaCollectionInfo, OpenSeaCollectionStats, OpenSeaSale,
-    RedditClient, RedditPost, RssClient, TikTokClient, TikTokOAuthClient, TikTokVideo, TokenCipher, TwitchChannelSearchResult,
-    TwitchClient, XClient, XPost, YouTubeClient, YouTubeSearchResult, env_flag_is_true,
-    first_env_flag_is_true, format_rss_message, format_twitch_message, format_youtube_message,
+    RedditClient, RedditPost, RssClient, TikTokClient, TikTokOAuthClient, TikTokVideo, TokenCipher,
+    TwitchChannelSearchResult, TwitchClient, XClient, XPost, YouTubeClient, YouTubeSearchResult,
+    env_flag_is_true, first_env_flag_is_true, format_rss_message, format_twitch_message,
+    format_youtube_message,
 };
 use helper_store::{
     BlueskySubscriptionRecord, InstagramSubscriptionRecord, KickSubscriptionRecord,
@@ -5141,16 +5142,27 @@ async fn run_tiktok_worker(
                 oauth.as_ref(),
                 cipher.as_ref(),
                 fallback_tiktok.as_ref(),
-            ).await {
+            )
+            .await
+            {
                 Ok(client) => client,
                 Err(error) => {
-                    let next = Utc::now().timestamp_millis() + subscription.interval_seconds * 1_000;
-                    let _ = store.update_tiktok_poll(subscription.id, subscription.last_video_id.as_deref(), next, subscription.failure_count, Some("tiktok_authorization_required"));
+                    let next =
+                        Utc::now().timestamp_millis() + subscription.interval_seconds * 1_000;
+                    let _ = store.update_tiktok_poll(
+                        subscription.id,
+                        subscription.last_video_id.as_deref(),
+                        next,
+                        subscription.failure_count,
+                        Some("tiktok_authorization_required"),
+                    );
                     tracing::warn!(%error, subscription_id = subscription.id, "tiktok authorization unavailable");
                     continue;
                 }
             };
-            if let Err(error) = process_tiktok_subscription(&http, &store, &client, &subscription).await {
+            if let Err(error) =
+                process_tiktok_subscription(&http, &store, &client, &subscription).await
+            {
                 tracing::warn!(%error, subscription_id = subscription.id, "tiktok notification failed");
             }
         }
@@ -5164,7 +5176,9 @@ async fn tiktok_client_for_guild(
     cipher: Option<&TokenCipher>,
     fallback: Option<&TikTokClient>,
 ) -> Result<TikTokClient> {
-    if let (Some(oauth), Some(cipher), Some(mut grant)) = (oauth, cipher, store.tiktok_grant(guild_id)?) {
+    if let (Some(oauth), Some(cipher), Some(mut grant)) =
+        (oauth, cipher, store.tiktok_grant(guild_id)?)
+    {
         let now = Utc::now().timestamp();
         if grant.access_expires_at <= now + 300 {
             let refresh_token = cipher.open(&grant.refresh_token_sealed)?;
@@ -5176,16 +5190,24 @@ async fn tiktok_client_for_guild(
             grant.refresh_expires_at = now.saturating_add(refreshed.refresh_expires_in);
             grant.updated_at = now;
             store.save_tiktok_grant(
-                guild_id, &refreshed.open_id, &grant.display_name,
-                &grant.access_token_sealed, &grant.refresh_token_sealed, &grant.scopes,
-                grant.access_expires_at, grant.refresh_expires_at, grant.updated_at,
+                guild_id,
+                &refreshed.open_id,
+                &grant.display_name,
+                &grant.access_token_sealed,
+                &grant.refresh_token_sealed,
+                &grant.scopes,
+                grant.access_expires_at,
+                grant.refresh_expires_at,
+                grant.updated_at,
             )?;
         }
         let access_token = cipher.open(&grant.access_token_sealed)?;
         return TikTokClient::new(access_token, "https://open.tiktokapis.com")
             .ok_or_else(|| anyhow::anyhow!("tiktok_access_token_invalid"));
     }
-    fallback.cloned().ok_or_else(|| anyhow::anyhow!("tiktok_grant_missing"))
+    fallback
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("tiktok_grant_missing"))
 }
 
 async fn process_tiktok_subscription(
