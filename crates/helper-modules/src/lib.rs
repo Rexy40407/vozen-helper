@@ -14,6 +14,10 @@ use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use quick_xml::{Reader, escape::unescape, events::Event};
 use rand::RngCore;
 use reqwest::Client;
+use ring::{
+    aead::{self, Aad, LessSafeKey, Nonce, UnboundKey},
+    rand::{SecureRandom, SystemRandom},
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sha3::Keccak256;
@@ -663,6 +667,186 @@ pub struct TikTokVideo {
     pub created_at: String,
     pub url: String,
     pub embed_url: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct TokenCipher {
+    key: Arc<[u8; 32]>,
+}
+
+impl TokenCipher {
+    pub fn new(secret: &str) -> anyhow::Result<Self> {
+        if secret.trim().len() < 24 {
+            anyhow::bail!("token_cipher_secret_too_short");
+        }
+        let digest = Sha256::digest(format!("vozen-helper:tiktok:v1:{secret}").as_bytes());
+        let mut key = [0_u8; 32];
+        key.copy_from_slice(&digest);
+        Ok(Self { key: Arc::new(key) })
+    }
+
+    pub fn seal(&self, plaintext: &str) -> anyhow::Result<String> {
+        let mut nonce_bytes = [0_u8; 12];
+        SystemRandom::new()
+            .fill(&mut nonce_bytes)
+            .map_err(|_| anyhow::anyhow!("token_cipher_random_failed"))?;
+        let key = LessSafeKey::new(
+            UnboundKey::new(&aead::AES_256_GCM, self.key.as_ref())
+                .map_err(|_| anyhow::anyhow!("token_cipher_key_failed"))?,
+        );
+        let mut payload = plaintext.as_bytes().to_vec();
+        key.seal_in_place_append_tag(
+            Nonce::assume_unique_for_key(nonce_bytes),
+            Aad::from(b"vozen-helper:tiktok:v1"),
+            &mut payload,
+        )
+        .map_err(|_| anyhow::anyhow!("token_cipher_seal_failed"))?;
+        let mut encoded = nonce_bytes.to_vec();
+        encoded.extend_from_slice(&payload);
+        Ok(URL_SAFE_NO_PAD.encode(encoded))
+    }
+
+    pub fn open(&self, sealed: &str) -> anyhow::Result<String> {
+        let decoded = URL_SAFE_NO_PAD
+            .decode(sealed)
+            .map_err(|_| anyhow::anyhow!("token_cipher_invalid_encoding"))?;
+        if decoded.len() <= 12 + aead::AES_256_GCM.tag_len() {
+            anyhow::bail!("token_cipher_invalid_payload");
+        }
+        let (nonce, ciphertext) = decoded.split_at(12);
+        let mut nonce_bytes = [0_u8; 12];
+        nonce_bytes.copy_from_slice(nonce);
+        let key = LessSafeKey::new(
+            UnboundKey::new(&aead::AES_256_GCM, self.key.as_ref())
+                .map_err(|_| anyhow::anyhow!("token_cipher_key_failed"))?,
+        );
+        let mut payload = ciphertext.to_vec();
+        let plaintext = key
+            .open_in_place(
+                Nonce::assume_unique_for_key(nonce_bytes),
+                Aad::from(b"vozen-helper:tiktok:v1"),
+                &mut payload,
+            )
+            .map_err(|_| anyhow::anyhow!("token_cipher_open_failed"))?;
+        String::from_utf8(plaintext.to_vec()).map_err(Into::into)
+    }
+}
+
+#[derive(Clone)]
+pub struct TikTokOAuthClient {
+    client_key: Arc<str>,
+    client_secret: Arc<str>,
+    redirect_uri: Arc<str>,
+    authorize_url: Arc<str>,
+    token_url: Arc<str>,
+    http: Client,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TikTokTokenGrant {
+    pub access_token: String,
+    pub expires_in: i64,
+    pub open_id: String,
+    pub refresh_expires_in: i64,
+    pub refresh_token: String,
+    pub scope: String,
+    pub token_type: String,
+}
+
+impl TikTokOAuthClient {
+    pub fn from_env() -> Option<Self> {
+        Self::new(
+            std::env::var("TIKTOK_CLIENT_KEY").ok()?,
+            std::env::var("TIKTOK_CLIENT_SECRET").ok()?,
+            std::env::var("TIKTOK_REDIRECT_URI").ok()?,
+            "https://www.tiktok.com/v2/auth/authorize/",
+            "https://open.tiktokapis.com/v2/oauth/token/",
+        )
+    }
+
+    pub fn new(
+        client_key: impl Into<String>,
+        client_secret: impl Into<String>,
+        redirect_uri: impl Into<String>,
+        authorize_url: impl Into<String>,
+        token_url: impl Into<String>,
+    ) -> Option<Self> {
+        let client_key = client_key.into().trim().to_owned();
+        let client_secret = client_secret.into().trim().to_owned();
+        let redirect_uri = redirect_uri.into().trim().to_owned();
+        let authorize_url = authorize_url.into().trim().to_owned();
+        let token_url = token_url.into().trim().to_owned();
+        let valid_url = |value: &str| {
+            value.starts_with("https://") || value.starts_with("http://localhost")
+        };
+        if client_key.is_empty()
+            || client_secret.len() < 8
+            || !valid_url(&redirect_uri)
+            || !valid_url(&authorize_url)
+            || !valid_url(&token_url)
+        {
+            return None;
+        }
+        Some(Self {
+            client_key: Arc::from(client_key),
+            client_secret: Arc::from(client_secret),
+            redirect_uri: Arc::from(redirect_uri),
+            authorize_url: Arc::from(authorize_url),
+            token_url: Arc::from(token_url),
+            http: Client::builder()
+                .timeout(Duration::from_secs(15))
+                .user_agent("Vozen-Helper/1.0 (+https://vozen.org)")
+                .build()
+                .ok()?,
+        })
+    }
+
+    pub fn authorization_url(&self, state: &str) -> anyhow::Result<String> {
+        if state.trim().is_empty() || state.len() > 1_024 {
+            anyhow::bail!("tiktok_oauth_invalid_state");
+        }
+        let mut url = Url::parse(&self.authorize_url)?;
+        url.query_pairs_mut()
+            .append_pair("client_key", &self.client_key)
+            .append_pair("scope", "user.info.basic,video.list")
+            .append_pair("response_type", "code")
+            .append_pair("redirect_uri", &self.redirect_uri)
+            .append_pair("state", state);
+        Ok(url.into())
+    }
+
+    pub async fn exchange_code(&self, code: &str) -> anyhow::Result<TikTokTokenGrant> {
+        self.token_request(&[
+            ("client_key", self.client_key.as_ref()),
+            ("client_secret", self.client_secret.as_ref()),
+            ("code", code),
+            ("grant_type", "authorization_code"),
+            ("redirect_uri", self.redirect_uri.as_ref()),
+        ])
+        .await
+    }
+
+    pub async fn refresh(&self, refresh_token: &str) -> anyhow::Result<TikTokTokenGrant> {
+        self.token_request(&[
+            ("client_key", self.client_key.as_ref()),
+            ("client_secret", self.client_secret.as_ref()),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+        ])
+        .await
+    }
+
+    async fn token_request(&self, form: &[(&str, &str)]) -> anyhow::Result<TikTokTokenGrant> {
+        let response = self.http.post(self.token_url.as_ref()).form(form).send().await?;
+        if !response.status().is_success() {
+            anyhow::bail!("tiktok_oauth_error:{}", response.status());
+        }
+        let grant: TikTokTokenGrant = response.json().await?;
+        if grant.access_token.is_empty() || grant.refresh_token.is_empty() || grant.open_id.is_empty() {
+            anyhow::bail!("tiktok_oauth_invalid_grant");
+        }
+        Ok(grant)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -3131,6 +3315,39 @@ mod tests {
         assert!(validate_rpc_url("https://rpc.example/key?secret=1").is_err());
         assert_eq!(normalize_opensea_slug(" Cool-Cats ").unwrap(), "cool-cats");
         assert!(normalize_opensea_slug("https://opensea.io/collection/cool-cats").is_err());
+    }
+
+    #[test]
+    fn tiktok_token_cipher_round_trips_without_deterministic_ciphertext() {
+        let cipher = TokenCipher::new("a-long-production-session-secret").unwrap();
+        let first = cipher.seal("token-value").unwrap();
+        let second = cipher.seal("token-value").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(cipher.open(&first).unwrap(), "token-value");
+        assert_eq!(cipher.open(&second).unwrap(), "token-value");
+        assert!(TokenCipher::new("another-production-session-secret")
+            .unwrap()
+            .open(&first)
+            .is_err());
+    }
+
+    #[test]
+    fn tiktok_authorization_url_uses_official_endpoint_and_minimal_scopes() {
+        let oauth = TikTokOAuthClient::new(
+            "client-key",
+            "client-secret",
+            "https://api.vozen.org/rust/api/providers/tiktok/oauth/callback",
+            "https://www.tiktok.com/v2/auth/authorize/",
+            "https://open.tiktokapis.com/v2/oauth/token/",
+        )
+        .unwrap();
+        let url = Url::parse(&oauth.authorization_url("signed-state").unwrap()).unwrap();
+        assert_eq!(url.host_str(), Some("www.tiktok.com"));
+        let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(query.get("client_key").map(String::as_str), Some("client-key"));
+        assert_eq!(query.get("scope").map(String::as_str), Some("user.info.basic,video.list"));
+        assert_eq!(query.get("state").map(String::as_str), Some("signed-state"));
+        assert_eq!(query.get("response_type").map(String::as_str), Some("code"));
     }
 
     #[test]

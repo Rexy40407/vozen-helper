@@ -822,6 +822,7 @@ dependencies = [
  "quick-xml",
  "rand 0.9.5",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

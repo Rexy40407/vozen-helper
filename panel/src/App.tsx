@@ -4079,6 +4079,7 @@ function FeatureDetail({
           {feature?.key === 'community.role_panels' && (
             <RolePanelManager context={context} localPreviewMode={localPreviewMode} />
           )}
+          {feature?.key === 'social.tiktok' && <TikTokConnection />}
           {sections.map((section) => (
             <ConfigSection
               key={section.title}
@@ -4135,6 +4136,67 @@ function FeatureDetail({
           {saving ? 'A guardar…' : 'Guardar alterações'}
         </button>
       </div>
+    </section>
+  );
+}
+
+function TikTokConnection() {
+  const [status, setStatus] = useState<Awaited<ReturnType<typeof api.tiktokOAuthStatus>> | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    api.tiktokOAuthStatus()
+      .then((value) => { if (!cancelled) setStatus(value); })
+      .catch(() => { if (!cancelled) setError('Não foi possível verificar a ligação ao TikTok.'); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const connect = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const result = await api.startTikTokOAuth();
+      window.location.assign(result.authorization_url);
+    } catch {
+      setError('Não foi possível iniciar a autorização do TikTok.');
+      setBusy(false);
+    }
+  };
+
+  const disconnect = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      await api.disconnectTikTokOAuth();
+      setStatus({ connected: false });
+    } catch {
+      setError('Não foi possível remover a ligação ao TikTok.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="card config-section">
+      <small className="eyebrow">CONTA TIKTOK</small>
+      <h3>{status?.connected ? 'TikTok ligado' : 'Liga a conta que publica os vídeos'}</h3>
+      <p>
+        {status?.connected
+          ? `A monitorizar ${status.displayName || status.openId}. Os tokens ficam cifrados no servidor.`
+          : 'Autoriza apenas o perfil público e a leitura dos teus vídeos. O Helper não publica nem altera conteúdo.'}
+      </p>
+      {error && <p className="tip feature-requirement">{error}</p>}
+      {status?.connected ? (
+        <button type="button" className="secondary" onClick={disconnect} disabled={busy}>
+          {busy ? 'A desligar…' : 'Desligar TikTok'}
+        </button>
+      ) : (
+        <button type="button" className="primary" onClick={connect} disabled={busy || status === null}>
+          {busy ? 'A abrir TikTok…' : 'Ligar TikTok'}
+        </button>
+      )}
     </section>
   );
 }

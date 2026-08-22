@@ -16,6 +16,7 @@ helper-store = { path = "../helper-store" }
 k256.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+ring.workspace = true
 quick-xml.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -347,6 +347,19 @@ pub struct TikTokSubscriptionWrite {
     pub created_by: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct TikTokGrantRecord {
+    pub guild_id: String,
+    pub open_id: String,
+    pub display_name: String,
+    pub access_token_sealed: String,
+    pub refresh_token_sealed: String,
+    pub scopes: String,
+    pub access_expires_at: i64,
+    pub refresh_expires_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct InstagramSubscriptionRecord {
     pub id: i64,
@@ -990,6 +1003,7 @@ impl Store {
         conn.execute_batch("CREATE TABLE IF NOT EXISTS youtube_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, source_channel_id TEXT NOT NULL, target_channel_id TEXT NOT NULL, message_template TEXT NOT NULL DEFAULT 'New video from {channel}: **{title}**\\n{url}', mention TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 300, last_video_id TEXT, next_poll_at INTEGER NOT NULL, failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(guild_id,source_channel_id,target_channel_id)); CREATE INDEX IF NOT EXISTS idx_youtube_due ON youtube_subscriptions(enabled,next_poll_at); CREATE INDEX IF NOT EXISTS idx_youtube_guild ON youtube_subscriptions(guild_id,updated_at DESC);")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS rss_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, feed_url TEXT NOT NULL, target_channel_id TEXT NOT NULL, message_template TEXT NOT NULL DEFAULT 'New post from {feed}: **{title}**\\n{url}', mention TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 300, last_item_id TEXT, next_poll_at INTEGER NOT NULL, failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(guild_id,feed_url,target_channel_id)); CREATE INDEX IF NOT EXISTS idx_rss_due ON rss_subscriptions(enabled,next_poll_at); CREATE INDEX IF NOT EXISTS idx_rss_guild ON rss_subscriptions(guild_id,updated_at DESC);")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS bluesky_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, source_handle TEXT NOT NULL, target_channel_id TEXT NOT NULL, message_template TEXT NOT NULL DEFAULT 'New post from {handle}: **{text}**\\n{url}', mention TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 300, last_post_uri TEXT, next_poll_at INTEGER NOT NULL, failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(guild_id,source_handle,target_channel_id)); CREATE INDEX IF NOT EXISTS idx_bluesky_due ON bluesky_subscriptions(enabled,next_poll_at); CREATE INDEX IF NOT EXISTS idx_bluesky_guild ON bluesky_subscriptions(guild_id,updated_at DESC); CREATE TABLE IF NOT EXISTS reddit_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, source_subreddit TEXT NOT NULL, target_channel_id TEXT NOT NULL, message_template TEXT NOT NULL DEFAULT 'New post in r/{subreddit}: **{title}**\\n{permalink}', mention TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 300, last_post_id TEXT, next_poll_at INTEGER NOT NULL, failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(guild_id,source_subreddit,target_channel_id)); CREATE INDEX IF NOT EXISTS idx_reddit_due ON reddit_subscriptions(enabled,next_poll_at); CREATE INDEX IF NOT EXISTS idx_reddit_guild ON reddit_subscriptions(guild_id,updated_at DESC); CREATE TABLE IF NOT EXISTS x_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, source_handle TEXT NOT NULL, target_channel_id TEXT NOT NULL, message_template TEXT NOT NULL DEFAULT 'New post from @{handle}: **{text}**\\n{url}', mention TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 900, last_post_id TEXT, next_poll_at INTEGER NOT NULL, failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(guild_id,source_handle,target_channel_id)); CREATE INDEX IF NOT EXISTS idx_x_due ON x_subscriptions(enabled,next_poll_at); CREATE INDEX IF NOT EXISTS idx_x_guild ON x_subscriptions(guild_id,updated_at DESC); CREATE TABLE IF NOT EXISTS tiktok_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, source_label TEXT NOT NULL, target_channel_id TEXT NOT NULL, message_template TEXT NOT NULL DEFAULT 'New TikTok video from {label}: **{title}**\\n{url}', mention TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 900, last_video_id TEXT, next_poll_at INTEGER NOT NULL, failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(guild_id,source_label,target_channel_id)); CREATE INDEX IF NOT EXISTS idx_tiktok_due ON tiktok_subscriptions(enabled,next_poll_at); CREATE INDEX IF NOT EXISTS idx_tiktok_guild ON tiktok_subscriptions(guild_id,updated_at DESC);")?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS tiktok_grants (guild_id TEXT PRIMARY KEY, open_id TEXT NOT NULL, display_name TEXT NOT NULL, access_token_sealed TEXT NOT NULL, refresh_token_sealed TEXT NOT NULL, scopes TEXT NOT NULL, access_expires_at INTEGER NOT NULL, refresh_expires_at INTEGER NOT NULL, updated_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_tiktok_grants_expiry ON tiktok_grants(access_expires_at);")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS instagram_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, source_label TEXT NOT NULL, target_channel_id TEXT NOT NULL, message_template TEXT NOT NULL DEFAULT 'New Instagram post from @{label}: **{caption}**\\n{url}', mention TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 900, last_media_id TEXT, next_poll_at INTEGER NOT NULL, failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(guild_id,source_label,target_channel_id)); CREATE INDEX IF NOT EXISTS idx_instagram_due ON instagram_subscriptions(enabled,next_poll_at); CREATE INDEX IF NOT EXISTS idx_instagram_guild ON instagram_subscriptions(guild_id,updated_at DESC); CREATE TABLE IF NOT EXISTS kick_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, source_handle TEXT NOT NULL, target_channel_id TEXT NOT NULL, message_template TEXT NOT NULL DEFAULT '{handle} is live!\\n{url}', mention TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, interval_seconds INTEGER NOT NULL DEFAULT 300, last_stream_id TEXT, next_poll_at INTEGER NOT NULL, failure_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(guild_id,source_handle,target_channel_id)); CREATE INDEX IF NOT EXISTS idx_kick_due ON kick_subscriptions(enabled,next_poll_at); CREATE INDEX IF NOT EXISTS idx_kick_guild ON kick_subscriptions(guild_id,updated_at DESC);")?;
         Ok(())
     }
@@ -3236,6 +3250,45 @@ impl Store {
         let mut stmt = conn.prepare("SELECT id,guild_id,source_label,target_channel_id,message_template,mention,enabled,interval_seconds,last_video_id,next_poll_at,failure_count,last_error,created_by,created_at,updated_at FROM tiktok_subscriptions WHERE guild_id=?1 ORDER BY updated_at DESC, id DESC")?;
         let rows = stmt.query_map([guild_id], tiktok_subscription_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_tiktok_grant(
+        &self,
+        guild_id: &str,
+        open_id: &str,
+        display_name: &str,
+        access_token_sealed: &str,
+        refresh_token_sealed: &str,
+        scopes: &str,
+        access_expires_at: i64,
+        refresh_expires_at: i64,
+        updated_at: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT INTO tiktok_grants(guild_id,open_id,display_name,access_token_sealed,refresh_token_sealed,scopes,access_expires_at,refresh_expires_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(guild_id) DO UPDATE SET open_id=excluded.open_id,display_name=excluded.display_name,access_token_sealed=excluded.access_token_sealed,refresh_token_sealed=excluded.refresh_token_sealed,scopes=excluded.scopes,access_expires_at=excluded.access_expires_at,refresh_expires_at=excluded.refresh_expires_at,updated_at=excluded.updated_at",
+            params![guild_id, open_id, display_name, access_token_sealed, refresh_token_sealed, scopes, access_expires_at, refresh_expires_at, updated_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn tiktok_grant(&self, guild_id: &str) -> Result<Option<TikTokGrantRecord>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.query_row(
+            "SELECT guild_id,open_id,display_name,access_token_sealed,refresh_token_sealed,scopes,access_expires_at,refresh_expires_at,updated_at FROM tiktok_grants WHERE guild_id=?1",
+            [guild_id],
+            |row| Ok(TikTokGrantRecord {
+                guild_id: row.get(0)?, open_id: row.get(1)?, display_name: row.get(2)?,
+                access_token_sealed: row.get(3)?, refresh_token_sealed: row.get(4)?, scopes: row.get(5)?,
+                access_expires_at: row.get(6)?, refresh_expires_at: row.get(7)?, updated_at: row.get(8)?,
+            }),
+        ).optional().map_err(Into::into)
+    }
+
+    pub fn delete_tiktok_grant(&self, guild_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute("DELETE FROM tiktok_grants WHERE guild_id=?1", [guild_id])? > 0)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -7800,5 +7853,62 @@ mod tests {
         std::fs::write(root.join("nested/data"), vec![0u8; 9]).unwrap();
         assert_eq!(path_bytes(&root), 16);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tiktok_creator_grants_are_isolated_per_guild_and_replace_rotated_tokens() {
+        let store = Store::open(":memory:").unwrap();
+        store
+            .save_tiktok_grant(
+                "guild-a",
+                "creator-a",
+                "Creator A",
+                "sealed-access-a",
+                "sealed-refresh-a",
+                "user.info.basic,video.list",
+                1_000,
+                2_000,
+                100,
+            )
+            .unwrap();
+        store
+            .save_tiktok_grant(
+                "guild-b",
+                "creator-b",
+                "Creator B",
+                "sealed-access-b",
+                "sealed-refresh-b",
+                "user.info.basic,video.list",
+                1_100,
+                2_100,
+                101,
+            )
+            .unwrap();
+
+        let grant_a = store.tiktok_grant("guild-a").unwrap().unwrap();
+        assert_eq!(grant_a.open_id, "creator-a");
+        assert_eq!(grant_a.access_token_sealed, "sealed-access-a");
+        assert_eq!(grant_a.display_name, "Creator A");
+        assert_eq!(store.tiktok_grant("guild-b").unwrap().unwrap().open_id, "creator-b");
+
+        store
+            .save_tiktok_grant(
+                "guild-a",
+                "creator-a",
+                "Creator A",
+                "sealed-access-rotated",
+                "sealed-refresh-rotated",
+                "user.info.basic,video.list",
+                3_000,
+                4_000,
+                200,
+            )
+            .unwrap();
+        let rotated = store.tiktok_grant("guild-a").unwrap().unwrap();
+        assert_eq!(rotated.access_token_sealed, "sealed-access-rotated");
+        assert_eq!(rotated.updated_at, 200);
+        assert!(store.delete_tiktok_grant("guild-a").unwrap());
+        assert!(store.tiktok_grant("guild-a").unwrap().is_none());
+        assert!(store.tiktok_grant("guild-b").unwrap().is_some());
     }
 }
