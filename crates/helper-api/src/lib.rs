@@ -48,7 +48,6 @@ use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 const COOKIE: &str = "vh_session";
-const OAUTH_COOKIE: &str = "vh_oauth_verifier";
 const INSTALL_FLOW_MARKER: &str = "install";
 const HELPER_INSTALL_PERMISSIONS: &str = "1099780071606";
 const SESSION_RESPONSE_HEADER: &str = "x-vozen-session";
@@ -426,20 +425,11 @@ fn oauth_start_inner(
         .find(|(key, _)| key == "state")
         .map(|(_, value)| value.into_owned())
         .expect("OAuth authorization URLs always include state");
-    let mut response = Json(OAuthStartResponse {
+    let response = Json(OAuthStartResponse {
         authorization_url: authorization_url.into(),
         state: state_token,
     })
     .into_response();
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        format!(
-            "{OAUTH_COOKIE}={}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=600",
-            code_verifier
-        )
-        .parse()
-        .unwrap(),
-    );
     Ok(response)
 }
 
@@ -450,7 +440,13 @@ fn oauth_authorization_url(
     code_verifier: &str,
     flow: OAuthFlow,
 ) -> Result<url::Url, (StatusCode, Json<ApiError>)> {
-    if !(43..=128).contains(&code_verifier.len()) || code_challenge.trim().len() < 43 {
+    if !is_valid_pkce_verifier(code_verifier)
+        || code_challenge.len() != 43
+        || URL_SAFE_NO_PAD
+            .decode(code_challenge)
+            .map(|decoded| decoded.len() != 32)
+            .unwrap_or(true)
+    {
         return Err(client_error(
             StatusCode::BAD_REQUEST,
             "invalid_oauth_request",
@@ -501,11 +497,17 @@ fn new_code_verifier() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
+fn is_valid_pkce_verifier(value: &str) -> bool {
+    (43..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+}
+
 #[derive(Debug, Deserialize)]
 struct OAuthCallbackQuery {
     code: String,
     state: String,
-    code_verifier: Option<String>,
     guild_id: Option<String>,
 }
 
@@ -536,10 +538,7 @@ async fn oauth_callback(
             "oauth_state_replayed",
         ));
     }
-    let code_verifier = query
-        .code_verifier
-        .or_else(|| cookie_value(&headers, OAUTH_COOKIE))
-        .or(stored_verifier)
+    let code_verifier = stored_verifier
         .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "missing_pkce_verifier"))?;
     let client = Client::new();
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
@@ -611,12 +610,6 @@ async fn oauth_callback(
         .headers_mut()
         .remove(SESSION_RESPONSE_HEADER)
         .and_then(|value| value.to_str().ok().map(ToOwned::to_owned));
-    response.headers_mut().append(
-        header::SET_COOKIE,
-        format!("{OAUTH_COOKIE}=; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=0")
-            .parse()
-            .unwrap(),
-    );
     let mut success_url = url::Url::parse(&success_redirect).map_err(|_| {
         client_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -11681,29 +11674,26 @@ fn authenticate(state: &ApiState, headers: &HeaderMap) -> Option<SessionClaims> 
                         .find_map(|item| item.trim().strip_prefix("vh_session="))
                 })
         });
-    let claims = raw
-        .and_then(|token| verify_session(token, &state.session_secret))
-        .filter(|claims| {
-            claims.expires_at > Utc::now()
-                && claims.last_seen_at + Duration::minutes(IDLE_MINUTES) > Utc::now()
-        });
-    if let Some(claims) = claims.as_ref() {
-        state.store.load_session(claims.session_id).ok().flatten()?;
-    }
-    claims
-}
-
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| {
-            value
-                .split(';')
-                .find_map(|item| item.trim().strip_prefix(&format!("{name}=")))
+    raw.and_then(|token| verify_session(token, &state.session_secret))
+        .and_then(|signed| {
+            let mut persisted = state.store.load_session(signed.session_id).ok().flatten()?;
+            let now = Utc::now();
+            if persisted.user_id != signed.user_id
+                || persisted.guild_id != signed.guild_id
+                || persisted.expires_at.timestamp() != signed.expires_at.timestamp()
+                || persisted.expires_at <= now
+                || persisted.last_seen_at + Duration::minutes(IDLE_MINUTES) <= now
+            {
+                return None;
+            }
+            if persisted.last_seen_at + Duration::minutes(1) <= now
+                && !state.store.touch_session(persisted.session_id, now).ok()?
+            {
+                return None;
+            }
+            persisted.last_seen_at = now;
+            Some(persisted)
         })
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
 }
 
 fn sign_session(claims: &SessionClaims, secret: &str) -> String {
@@ -13903,7 +13893,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oauth_start_binds_verifier_and_sets_http_only_cookie() {
+    async fn oauth_start_binds_verifier_without_exposing_the_verifier() {
         let store = Store::open(":memory:").unwrap();
         let verifier = "a".repeat(64);
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
@@ -13926,15 +13916,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let cookie = response
-            .headers()
-            .get(header::SET_COOKIE)
-            .unwrap()
-            .to_str()
-            .unwrap();
-        assert!(cookie.starts_with("vh_oauth_verifier="));
-        assert!(cookie.contains("HttpOnly"));
-        assert!(cookie.contains("SameSite=None"));
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
 
         let mismatch = router(state(Store::open(":memory:").unwrap()))
             .oneshot(
@@ -14035,6 +14017,43 @@ mod tests {
             .replace("guild-a", "guild-b");
         let forged = format!("{}.{}", URL_SAFE_NO_PAD.encode(tampered), signature);
         assert!(verify_session(&forged, "test-session-secret-with-at-least-32-bytes").is_none());
+    }
+
+    #[test]
+    fn authentication_rechecks_persisted_session_lifetime_and_revocation() {
+        let store = Store::open(":memory:").unwrap();
+        let api_state = state(store);
+        let active = claims("guild-a");
+        api_state.store.save_session(&active).unwrap();
+        let active_token = sign_session(&active, &api_state.session_secret);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {active_token}")).unwrap(),
+        );
+
+        assert!(authenticate(&api_state, &headers).is_some());
+        api_state.store.revoke_session(active.session_id).unwrap();
+        assert!(authenticate(&api_state, &headers).is_none());
+
+        let mut idle = claims("guild-a");
+        idle.last_seen_at = Utc::now() - Duration::minutes(IDLE_MINUTES + 1);
+        api_state.store.save_session(&idle).unwrap();
+        let idle_token = sign_session(&idle, &api_state.session_secret);
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {idle_token}")).unwrap(),
+        );
+        assert!(authenticate(&api_state, &headers).is_none());
+    }
+
+    #[test]
+    fn pkce_verifier_accepts_only_rfc7636_unreserved_values() {
+        assert!(is_valid_pkce_verifier(&"a".repeat(43)));
+        assert!(is_valid_pkce_verifier(&"~._-".repeat(16)));
+        assert!(!is_valid_pkce_verifier(&"a".repeat(42)));
+        assert!(!is_valid_pkce_verifier(&format!("{}!", "a".repeat(42))));
+        assert!(!is_valid_pkce_verifier(&format!("{}é", "a".repeat(42))));
     }
 
     #[tokio::test]

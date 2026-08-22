@@ -9602,6 +9602,7 @@ async fn respond(ctx: &Context, command: &CommandInteraction, content: &str) -> 
             CreateInteractionResponse::Message(
                 CreateInteractionResponseMessage::new()
                     .content(english_bot_text(content))
+                    .allowed_mentions(CreateAllowedMentions::new())
                     .ephemeral(true),
             ),
         )
@@ -9620,6 +9621,7 @@ async fn respond_component(
             CreateInteractionResponse::Message(
                 CreateInteractionResponseMessage::new()
                     .content(english_bot_text(content))
+                    .allowed_mentions(CreateAllowedMentions::new())
                     .ephemeral(true),
             ),
         )
@@ -11213,7 +11215,7 @@ async fn apply_lockdown(
 fn required_permission(command: &str) -> Option<Permissions> {
     match command {
         "warn" | "violation" | "timeout" | "untimeout" | "note" | "reason" | "quarantine"
-        | "unquarantine" | "modlogs" => Some(Permissions::MODERATE_MEMBERS),
+        | "unquarantine" | "modlogs" | "cases" => Some(Permissions::MODERATE_MEMBERS),
         "kick" => Some(Permissions::KICK_MEMBERS),
         "ban" | "unban" | "tempban" | "softban" => Some(Permissions::BAN_MEMBERS),
         "purge" => Some(Permissions::MANAGE_MESSAGES),

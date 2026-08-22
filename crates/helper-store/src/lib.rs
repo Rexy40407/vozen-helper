@@ -1055,21 +1055,30 @@ impl Store {
     }
 
     pub fn consume_oauth_state(&self, state_hash: &str, now: i64) -> Result<Option<String>> {
-        let conn = self.conn.lock().expect("store mutex poisoned");
-        let verifier = conn
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let verifier = tx
             .query_row(
                 "SELECT code_verifier FROM helper_oauth_states WHERE state_hash=?1 AND used_at IS NULL AND expires_at>=?2",
                 params![state_hash, now],
                 |row| row.get::<_, Option<String>>(0),
             )
-            .optional()?;
-        if verifier.is_some() {
-            conn.execute(
-                "UPDATE helper_oauth_states SET used_at=?2 WHERE state_hash=?1 AND used_at IS NULL AND expires_at>=?2",
-                params![state_hash, now],
-            )?;
+            .optional()?
+            .flatten();
+        let Some(verifier) = verifier else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        let changed = tx.execute(
+            "UPDATE helper_oauth_states SET used_at=?2 WHERE state_hash=?1 AND used_at IS NULL AND expires_at>=?2",
+            params![state_hash, now],
+        )?;
+        tx.commit()?;
+        if changed == 1 {
+            Ok(Some(verifier))
+        } else {
+            Ok(None)
         }
-        Ok(verifier.flatten())
     }
 
     pub fn issue_siwe_nonce(
@@ -1136,6 +1145,15 @@ impl Store {
             params![id.to_string(), Utc::now().to_rfc3339()],
         )?;
         Ok(())
+    }
+
+    pub fn touch_session(&self, id: Uuid, now: DateTime<Utc>) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let changed = conn.execute(
+            "UPDATE helper_sessions SET last_seen_at=?2 WHERE id=?1 AND revoked_at IS NULL",
+            params![id.to_string(), now.to_rfc3339()],
+        )?;
+        Ok(changed == 1)
     }
 
     pub fn save_entitlement(&self, snapshot: &EntitlementSnapshot) -> Result<()> {
