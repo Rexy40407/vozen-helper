@@ -28,7 +28,7 @@ create a setting that cannot deliver anything.
 
 | Feature | Server-side requirement |
 | --- | --- |
-| Instagram | `META_INSTAGRAM_ACCESS_TOKEN`, `META_INSTAGRAM_USER_ID`, Meta approval |
+| Instagram | `META_INSTAGRAM_ACCESS_TOKEN`, `META_INSTAGRAM_USER_ID`, Meta approval; an explicitly enabled `META_INSTAGRAM_DEVELOPMENT_MODE=true` may be used only for an authorised tester account while the Meta app remains in development |
 | Reddit | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT`, written commercial approval |
 | X | `X_BEARER_TOKEN`, API budget, `X_API_APPROVED=true` |
 | TikTok | `TIKTOK_ACCESS_TOKEN`, Display API review, `TIKTOK_APP_APPROVED=true` |
@@ -38,6 +38,10 @@ create a setting that cannot deliver anything.
 
 Secrets belong only in the VPS environment (or a secret manager). They must
 never be pasted into Discord, the panel, commits, logs or this document.
+
+`META_INSTAGRAM_DEVELOPMENT_MODE` is intentionally opt-in and does not claim
+Meta production approval. It should be removed or set back to `false` before
+serving public accounts.
 
 ## Verification after configuring a provider
 

@@ -3512,21 +3512,48 @@ fn instagram_approved() -> bool {
         .or_else(|| std::env::var("META_INSTAGRAM_APP_APPROVED").ok())
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
 }
+
+/// Allows an explicitly configured Meta/Instagram tester account to be used
+/// while the app is still in development mode. This never changes the
+/// production approval flag and must be opted into by the operator.
+fn instagram_development_mode() -> bool {
+    std::env::var("META_INSTAGRAM_DEVELOPMENT_MODE")
+        .ok()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+}
+
+fn instagram_access_allowed(approved: bool, development_mode: bool) -> bool {
+    approved || development_mode
+}
+
+fn instagram_runtime_allowed() -> bool {
+    instagram_access_allowed(instagram_approved(), instagram_development_mode())
+}
+
 async fn instagram_health(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let _ = require_auth(&state, &headers)?;
-    let configured = state.instagram.is_some();
+    let configured = state
+        .instagram
+        .as_ref()
+        .is_some_and(InstagramClient::is_configured);
     let approved = instagram_approved();
-    Ok(Json(
-        serde_json::json!({"provider":"instagram","configured":configured,"apiApproval":approved,"status":if !approved{"blocked_app_approval"}else if !configured{"missing_credentials"}else{"ready"},"scopes":["instagram_basic","instagram_manage_insights"]}),
-    ))
+    let development_mode = instagram_development_mode();
+    Ok(Json(serde_json::json!({
+        "provider":"instagram",
+        "configured":configured,
+        "apiApproval":approved,
+        "developmentMode":development_mode,
+        "status":if !configured {"missing_credentials"} else if approved {"ready"} else if development_mode {"ready_development"} else {"blocked_app_approval"},
+        "scopes":["instagram_basic","instagram_manage_insights"]
+    })))
 }
 fn require_instagram_provider(
     state: &ApiState,
 ) -> Result<&InstagramClient, (StatusCode, Json<ApiError>)> {
-    if !instagram_approved() {
+    if !instagram_runtime_allowed() {
         return Err(client_error(
             StatusCode::FORBIDDEN,
             "instagram_app_approval_required",
@@ -8624,7 +8651,13 @@ fn provider_runtime_ready(state: &ApiState, key: &str) -> bool {
         "social.reddit" => state.reddit.is_some() && reddit_approved(),
         "social.x" => state.x.is_some() && x_approved(),
         "social.tiktok" => state.tiktok.is_some() && tiktok_approved(),
-        "social.instagram" => state.instagram.is_some() && instagram_approved(),
+        "social.instagram" => {
+            state
+                .instagram
+                .as_ref()
+                .is_some_and(InstagramClient::is_configured)
+                && instagram_runtime_allowed()
+        }
         "social.kick" => state.kick.is_some() && kick_approved(),
         "growth.monetization" => state.stripe.is_some() && stripe_approved(),
         "web3.gating" => {
@@ -8729,7 +8762,13 @@ fn provider_dependencies_ready(state: &ApiState, key: &str) -> bool {
         "social.reddit" => state.reddit.is_some() && reddit_approved(),
         "social.x" => state.x.is_some() && x_approved(),
         "social.tiktok" => state.tiktok.is_some() && tiktok_approved(),
-        "social.instagram" => state.instagram.is_some() && instagram_approved(),
+        "social.instagram" => {
+            state
+                .instagram
+                .as_ref()
+                .is_some_and(InstagramClient::is_configured)
+                && instagram_runtime_allowed()
+        }
         "social.kick" => state.kick.is_some() && kick_approved(),
         "growth.monetization" => state.stripe.is_some() && stripe_approved(),
         "web3.gating" => {
@@ -11760,6 +11799,14 @@ mod tests {
     };
     use helper_store::Store;
     use tower::ServiceExt;
+
+    #[test]
+    fn instagram_development_mode_only_bypasses_the_external_approval_gate() {
+        assert!(instagram_access_allowed(true, false));
+        assert!(instagram_access_allowed(false, true));
+        assert!(instagram_access_allowed(true, true));
+        assert!(!instagram_access_allowed(false, false));
+    }
 
     #[test]
     fn first_party_helper_redirect_uses_cookie_transport() {

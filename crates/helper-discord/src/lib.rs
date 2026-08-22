@@ -5224,11 +5224,7 @@ async fn run_instagram_worker(
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
         interval.tick().await;
-        if !std::env::var("META_APP_APPROVED")
-            .ok()
-            .or_else(|| std::env::var("META_INSTAGRAM_APP_APPROVED").ok())
-            .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
-        {
+        if !instagram_runtime_allowed() {
             continue;
         }
         let due = match store.due_instagram_subscriptions(Utc::now().timestamp_millis(), 25) {
@@ -11412,6 +11408,24 @@ fn feature_enabled(store: &Store, guild_id: &str, key: &str, legacy_key: Option<
         .unwrap_or(false)
 }
 
+fn instagram_access_allowed(approved: bool, development_mode: bool) -> bool {
+    approved || development_mode
+}
+
+fn instagram_runtime_allowed() -> bool {
+    let approved = ["META_APP_APPROVED", "META_INSTAGRAM_APP_APPROVED"]
+        .iter()
+        .any(|name| {
+            std::env::var(name)
+                .ok()
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+        });
+    let development_mode = std::env::var("META_INSTAGRAM_DEVELOPMENT_MODE")
+        .ok()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"));
+    instagram_access_allowed(approved, development_mode)
+}
+
 fn feature_maturity_allows_runtime(key: &str) -> bool {
     let configured = |name: &str| {
         std::env::var(name)
@@ -11473,7 +11487,7 @@ fn feature_maturity_allows_runtime(key: &str) -> bool {
                 && configured("TIKTOK_ACCESS_TOKEN")
         }
         (helper_contracts::FeatureMaturity::Blocked, "social.instagram") => {
-            approved(&["META_APP_APPROVED", "META_INSTAGRAM_APP_APPROVED"])
+            instagram_runtime_allowed()
                 && configured("META_INSTAGRAM_ACCESS_TOKEN")
                 && configured("META_INSTAGRAM_USER_ID")
         }
@@ -12443,10 +12457,10 @@ mod tests {
         anti_nuke_containment_deadline, anti_spam_content_metrics, command_feature_key,
         custom_command_channel_ignored, custom_command_is_staff, english_bot_text,
         evaluate_join_gate_verification, evaluate_nickname, feature_enabled, feature_title,
-        format_nft_collection, helper_locale, helper_locale_for_guild, is_destructive_audit_action,
-        join_burst_armed, parse_custom_command, parse_duration, parse_reminder_delay,
-        parse_scheduled_event_window, reminder_repeat_interval_ms, render_custom_command,
-        rss_retry_seconds, scheduled_action_feature, shadow_mode_enabled,
+        format_nft_collection, helper_locale, helper_locale_for_guild, instagram_access_allowed,
+        is_destructive_audit_action, join_burst_armed, parse_custom_command, parse_duration,
+        parse_reminder_delay, parse_scheduled_event_window, reminder_repeat_interval_ms,
+        render_custom_command, rss_retry_seconds, scheduled_action_feature, shadow_mode_enabled,
         should_cleanup_temp_channel, template_message,
     };
     use chrono::TimeZone;
@@ -12477,6 +12491,14 @@ mod tests {
             .set_setting("guild", HELPER_LANGUAGE_SETTING, "pt-BR")
             .unwrap();
         assert_eq!(helper_locale_for_guild(&store, "guild").unwrap(), "en");
+    }
+
+    #[test]
+    fn instagram_development_mode_only_bypasses_the_external_approval_gate() {
+        assert!(instagram_access_allowed(true, false));
+        assert!(instagram_access_allowed(false, true));
+        assert!(instagram_access_allowed(true, true));
+        assert!(!instagram_access_allowed(false, false));
     }
 
     #[test]
