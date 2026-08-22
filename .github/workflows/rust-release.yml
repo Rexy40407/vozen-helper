@@ -8,7 +8,7 @@ on:
       - migration/helper-rust-public-secure
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: helper-rust-release
@@ -46,3 +46,16 @@ jobs:
           name: vozen-helper-rust-linux-${{ github.sha }}
           path: vozen-helper-rust-${{ github.sha }}.tar.gz
           if-no-files-found: error
+      - name: Publish versioned release archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="helper-${GITHUB_SHA}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" "vozen-helper-rust-${GITHUB_SHA}.tar.gz" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" "vozen-helper-rust-${GITHUB_SHA}.tar.gz" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Vozen Helper ${GITHUB_SHA}" \
+              --notes "CI-validated Linux release for commit ${GITHUB_SHA}."
+          fi
