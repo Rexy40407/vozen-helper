@@ -8214,13 +8214,22 @@ fn entitlement_is_active(snapshot: &helper_contracts::EntitlementSnapshot) -> bo
 /// must not unlock guild B while the entitlement service is unavailable.
 async fn guild_has_premium(state: &ApiState, claims: &SessionClaims) -> bool {
     if let Some(client) = &state.entitlements {
-        return client
+        return match client
             .resolve(&claims.user_id, Some(&claims.guild_id))
             .await
-            .ok()
-            .is_some_and(|snapshot| {
+        {
+            Ok(snapshot) => {
                 entitlement_is_active(&snapshot) && matches!(snapshot.plan, Plan::Premium { .. })
-            });
+            }
+            Err(error) => {
+                tracing::warn!(
+                    guild_id = %claims.guild_id,
+                    error = %error,
+                    "central Premium entitlement lookup failed"
+                );
+                false
+            }
+        };
     }
 
     matches!(effective_plan(state, claims).await, Plan::Premium { .. })

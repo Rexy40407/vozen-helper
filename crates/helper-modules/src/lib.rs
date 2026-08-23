@@ -3470,6 +3470,12 @@ pub const MODULES: &[Capability] = &[
 
 type HmacSha256 = Hmac<Sha256>;
 
+// Entitlements can change while a dashboard session is open (for example when
+// a Premium seat is assigned to the current guild). Keep the small in-memory
+// cache for request bursts, but never let an old Free snapshot live for the
+// entire process lifetime.
+const ENTITLEMENT_CACHE_TTL: chrono::Duration = chrono::Duration::seconds(30);
+
 #[derive(Clone)]
 pub struct EntitlementClient {
     endpoint: String,
@@ -3565,11 +3571,15 @@ impl EntitlementClient {
     }
 
     pub fn cached(&self, subject_id: &str, guild_id: Option<&str>) -> Option<EntitlementSnapshot> {
-        self.cache
-            .lock()
-            .ok()?
-            .get(&Self::cache_key(subject_id, guild_id))
-            .cloned()
+        let key = Self::cache_key(subject_id, guild_id);
+        let mut cache = self.cache.lock().ok()?;
+        let snapshot = cache.get(&key)?.clone();
+        if Utc::now().signed_duration_since(snapshot.fetched_at) <= ENTITLEMENT_CACHE_TTL {
+            Some(snapshot)
+        } else {
+            cache.remove(&key);
+            None
+        }
     }
 }
 
