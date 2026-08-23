@@ -3151,7 +3151,7 @@ fn validate_x_subscription(
     }
     let template = input
         .message_template
-        .unwrap_or_else(|| "New post from @{handle}: **{text}**\\n{url}".into());
+        .unwrap_or_else(|| "New post from @{handle}: **{text}**\n{url}".into());
     if template.trim().is_empty() || template.chars().count() > 1_800 {
         return Err("invalid_x_template");
     }
@@ -8912,7 +8912,7 @@ fn lifecycle_issues(key: &str, maturity: FeatureMaturity) -> Vec<ValidationIssue
             "Blocked until Reddit OAuth is configured and commercial API use is approved in writing."
         }
         "social.x" => {
-            "Blocked until an X developer app, paid API budget and official OAuth access are configured."
+            "Blocked until an X developer app, a valid API bearer token and approved X API access are configured."
         }
         "social.tiktok" => {
             "Blocked until TikTok Display API review is approved and a creator authorizes the required scopes."

@@ -469,7 +469,7 @@ const additionalFeatures: Feature[] = [
   {
     key: 'social.x',
     label: 'Alertas do X',
-    description: 'Acompanha publicações de contas importantes para a comunidade.',
+    description: 'Envia avisos apenas de leitura sobre contas públicas do X.',
     category: 'social',
     capability: 'alerts',
     available: true,
@@ -1017,7 +1017,7 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
   'social.x': [
     {
       title: 'Conta acompanhada',
-      description: 'Lê publicações através da API oficial do X, quando a aplicação está aprovada.',
+      description: 'Lê publicações públicas através da API oficial do X com um bearer token válido.',
       fields: [
         { key: 'sourceHandle', label: 'Handle do X', kind: 'text', help: 'Exemplo: discord (sem @).' },
         { key: 'targetChannelId', label: 'Canal Discord', kind: 'channel' },

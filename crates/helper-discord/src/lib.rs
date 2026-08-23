@@ -5090,6 +5090,8 @@ async fn process_x_subscription(
 fn format_x_message(template: &str, mention: &str, post: &XPost) -> String {
     let rendered = template
         .replace("{handle}", &post.handle)
+        // Keep templates saved by the earlier panel version working.
+        .replace("{sourceHandle}", &post.handle)
         .replace("{text}", &post.text)
         .replace("{url}", &post.url)
         .replace("{created_at}", &post.created_at)
@@ -12511,11 +12513,12 @@ mod tests {
         anti_nuke_containment_deadline, anti_spam_content_metrics, command_feature_key,
         custom_command_channel_ignored, custom_command_is_staff, english_bot_text,
         evaluate_join_gate_verification, evaluate_nickname, feature_enabled, feature_title,
-        format_nft_collection, helper_locale, helper_locale_for_guild, instagram_access_allowed,
+        format_nft_collection, format_x_message, helper_locale, helper_locale_for_guild,
+        instagram_access_allowed,
         is_destructive_audit_action, join_burst_armed, parse_custom_command, parse_duration,
         parse_reminder_delay, parse_scheduled_event_window, reminder_repeat_interval_ms,
         render_custom_command, rss_retry_seconds, scheduled_action_feature, shadow_mode_enabled,
-        should_cleanup_temp_channel, template_message,
+        should_cleanup_temp_channel, template_message, XPost,
     };
     use chrono::TimeZone;
     use helper_store::Store;
@@ -12545,6 +12548,30 @@ mod tests {
             .set_setting("guild", HELPER_LANGUAGE_SETTING, "pt-BR")
             .unwrap();
         assert_eq!(helper_locale_for_guild(&store, "guild").unwrap(), "en");
+    }
+
+    #[test]
+    fn x_message_renderer_expands_the_documented_placeholders() {
+        let post = XPost {
+            id: "123".into(),
+            handle: "vozen".into(),
+            text: "A new update".into(),
+            created_at: "2026-08-23T12:00:00Z".into(),
+            url: "https://x.com/vozen/status/123".into(),
+        };
+
+        assert_eq!(
+            format_x_message(
+                "@here @{handle}/{sourceHandle}: {text} | {url} | {created_at} | {id}",
+                "",
+                &post
+            ),
+            "@here @vozen/vozen: A new update | https://x.com/vozen/status/123 | 2026-08-23T12:00:00Z | 123"
+        );
+        assert_eq!(
+            format_x_message("{text}", "<@&123>", &post),
+            "<@&123> A new update"
+        );
     }
 
     #[test]

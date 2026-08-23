@@ -4821,16 +4821,19 @@ impl FeatureAdapter for ExternalProviderAdapter {
                 });
             }
         }
+        let minimum_interval = if self.key == "social.x" { 900 } else { 300 };
         if let Some(value) = object.get("intervalSeconds")
             && (!value.is_i64()
                 || !value
                     .as_i64()
-                    .is_some_and(|seconds| (300..=86_400).contains(&seconds)))
+                    .is_some_and(|seconds| (minimum_interval..=86_400).contains(&seconds)))
         {
             issues.push(ValidationIssue {
                 path: "intervalSeconds".into(),
                 code: "out_of_range".into(),
-                message: "Polling intervals must be between 300 and 86400 seconds.".into(),
+                message: format!(
+                    "Polling intervals must be between {minimum_interval} and 86400 seconds."
+                ),
                 severity: "error".into(),
             });
         }
@@ -10891,7 +10894,7 @@ static X_ADAPTER: ExternalProviderAdapter = ExternalProviderAdapter {
             "fields": [
                 {"key":"sourceHandle","label":"X handle","kind":"text","help":"Enter the handle without an @ or URL."},
                 {"key":"targetChannelId","label":"Discord channel","kind":"channel"},
-                {"key":"intervalSeconds","label":"Check interval (seconds)","kind":"number","min":300,"max":86400},
+                {"key":"intervalSeconds","label":"Check interval (seconds)","kind":"number","min":900,"max":86400},
                 {"key":"messageTemplate","label":"Alert message","kind":"textarea","advanced":true},
                 {"key":"mention","label":"Optional mention","kind":"text","advanced":true}
             ]
@@ -10901,13 +10904,13 @@ static X_ADAPTER: ExternalProviderAdapter = ExternalProviderAdapter {
         "sourceHandle":"",
         "targetChannelId":"",
         "intervalSeconds":900,
-        "messageTemplate":"New post from @{sourceHandle}: {url}",
+        "messageTemplate":"New post from @{handle}: **{text}**\n{url}",
         "mention":""
     }"#,
     dependencies: &[
         "X developer application",
-        "Official OAuth access",
-        "Approved API budget",
+        "Valid X API bearer token",
+        "Approved X API access",
         "Send Messages",
     ],
 };
@@ -13415,6 +13418,54 @@ mod tests {
                 .contains(&("social.reddit.interval_seconds".into(), "900".into()))
         );
         assert_eq!(feature_maturity("social.reddit"), FeatureMaturity::Blocked);
+    }
+
+    #[test]
+    fn x_adapter_matches_the_bearer_token_and_polling_contract() {
+        let x = feature_adapter("social.x").expect("x adapter");
+        let descriptor = x.descriptor();
+        assert_eq!(descriptor.source, "x_api_official_v1");
+        assert!(descriptor
+            .dependencies
+            .iter()
+            .any(|item| item == "Valid X API bearer token"));
+        assert!(descriptor
+            .dependencies
+            .iter()
+            .any(|item| item == "Approved X API access"));
+
+        let fields = descriptor.schema["sections"][0]["fields"]
+            .as_array()
+            .expect("x schema fields");
+        let interval = fields
+            .iter()
+            .find(|field| field["key"] == "intervalSeconds")
+            .expect("x interval field");
+        assert_eq!(interval["min"], 900);
+        assert_eq!(descriptor.defaults["intervalSeconds"], 900);
+        assert_eq!(
+            descriptor.defaults["messageTemplate"],
+            "New post from @{handle}: **{text}**\n{url}"
+        );
+
+        let invalid = x.validate(&serde_json::json!({
+            "sourceHandle": "vozen",
+            "targetChannelId": "123456789012345678",
+            "intervalSeconds": 300,
+            "messageTemplate": "{text}"
+        }));
+        assert!(invalid.iter().any(|issue| {
+            issue.path == "intervalSeconds" && issue.code == "out_of_range"
+        }));
+
+        let valid = x.validate(&serde_json::json!({
+            "sourceHandle": "vozen",
+            "targetChannelId": "123456789012345678",
+            "intervalSeconds": 900,
+            "messageTemplate": "{text}"
+        }));
+        assert!(!valid.iter().any(|issue| issue.path == "intervalSeconds"));
+        assert_eq!(feature_maturity("social.x"), FeatureMaturity::Blocked);
     }
 
     #[test]
