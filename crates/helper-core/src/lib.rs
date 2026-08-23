@@ -13425,14 +13425,18 @@ mod tests {
         let x = feature_adapter("social.x").expect("x adapter");
         let descriptor = x.descriptor();
         assert_eq!(descriptor.source, "x_api_official_v1");
-        assert!(descriptor
-            .dependencies
-            .iter()
-            .any(|item| item == "Valid X API bearer token"));
-        assert!(descriptor
-            .dependencies
-            .iter()
-            .any(|item| item == "Approved X API access"));
+        assert!(
+            descriptor
+                .dependencies
+                .iter()
+                .any(|item| item == "Valid X API bearer token")
+        );
+        assert!(
+            descriptor
+                .dependencies
+                .iter()
+                .any(|item| item == "Approved X API access")
+        );
 
         let fields = descriptor.schema["sections"][0]["fields"]
             .as_array()
@@ -13454,9 +13458,11 @@ mod tests {
             "intervalSeconds": 300,
             "messageTemplate": "{text}"
         }));
-        assert!(invalid.iter().any(|issue| {
-            issue.path == "intervalSeconds" && issue.code == "out_of_range"
-        }));
+        assert!(
+            invalid
+                .iter()
+                .any(|issue| { issue.path == "intervalSeconds" && issue.code == "out_of_range" })
+        );
 
         let valid = x.validate(&serde_json::json!({
             "sourceHandle": "vozen",

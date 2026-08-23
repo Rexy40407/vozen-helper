@@ -12508,17 +12508,17 @@ fn approved_wallet_contract(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        HELPER_LANGUAGE_SETTING, HELPER_LOCALES, OpenSeaCollectionInfo, account_age_days,
+        HELPER_LANGUAGE_SETTING, HELPER_LOCALES, OpenSeaCollectionInfo, XPost, account_age_days,
         adapter::{DiscordAdapter, Effect, FakeDiscordAdapter},
         anti_nuke_containment_deadline, anti_spam_content_metrics, command_feature_key,
         custom_command_channel_ignored, custom_command_is_staff, english_bot_text,
         evaluate_join_gate_verification, evaluate_nickname, feature_enabled, feature_title,
         format_nft_collection, format_x_message, helper_locale, helper_locale_for_guild,
-        instagram_access_allowed,
-        is_destructive_audit_action, join_burst_armed, parse_custom_command, parse_duration,
-        parse_reminder_delay, parse_scheduled_event_window, reminder_repeat_interval_ms,
-        render_custom_command, rss_retry_seconds, scheduled_action_feature, shadow_mode_enabled,
-        should_cleanup_temp_channel, template_message, XPost,
+        instagram_access_allowed, is_destructive_audit_action, join_burst_armed,
+        parse_custom_command, parse_duration, parse_reminder_delay, parse_scheduled_event_window,
+        reminder_repeat_interval_ms, render_custom_command, rss_retry_seconds,
+        scheduled_action_feature, shadow_mode_enabled, should_cleanup_temp_channel,
+        template_message,
     };
     use chrono::TimeZone;
     use helper_store::Store;
