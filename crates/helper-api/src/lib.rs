@@ -193,6 +193,7 @@ pub fn router(state: ApiState) -> Router {
             "/api/config/tiktok/{id}",
             put(update_tiktok_subscription).delete(delete_tiktok_subscription),
         )
+        .route("/api/config/tiktok/{id}/test", post(test_tiktok_delivery))
         .route("/api/providers/instagram/health", get(instagram_health))
         .route(
             "/api/config/instagram",
@@ -3649,6 +3650,89 @@ async fn update_tiktok_subscription(
         ));
     };
     Ok(Json(tiktok_record_json(record)))
+}
+
+/// Deliver the latest public TikTok video to the configured Discord channel
+/// without advancing the polling cursor. This gives App Review a truthful,
+/// repeatable end-to-end sandbox demonstration.
+async fn test_tiktok_delivery(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(input): Json<TikTokSubscriptionInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    require_feature_premium(&state, &claims, "social.tiktok").await?;
+    let record = state
+        .store
+        .tiktok_subscriptions(&claims.guild_id)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .into_iter()
+        .find(|record| record.id == id)
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "tiktok_subscription_not_found"))?;
+    let (source, target, template, mention, _enabled, _interval) =
+        validate_tiktok_subscription(input)
+            .map_err(|code| client_error(StatusCode::BAD_REQUEST, code))?;
+    let client = tiktok_provider_for_guild(&state, &claims.guild_id).await?;
+    let latest = client
+        .latest_videos()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "tiktok_provider_unavailable"))?
+        .into_iter()
+        .next();
+    let video_id = latest.as_ref().map(|video| video.id.clone());
+    let content = if let Some(video) = latest.as_ref() {
+        let rendered = template
+            .replace("{label}", &source)
+            .replace("{title}", &video.title)
+            .replace("{description}", &video.description)
+            .replace("{url}", &video.url)
+            .replace("{created_at}", &video.created_at)
+            .replace("{id}", &video.id);
+        let rendered = if mention.is_empty() {
+            rendered
+        } else {
+            format!("{mention} {rendered}")
+        };
+        format!("✅ Vozen TikTok sandbox test\n{rendered}")
+    } else {
+        format!(
+            "✅ Vozen TikTok sandbox test — connected to **{source}**. No public video is currently available."
+        )
+    };
+    let content = content.chars().take(2_000).collect::<String>();
+    discord_send_channel_message(&state.discord_token, &target, &content)
+        .await
+        .map_err(|error| {
+            let status = if error == "discord_http_403" || error == "discord_http_401" {
+                StatusCode::FORBIDDEN
+            } else if error == "discord_http_404" {
+                StatusCode::NOT_FOUND
+            } else if error == "invalid_discord_channel_id" {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            let code = if error == "discord_http_403" || error == "discord_http_401" {
+                "discord_send_messages_forbidden"
+            } else if error == "discord_http_404" {
+                "discord_channel_not_found"
+            } else if error == "invalid_discord_channel_id" {
+                "invalid_discord_channel_id"
+            } else {
+                "discord_delivery_failed"
+            };
+            client_error(status, code)
+        })?;
+    Ok(Json(serde_json::json!({
+        "provider": "tiktok",
+        "subscriptionId": record.id,
+        "delivered": true,
+        "testedAt": Utc::now().timestamp_millis(),
+        "videoId": video_id,
+        "cursorAdvanced": false,
+        "sandbox": tiktok_sandbox_enabled(),
+    })))
 }
 
 async fn delete_tiktok_subscription(
@@ -12294,6 +12378,22 @@ mod tests {
             let response = app.clone().oneshot(request).await.expect("response");
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn tiktok_test_route_requires_a_session() {
+        let store = Store::open(":memory:").expect("in-memory store");
+        let app = router(state(store));
+        let request = Request::builder()
+            .method(http::Method::POST)
+            .uri("/api/config/tiktok/1/test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"username":"vozen","targetChannelId":"123456789012345","messageTemplate":"{title}","mention":"","intervalSeconds":900,"enabled":true}"#,
+            ))
+            .expect("request");
+        let response = app.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]

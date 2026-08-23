@@ -899,6 +899,30 @@ export const api = {
     request<{ deleted: boolean; id: number }>(`/api/config/${provider}/${id}`, {
       method: 'DELETE',
     }),
+  testTikTokDelivery: (
+    id: number,
+    payload: {
+      username: string;
+      targetChannelId: string;
+      messageTemplate: string;
+      mention: string;
+      intervalSeconds: number;
+      enabled: boolean;
+    },
+  ) =>
+    request<{
+      provider: 'tiktok';
+      subscriptionId: number;
+      delivered: boolean;
+      testedAt: number;
+      videoId?: string | null;
+      cursorAdvanced: boolean;
+      sandbox: boolean;
+    }>(`/api/config/tiktok/${id}/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
   tiktokOAuthStatus: () =>
     request<TikTokOAuthStatus>('/api/providers/tiktok/oauth/status'),
   startTikTokOAuth: () =>

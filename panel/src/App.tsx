@@ -2560,6 +2560,44 @@ function App() {
         );
         return;
       }
+      if (route.key === 'social.tiktok') {
+        const username = String(
+          detailConfig.username ?? detailConfig.sourceLabel ?? '',
+        ).trim();
+        if (!username) {
+          setMessage('Indica primeiro o nome da conta TikTok.');
+          return;
+        }
+        if (localPreviewMode) {
+          setMessage('O teste TikTok aparece quando o painel estiver ligado à API.');
+          return;
+        }
+        const subscription = externalSubscriptions.tiktok?.[0];
+        if (!subscription) {
+          setMessage('Guarda primeiro a subscrição para poderes enviar um teste para o Discord.');
+          return;
+        }
+        const result = await api.testTikTokDelivery(subscription.id, {
+          username,
+          targetChannelId: String(
+            detailConfig.targetChannelId ?? subscription.targetChannelId,
+          ),
+          messageTemplate: String(
+            detailConfig.messageTemplate ?? subscription.messageTemplate,
+          ),
+          mention: String(detailConfig.mention ?? subscription.mention),
+          intervalSeconds: Number(
+            detailConfig.intervalSeconds ?? subscription.intervalSeconds,
+          ),
+          enabled: Boolean(detailEnabled),
+        });
+        setMessage(
+          result.delivered
+            ? 'Mensagem de teste TikTok enviada para o Discord. O cursor de monitorização não foi alterado.'
+            : 'O teste TikTok não foi entregue.',
+        );
+        return;
+      }
       const result = await api.testFeature(route.key, detailConfig);
       const errors = result.result.issues.filter((issue) => issue.severity === 'error');
       const decision = result.decision;
@@ -4103,7 +4141,8 @@ function FeatureDetail({
             {feature?.key === 'social.youtube' ||
             feature?.key === 'social.twitch' ||
             feature?.key === 'social.rss' ||
-            feature?.key === 'social.podcasts'
+            feature?.key === 'social.podcasts' ||
+            feature?.key === 'social.tiktok'
               ? 'Enviar teste para o Discord'
               : 'Simular configuração'}
           </button>
