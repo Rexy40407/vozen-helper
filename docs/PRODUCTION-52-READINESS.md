@@ -1,12 +1,12 @@
-# Vozen Helper — production readiness for all 52 features
+# Vozen Helper — production readiness for all 47 features
 
-The Rust catalogue has 52 unique keys and every key has a bounded adapter, a
+The Rust catalogue has 47 unique keys and every key has a bounded adapter, a
 schema, defaults, validation and a runtime preview. A feature is only shown as
 ready for a guild after the running process has the required Discord
 permissions and provider dependencies.
 
 With the default VPS environment (no optional third-party grants), the panel
-should show **52 implemented/configuration cards**. Every card has a real
+should show **47 implemented/configuration cards**. Every card has a real
 adapter, schema, validation, preview and runtime projection. Some cards can
 still show `dependency_down` or `blocked_*_approval` until their API key,
 RPC, external account or legal approval is configured. The setup page remains
@@ -29,8 +29,6 @@ create a setting that cannot deliver anything.
 | Feature | Server-side requirement |
 | --- | --- |
 | Instagram | `META_INSTAGRAM_ACCESS_TOKEN`, `META_INSTAGRAM_USER_ID`, Meta approval; an explicitly enabled `META_INSTAGRAM_DEVELOPMENT_MODE=true` may be used only for an authorised tester account while the Meta app remains in development |
-| Reddit | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT`, written commercial approval |
-| X | `X_BEARER_TOKEN`, API budget, `X_API_APPROVED=true` |
 | TikTok | `TIKTOK_ACCESS_TOKEN`, Display API review, `TIKTOK_APP_APPROVED=true` |
 | Kick | `KICK_ACCESS_TOKEN`, official API/webhook approval, `KICK_APP_APPROVED=true` |
 | Server monetization | Stripe Connect credentials, signed webhooks, KYC/tax/refund support, `STRIPE_CONNECT_APPROVED=true` |

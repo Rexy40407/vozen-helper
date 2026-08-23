@@ -164,8 +164,6 @@ pub const FEATURE_KEYS: &[&str] = &[
     "social.twitch",
     "social.youtube",
     "social.instagram",
-    "social.reddit",
-    "social.x",
     "social.tiktok",
     "social.rss",
     "social.podcasts",
@@ -174,9 +172,6 @@ pub const FEATURE_KEYS: &[&str] = &[
     "community.birthdays",
     "community.economy",
     "growth.monetization",
-    "web3.nft_stats",
-    "web3.nft_queries",
-    "web3.nft_sales",
     "web3.crypto_stats",
     "web3.crypto_queries",
     "web3.gas_tracker",
@@ -1519,10 +1514,9 @@ fn simulate_feature_effect(
         "studio.rank_card" =>
             "Render the XP card using only curated backgrounds, colours and the member's current XP snapshot.".into(),
         "social.youtube" | "social.rss" | "social.podcasts" | "social.twitch" | "social.bluesky"
-        | "social.reddit" | "social.instagram" | "social.x" | "social.tiktok" | "social.kick" =>
+        | "social.instagram" | "social.tiktok" | "social.kick" =>
             "Validate the subscription, enqueue a deduplicated provider job and deliver the rendered alert to the selected channel.".into(),
-        "web3.crypto_stats" | "web3.crypto_queries" | "web3.gas_tracker" | "web3.nft_stats"
-        | "web3.nft_queries" | "web3.nft_sales" =>
+        "web3.crypto_stats" | "web3.crypto_queries" | "web3.gas_tracker" =>
             "Query the configured read-only provider with bounded caching, freshness metadata and rate-limit handling.".into(),
         "growth.monetization" =>
             "Create or update the server's Connect capability only after onboarding, webhook and compliance checks.".into(),
@@ -4598,150 +4592,6 @@ impl FeatureAdapter for BlueskyAdapter {
     }
 }
 
-/// Read-only Reddit alert contract.  The adapter is intentionally present
-/// even while the catalogue remains blocked: the panel can explain the exact
-/// fields and the API can validate drafts without ever implying that Reddit
-/// commercial access has been approved.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RedditAdapter;
-
-impl RedditAdapter {
-    pub const KEY: &'static str = "social.reddit";
-    pub const SOURCE: &'static str = "reddit_oauth_readonly_v1";
-}
-
-impl FeatureAdapter for RedditAdapter {
-    fn descriptor(&self) -> FeatureAdapterDescriptor {
-        FeatureAdapterDescriptor {
-            key: Self::KEY.into(),
-            source: Self::SOURCE.into(),
-            schema_version: FEATURE_SCHEMA_VERSION,
-            schema: serde_json::json!({
-                "version": FEATURE_SCHEMA_VERSION,
-                "source": Self::SOURCE,
-                "sections": [{
-                    "title": "Reddit alerts",
-                    "description": "Read public subreddit posts through Reddit's official OAuth API. Commercial approval is required before enabling delivery.",
-                    "fields": [
-                        {"key":"sourceSubreddit","label":"Subreddit","kind":"text","help":"For example: vozen or r/vozen."},
-                        {"key":"targetChannelId","label":"Discord channel","kind":"channel"},
-                        {"key":"intervalSeconds","label":"Polling interval (seconds)","kind":"number","min":300,"max":86400},
-                        {"key":"messageTemplate","label":"Alert message","kind":"textarea","advanced":true},
-                        {"key":"mention","label":"Optional mention","kind":"text","advanced":true}
-                    ]
-                }]
-            }),
-            defaults: serde_json::json!({
-                "sourceSubreddit": "",
-                "targetChannelId": "",
-                "intervalSeconds": 900,
-                "messageTemplate": "New post in r/{subreddit}: **{title}**\\n{permalink}",
-                "mention": ""
-            }),
-            dependencies: vec![
-                "Reddit OAuth application".into(),
-                "Commercial API approval".into(),
-                "Send Messages".into(),
-            ],
-        }
-    }
-
-    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
-        let Some(object) = config.as_object() else {
-            return vec![ValidationIssue {
-                path: "config".into(),
-                code: "object_required".into(),
-                message: "Reddit alert configuration must be an object.".into(),
-                severity: "error".into(),
-            }];
-        };
-        let source = object
-            .get("sourceSubreddit")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .trim();
-        let valid_source = (2..=50).contains(&source.len())
-            && source
-                .trim_start_matches('/')
-                .trim_start_matches("r/")
-                .trim_start_matches("subreddit/")
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
-        let target = object
-            .get("targetChannelId")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .trim();
-        let mut issues = Vec::new();
-        if !valid_source {
-            issues.push(ValidationIssue {
-                path: "sourceSubreddit".into(),
-                code: "invalid_subreddit".into(),
-                message: "Use a subreddit name such as vozen or r/vozen; URLs are not accepted."
-                    .into(),
-                severity: "error".into(),
-            });
-        }
-        if target.is_empty() || target.parse::<u64>().is_err() {
-            issues.push(ValidationIssue {
-                path: "targetChannelId".into(),
-                code: "invalid_discord_id".into(),
-                message: "Choose a real Discord channel for alerts.".into(),
-                severity: "error".into(),
-            });
-        }
-        if let Some(value) = object
-            .get("intervalSeconds")
-            .and_then(serde_json::Value::as_i64)
-            && !(300..=86_400).contains(&value)
-        {
-            issues.push(ValidationIssue {
-                path: "intervalSeconds".into(),
-                code: "out_of_range".into(),
-                message: "Polling interval must be between 300 and 86400 seconds.".into(),
-                severity: "error".into(),
-            });
-        }
-        if object.get("messageTemplate").is_some_and(|value| {
-            value
-                .as_str()
-                .is_none_or(|text| text.trim().is_empty() || text.chars().count() > 1_800)
-        }) {
-            issues.push(ValidationIssue {
-                path: "messageTemplate".into(),
-                code: "invalid_template".into(),
-                message: "Alert messages must be non-empty and at most 1800 characters.".into(),
-                severity: "error".into(),
-            });
-        }
-        issues
-    }
-
-    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
-        let Some(object) = config.as_object() else {
-            return Vec::new();
-        };
-        let mut projection = Vec::new();
-        for (field, key) in [
-            ("sourceSubreddit", "social.reddit.subreddit"),
-            ("targetChannelId", "social.reddit.target_channel_id"),
-            ("messageTemplate", "social.reddit.message_template"),
-            ("mention", "social.reddit.mention"),
-        ] {
-            if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
-                projection.push((key.into(), value.into()));
-            }
-        }
-        if let Some(value) = object
-            .get("intervalSeconds")
-            .and_then(serde_json::Value::as_i64)
-        {
-            projection.push(("social.reddit.interval_seconds".into(), value.to_string()));
-        }
-        projection
-    }
-}
-
 /// Contract for integrations whose runtime is deliberately gated by an
 /// external provider account, app review, commercial agreement or operator
 /// secret.  Keeping these adapters in the registry means the panel can show
@@ -4821,7 +4671,7 @@ impl FeatureAdapter for ExternalProviderAdapter {
                 });
             }
         }
-        let minimum_interval = if self.key == "social.x" { 900 } else { 300 };
+        let minimum_interval = 300;
         if let Some(value) = object.get("intervalSeconds")
             && (!value.is_i64()
                 || !value
@@ -5297,143 +5147,6 @@ impl FeatureAdapter for GasAdapter {
 
     fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
         project_gas(config)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct NftAdapter {
-    pub key: &'static str,
-    pub title: &'static str,
-    pub description: &'static str,
-    pub sales: bool,
-    pub alerts: bool,
-}
-
-impl FeatureAdapter for NftAdapter {
-    fn descriptor(&self) -> FeatureAdapterDescriptor {
-        let mut fields = vec![
-            serde_json::json!({"key":"collectionSlug","label":"OpenSea collection slug","kind":"text"}),
-        ];
-        if self.sales && !self.alerts {
-            // Collection queries return one bounded collection document; a
-            // result-count control would be decorative and is intentionally
-            // not exposed. Sales alerts use maxResults below because they
-            // fetch an event list.
-        } else {
-            fields.extend([
-                serde_json::json!({"key":"targetChannelId","label":"Discord channel","kind":"channel"}),
-                serde_json::json!({"key":"intervalSeconds","label":"Update interval (seconds)","kind":"number","min":300,"max":86400}),
-                serde_json::json!({"key":"messageTemplate","label":"Statistics message","kind":"textarea","advanced":true}),
-            ]);
-            if self.sales {
-                fields.push(serde_json::json!({"key":"maxResults","label":"Maximum events","kind":"number","min":1,"max":10,"advanced":true}));
-            }
-        }
-        FeatureAdapterDescriptor {
-            key: self.key.into(),
-            source: "opensea_read_only_v1".into(),
-            schema_version: FEATURE_SCHEMA_VERSION,
-            schema: serde_json::json!({"version":FEATURE_SCHEMA_VERSION,"source":"opensea_read_only_v1","sections":[{"title":self.title,"description":self.description,"fields":fields}]}),
-            defaults: if self.sales && !self.alerts {
-                serde_json::json!({"collectionSlug":""})
-            } else {
-                serde_json::json!({"collectionSlug":"","targetChannelId":"","intervalSeconds":900,"messageTemplate":"OpenSea update: {collection}","maxResults":5})
-            },
-            dependencies: vec![
-                "OpenSea API key".into(),
-                if self.sales {
-                    "Use Application Commands".into()
-                } else {
-                    "Send Messages".into()
-                },
-            ],
-        }
-    }
-
-    fn validate(&self, config: &serde_json::Value) -> Vec<ValidationIssue> {
-        let Some(object) = config.as_object() else {
-            return vec![ValidationIssue {
-                path: "config".into(),
-                code: "object_required".into(),
-                message: "NFT configuration must be an object.".into(),
-                severity: "error".into(),
-            }];
-        };
-        let mut issues = Vec::new();
-        let slug = object
-            .get("collectionSlug")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .trim();
-        if slug.is_empty()
-            || slug.len() > 128
-            || !slug
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-            || slug.starts_with('-')
-            || slug.ends_with('-')
-        {
-            issues.push(ValidationIssue {
-                path: "collectionSlug".into(),
-                code: "invalid_collection_slug".into(),
-                message: "Use the OpenSea collection slug, not a URL.".into(),
-                severity: "error".into(),
-            });
-        }
-        if self.sales
-            && let Some(max) = object.get("maxResults").and_then(serde_json::Value::as_i64)
-            && !(1..=10).contains(&max)
-        {
-            issues.push(ValidationIssue {
-                path: "maxResults".into(),
-                code: "out_of_range".into(),
-                message: "Maximum events must be between 1 and 10.".into(),
-                severity: "error".into(),
-            });
-        }
-        if !self.sales || self.alerts {
-            validate_channel_and_schedule(object, &mut issues, "NFT");
-        }
-        issues
-    }
-
-    fn runtime_projection(&self, config: &serde_json::Value) -> Vec<(String, String)> {
-        let Some(object) = config.as_object() else {
-            return Vec::new();
-        };
-        let prefix = self.key.replace('.', "_");
-        let mut projection = Vec::new();
-        if let Some(value) = object
-            .get("collectionSlug")
-            .and_then(serde_json::Value::as_str)
-        {
-            projection.push((
-                format!("{prefix}.collection_slug"),
-                value.trim().to_ascii_lowercase(),
-            ));
-        }
-        if let Some(value) = object.get("maxResults").and_then(serde_json::Value::as_i64) {
-            projection.push((format!("{prefix}.max_results"), value.to_string()));
-        }
-        if let Some(value) = object
-            .get("targetChannelId")
-            .and_then(serde_json::Value::as_str)
-        {
-            projection.push((format!("{prefix}.target_channel_id"), value.to_string()));
-        }
-        if let Some(value) = object
-            .get("intervalSeconds")
-            .and_then(serde_json::Value::as_i64)
-        {
-            projection.push((format!("{prefix}.interval_seconds"), value.to_string()));
-        }
-        if let Some(value) = object
-            .get("messageTemplate")
-            .and_then(serde_json::Value::as_str)
-        {
-            projection.push((format!("{prefix}.message_template"), value.to_string()));
-        }
-        projection
     }
 }
 
@@ -10849,7 +10562,6 @@ impl FeatureAdapter for SearchAdapter {
 static EMBEDS_ADAPTER: EmbedsAdapter = EmbedsAdapter;
 static ECONOMY_ADAPTER: EconomyAdapter = EconomyAdapter;
 static BLUESKY_ADAPTER: BlueskyAdapter = BlueskyAdapter;
-static REDDIT_ADAPTER: RedditAdapter = RedditAdapter;
 static INSTAGRAM_ADAPTER: ExternalProviderAdapter = ExternalProviderAdapter {
     key: "social.instagram",
     source: "meta_instagram_official_v1",
@@ -10879,38 +10591,6 @@ static INSTAGRAM_ADAPTER: ExternalProviderAdapter = ExternalProviderAdapter {
         "Meta Instagram API app",
         "Professional account OAuth grant",
         "Meta App Review and deletion callbacks",
-        "Send Messages",
-    ],
-};
-static X_ADAPTER: ExternalProviderAdapter = ExternalProviderAdapter {
-    key: "social.x",
-    source: "x_api_official_v1",
-    schema: r#"{
-        "version": 1,
-        "source": "x_api_official_v1",
-        "sections": [{
-            "title": "X alerts",
-            "description": "Notify a Discord channel about posts from an X account through the official API.",
-            "fields": [
-                {"key":"sourceHandle","label":"X handle","kind":"text","help":"Enter the handle without an @ or URL."},
-                {"key":"targetChannelId","label":"Discord channel","kind":"channel"},
-                {"key":"intervalSeconds","label":"Check interval (seconds)","kind":"number","min":900,"max":86400},
-                {"key":"messageTemplate","label":"Alert message","kind":"textarea","advanced":true},
-                {"key":"mention","label":"Optional mention","kind":"text","advanced":true}
-            ]
-        }]
-    }"#,
-    defaults: r#"{
-        "sourceHandle":"",
-        "targetChannelId":"",
-        "intervalSeconds":900,
-        "messageTemplate":"New post from @{handle}: **{text}**\n{url}",
-        "mention":""
-    }"#,
-    dependencies: &[
-        "X developer application",
-        "Valid X API bearer token",
-        "Approved X API access",
         "Send Messages",
     ],
 };
@@ -11058,28 +10738,6 @@ static CRYPTO_QUERIES_ADAPTER: CryptoAdapter = CryptoAdapter {
     stats: false,
 };
 static GAS_TRACKER_ADAPTER: GasAdapter = GasAdapter;
-static NFT_STATS_ADAPTER: NftAdapter = NftAdapter {
-    key: "web3.nft_stats",
-    title: "NFT collection statistics",
-    description: "Read-only floor, volume and sales statistics from OpenSea.",
-    sales: false,
-    alerts: true,
-};
-static NFT_QUERIES_ADAPTER: NftAdapter = NftAdapter {
-    key: "web3.nft_queries",
-    title: "NFT collection queries",
-    description: "Query one approved OpenSea collection from an application command.",
-    sales: true,
-    alerts: false,
-};
-static NFT_SALES_ADAPTER: NftAdapter = NftAdapter {
-    key: "web3.nft_sales",
-    title: "NFT sales and listings",
-    description: "Read-only recent sales from an approved OpenSea collection.",
-    sales: true,
-    alerts: true,
-};
-
 pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
     match key {
         AntiSpamAdapter::KEY => Some(&ANTI_SPAM_ADAPTER as &dyn FeatureAdapter),
@@ -11118,9 +10776,7 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         "social.podcasts" => Some(&PODCASTS_ADAPTER as &dyn FeatureAdapter),
         "social.twitch" => Some(&TWITCH_ADAPTER as &dyn FeatureAdapter),
         BlueskyAdapter::KEY => Some(&BLUESKY_ADAPTER as &dyn FeatureAdapter),
-        RedditAdapter::KEY => Some(&REDDIT_ADAPTER as &dyn FeatureAdapter),
         "social.instagram" => Some(&INSTAGRAM_ADAPTER as &dyn FeatureAdapter),
-        "social.x" => Some(&X_ADAPTER as &dyn FeatureAdapter),
         "social.tiktok" => Some(&TIKTOK_ADAPTER as &dyn FeatureAdapter),
         "social.kick" => Some(&KICK_ADAPTER as &dyn FeatureAdapter),
         "growth.monetization" => Some(&MONETIZATION_ADAPTER as &dyn FeatureAdapter),
@@ -11131,9 +10787,6 @@ pub fn feature_adapter(key: &str) -> Option<&'static dyn FeatureAdapter> {
         "web3.crypto_stats" => Some(&CRYPTO_STATS_ADAPTER as &dyn FeatureAdapter),
         "web3.crypto_queries" => Some(&CRYPTO_QUERIES_ADAPTER as &dyn FeatureAdapter),
         "web3.gas_tracker" => Some(&GAS_TRACKER_ADAPTER as &dyn FeatureAdapter),
-        "web3.nft_stats" => Some(&NFT_STATS_ADAPTER as &dyn FeatureAdapter),
-        "web3.nft_queries" => Some(&NFT_QUERIES_ADAPTER as &dyn FeatureAdapter),
-        "web3.nft_sales" => Some(&NFT_SALES_ADAPTER as &dyn FeatureAdapter),
         _ => None,
     }
 }
@@ -11249,13 +10902,10 @@ pub fn feature_maturity(key: &str) -> FeatureMaturity {
         | "social.bluesky"
         | "web3.crypto_stats"
         | "web3.crypto_queries" => FeatureMaturity::Operational,
-        "social.youtube" | "social.twitch" | "web3.gas_tracker"
-        | "web3.nft_stats" | "web3.nft_queries" | "web3.nft_sales" => FeatureMaturity::Beta,
+        "social.youtube" | "social.twitch" | "web3.gas_tracker" => FeatureMaturity::Beta,
         // Providers without an approved adapter or credentials must never be
         // presented as configurable, even if a legacy setting exists.
         "social.instagram"
-        | "social.reddit"
-        | "social.x"
         | "social.tiktok"
         | "social.kick"
         | "growth.monetization"
@@ -11422,12 +11072,12 @@ mod tests {
     }
 
     #[test]
-    fn feature_registry_has_52_unique_keys_and_closed_unknowns() {
+    fn feature_registry_has_47_unique_keys_and_closed_unknowns() {
         let mut keys = FEATURE_KEYS.to_vec();
         keys.sort_unstable();
         keys.dedup();
-        assert_eq!(FEATURE_KEYS.len(), 52);
-        assert_eq!(keys.len(), 52);
+        assert_eq!(FEATURE_KEYS.len(), 47);
+        assert_eq!(keys.len(), 47);
         assert!(is_known_feature("community.leaderboard"));
         assert!(!is_known_feature("community.not_a_real_feature"));
     }
@@ -11670,8 +11320,6 @@ mod tests {
         }
         for key in [
             "social.instagram",
-            "social.reddit",
-            "social.x",
             "social.tiktok",
             "social.kick",
             "growth.monetization",
@@ -11682,17 +11330,7 @@ mod tests {
             assert!(!adapter.descriptor().dependencies.is_empty());
             assert!(!adapter.descriptor().schema.as_object().unwrap().is_empty());
         }
-        for key in [
-            "web3.nft_stats",
-            "web3.nft_queries",
-            "web3.nft_sales",
-            "web3.gas_tracker",
-        ] {
-            // The adapters and Discord commands are real, but the providers
-            // remain Beta until their production credentials/endpoints are
-            // configured and health checks succeed.
-            assert_eq!(feature_maturity(key), FeatureMaturity::Beta);
-        }
+        assert_eq!(feature_maturity("web3.gas_tracker"), FeatureMaturity::Beta);
     }
 
     #[test]
@@ -13379,103 +13017,7 @@ mod tests {
     }
 
     #[test]
-    fn reddit_adapter_keeps_oauth_and_commercial_gate_explicit() {
-        let reddit = feature_adapter("social.reddit").expect("reddit adapter");
-        let descriptor = reddit.descriptor();
-        assert_eq!(descriptor.source, "reddit_oauth_readonly_v1");
-        assert!(
-            descriptor
-                .dependencies
-                .iter()
-                .any(|item| item == "Reddit OAuth application")
-        );
-        assert!(
-            descriptor
-                .dependencies
-                .iter()
-                .any(|item| item == "Commercial API approval")
-        );
-        assert!(
-            reddit
-                .validate(&serde_json::json!({
-                    "sourceSubreddit": "https://reddit.com/r/vozen",
-                    "targetChannelId": "123456789012345678",
-                    "intervalSeconds": 900,
-                    "messageTemplate": "{title}"
-                }))
-                .iter()
-                .any(|issue| issue.code == "invalid_subreddit")
-        );
-        assert!(
-            reddit
-                .runtime_projection(&serde_json::json!({
-                    "sourceSubreddit": "vozen",
-                    "targetChannelId": "123456789012345678",
-                    "intervalSeconds": 900,
-                    "messageTemplate": "{title}",
-                    "mention": ""
-                }))
-                .contains(&("social.reddit.interval_seconds".into(), "900".into()))
-        );
-        assert_eq!(feature_maturity("social.reddit"), FeatureMaturity::Blocked);
-    }
-
-    #[test]
-    fn x_adapter_matches_the_bearer_token_and_polling_contract() {
-        let x = feature_adapter("social.x").expect("x adapter");
-        let descriptor = x.descriptor();
-        assert_eq!(descriptor.source, "x_api_official_v1");
-        assert!(
-            descriptor
-                .dependencies
-                .iter()
-                .any(|item| item == "Valid X API bearer token")
-        );
-        assert!(
-            descriptor
-                .dependencies
-                .iter()
-                .any(|item| item == "Approved X API access")
-        );
-
-        let fields = descriptor.schema["sections"][0]["fields"]
-            .as_array()
-            .expect("x schema fields");
-        let interval = fields
-            .iter()
-            .find(|field| field["key"] == "intervalSeconds")
-            .expect("x interval field");
-        assert_eq!(interval["min"], 900);
-        assert_eq!(descriptor.defaults["intervalSeconds"], 900);
-        assert_eq!(
-            descriptor.defaults["messageTemplate"],
-            "New post from @{handle}: **{text}**\n{url}"
-        );
-
-        let invalid = x.validate(&serde_json::json!({
-            "sourceHandle": "vozen",
-            "targetChannelId": "123456789012345678",
-            "intervalSeconds": 300,
-            "messageTemplate": "{text}"
-        }));
-        assert!(
-            invalid
-                .iter()
-                .any(|issue| { issue.path == "intervalSeconds" && issue.code == "out_of_range" })
-        );
-
-        let valid = x.validate(&serde_json::json!({
-            "sourceHandle": "vozen",
-            "targetChannelId": "123456789012345678",
-            "intervalSeconds": 900,
-            "messageTemplate": "{text}"
-        }));
-        assert!(!valid.iter().any(|issue| issue.path == "intervalSeconds"));
-        assert_eq!(feature_maturity("social.x"), FeatureMaturity::Blocked);
-    }
-
-    #[test]
-    fn gas_and_nft_adapters_keep_provider_boundaries_explicit() {
+    fn gas_adapter_keeps_provider_boundary_explicit() {
         let gas = feature_adapter("web3.gas_tracker").expect("gas adapter");
         assert_eq!(gas.descriptor().source, "operator_rpc_gas_v1");
         assert!(
@@ -13495,22 +13037,6 @@ mod tests {
             }))
             .contains(&("web3.gas_tracker.network".into(), "ethereum".into()))
         );
-
-        for key in ["web3.nft_stats", "web3.nft_queries", "web3.nft_sales"] {
-            let nft = feature_adapter(key).expect("NFT adapter");
-            assert_eq!(nft.descriptor().source, "opensea_read_only_v1");
-            assert!(
-                nft.validate(
-                    &serde_json::json!({"collectionSlug": "https://opensea.io/collection/x"})
-                )
-                .iter()
-                .any(|issue| issue.path == "collectionSlug")
-            );
-            // The adapter is implemented and read-only; availability is
-            // dependency-gated by the OpenSea key, so the catalogue exposes
-            // it as beta rather than silently pretending it is blocked.
-            assert_eq!(feature_maturity(key), FeatureMaturity::Beta);
-        }
     }
 
     #[test]

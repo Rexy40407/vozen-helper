@@ -176,7 +176,6 @@ export type TwitchSubscriptionHealth = {
 };
 export type ExternalSubscription = {
   id: number;
-  sourceSubreddit?: string;
   sourceHandle?: string;
   sourceLabel?: string;
   username?: string;
@@ -193,7 +192,7 @@ export type ExternalSubscription = {
   failureCount: number;
   lastError?: string | null;
 };
-export type ExternalProvider = 'reddit' | 'x' | 'tiktok' | 'instagram' | 'kick' | 'bluesky';
+export type ExternalProvider = 'tiktok' | 'instagram' | 'kick' | 'bluesky';
 export type TikTokOAuthStatus = {
   connected: boolean;
   sandbox?: boolean;
@@ -859,7 +858,6 @@ export const api = {
   createExternalSubscription: (
     provider: ExternalProvider,
     payload: {
-      sourceSubreddit?: string;
       sourceHandle?: string;
       sourceLabel?: string;
       username?: string;
@@ -879,7 +877,6 @@ export const api = {
     provider: ExternalProvider,
     id: number,
     payload: {
-      sourceSubreddit?: string;
       sourceHandle?: string;
       sourceLabel?: string;
       username?: string;

@@ -13,7 +13,7 @@
 
 ## Finding
 
-The Rust Helper catalogue is designed around 52 feature keys, but production readiness is intentionally split between operational, beta, and externally blocked providers. docs/PRODUCTION-52-READINESS.md states that every key has a bounded adapter/schema/default/validation/preview/runtime projection, while its external-blocker section requires real credentials and/or written approval for Reddit, X, TikTok, Kick, Stripe Connect, and wallet/SIWE flows. The same document requires the dashboard to expose blocked_*_approval instead of presenting an unapproved provider as operational.
+The Rust Helper catalogue is designed around 47 feature keys, but production readiness is intentionally split between operational, beta, and externally blocked providers. docs/PRODUCTION-52-READINESS.md states that every key has a bounded adapter/schema/default/validation/preview/runtime projection, while its external-blocker section requires real credentials and/or written approval for TikTok, Kick, Stripe Connect, and wallet/SIWE flows. The same document requires the dashboard to expose blocked_*_approval instead of presenting an unapproved provider as operational.
 
 This means the remaining “await credentials or approval” count cannot be fixed by setting booleans in source or .env. Each provider needs a real credential, a provider-side approval where required, a safe smoke test, and a runtime status transition.
 
@@ -36,8 +36,6 @@ Out of scope:
 ## Implementation steps
 
 1. Capture a redacted inventory from the production .env. Report only configured/missing for:
-   - Reddit credentials and approval
-   - X bearer token and approval
    - TikTok access token and approval
    - Kick token and approval
    - Stripe Connect credentials, webhook configuration, KYC/approval
@@ -50,13 +48,13 @@ Out of scope:
    - the readiness endpoint/UI reports the provider as operational
 5. For SIWE, verify domain/URI binding, session secret presence, approved RPC connectivity, and a non-empty contract allow-list. Reject a deployment if any of these are absent.
 6. For Stripe Connect, verify webhook signing, account onboarding/KYC state, and a safe test-mode flow before enabling production behavior.
-7. Re-run the full 52-key readiness projection and reconcile the dashboard so blocked providers remain explicitly blocked and beta providers have a documented acceptance criterion.
+7. Re-run the full 47-key readiness projection and reconcile the dashboard so blocked providers remain explicitly blocked and beta providers have a documented acceptance criterion.
 
 ## Verification
 
 Use redacted checks only, for example:
 
-    for k in REDDIT_CLIENT_ID REDDIT_CLIENT_SECRET X_BEARER_TOKEN TIKTOK_ACCESS_TOKEN KICK_API_TOKEN STRIPE_CONNECT_CLIENT_ID SIWE_DOMAIN SIWE_URI SIWE_SESSION_SECRET SIWE_ALLOWED_CONTRACTS; do
+    for k in TIKTOK_ACCESS_TOKEN KICK_API_TOKEN STRIPE_CONNECT_CLIENT_ID SIWE_DOMAIN SIWE_URI SIWE_SESSION_SECRET SIWE_ALLOWED_CONTRACTS; do
       if grep -Eq "^$k=.+$" /home/vozen/vozen-helper-rust/shared/.env; then
         echo "$k=configured"
       else
@@ -71,4 +69,4 @@ Do not treat active plus /health 200 as proof that an external provider is autho
 - No provider is shown as operational without valid credentials and required approval.
 - Every remaining blocked provider has either been completed with evidence or remains explicitly blocked for a named external reason.
 - SIWE and Stripe Connect gates are validated end-to-end in their intended environment.
-- The 52-key readiness report, dashboard status, and production environment agree.
+- The 47-key readiness report, dashboard status, and production environment agree.

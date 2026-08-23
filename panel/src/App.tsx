@@ -456,28 +456,6 @@ const additionalFeatures: Feature[] = [
     enabled: false,
   },
   {
-    key: 'social.reddit',
-    label: 'Alertas do Reddit',
-    description: 'Envia avisos quando aparece uma nova publicação.',
-    category: 'social',
-    capability: 'alerts',
-    available: true,
-    maturity: 'blocked',
-    configurable: true,
-    enabled: false,
-  },
-  {
-    key: 'social.x',
-    label: 'Alertas do X',
-    description: 'Envia avisos apenas de leitura sobre contas públicas do X.',
-    category: 'social',
-    capability: 'alerts',
-    available: true,
-    maturity: 'blocked',
-    configurable: true,
-    enabled: false,
-  },
-  {
     key: 'social.tiktok',
     label: 'Alertas do TikTok',
     description: 'Notifica o servidor sobre novos vídeos.',
@@ -554,39 +532,6 @@ const additionalFeatures: Feature[] = [
     maturity: 'blocked',
     configurable: true,
     enabled: false,
-  },
-  {
-    key: 'web3.nft_stats',
-    label: 'Estatísticas NFT',
-    description: 'Mostra dados de coleções NFT para a comunidade.',
-    category: 'web3',
-    capability: 'web3',
-    available: true,
-    enabled: false,
-    maturity: 'beta',
-    configurable: true,
-  },
-  {
-    key: 'web3.nft_queries',
-    label: 'Consultas NFT',
-    description: 'Consulta coleções NFT diretamente no servidor.',
-    category: 'web3',
-    capability: 'web3',
-    available: true,
-    enabled: false,
-    maturity: 'beta',
-    configurable: true,
-  },
-  {
-    key: 'web3.nft_sales',
-    label: 'Vendas e listagens NFT',
-    description: 'Acompanha vendas e listagens de coleções escolhidas.',
-    category: 'web3',
-    capability: 'web3',
-    available: true,
-    enabled: false,
-    maturity: 'beta',
-    configurable: true,
   },
   {
     key: 'web3.crypto_stats',
@@ -992,44 +937,6 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       description: 'Mantém os pedidos de privacidade claros.',
       fields: [
         { key: 'allowMemberExport', label: 'Allow member exports', kind: 'toggle' },
-      ],
-    },
-  ],
-  'social.reddit': [
-    {
-      title: 'Subreddit acompanhado',
-      description: 'Usa a API oficial do Reddit para avisar sobre novas publicações.',
-      fields: [
-        { key: 'sourceSubreddit', label: 'Subreddit', kind: 'text', help: 'Exemplo: discordapp (sem r/).' },
-        { key: 'targetChannelId', label: 'Canal Discord', kind: 'channel' },
-      ],
-    },
-    {
-      title: 'Mensagem',
-      description: 'Define o formato do aviso e a menção opcional.',
-      fields: [
-        { key: 'messageTemplate', label: 'Mensagem', kind: 'textarea', maxLength: 1800 },
-        { key: 'mention', label: 'Menção opcional', kind: 'text', advanced: true },
-        { key: 'intervalSeconds', label: 'Intervalo (segundos)', kind: 'number', min: 300, max: 86400, advanced: true },
-      ],
-    },
-  ],
-  'social.x': [
-    {
-      title: 'Conta acompanhada',
-      description: 'Lê publicações públicas através da API oficial do X com um bearer token válido.',
-      fields: [
-        { key: 'sourceHandle', label: 'Handle do X', kind: 'text', help: 'Exemplo: discord (sem @).' },
-        { key: 'targetChannelId', label: 'Canal Discord', kind: 'channel' },
-      ],
-    },
-    {
-      title: 'Mensagem',
-      description: 'Personaliza o aviso enviado para o servidor.',
-      fields: [
-        { key: 'messageTemplate', label: 'Mensagem', kind: 'textarea', maxLength: 1800 },
-        { key: 'mention', label: 'Menção opcional', kind: 'text', advanced: true },
-        { key: 'intervalSeconds', label: 'Intervalo (segundos)', kind: 'number', min: 900, max: 86400, advanced: true },
       ],
     },
   ],
@@ -1802,27 +1709,6 @@ const spec = (key: string): SectionSpec[] => {
       },
     ];
   }
-  if (key === 'web3.nft_stats' || key === 'web3.nft_queries' || key === 'web3.nft_sales') {
-    const query = key === 'web3.nft_queries';
-    const title = query ? 'NFT collection query' : key === 'web3.nft_sales' ? 'NFT sales and listings' : 'NFT collection statistics';
-    return [
-      {
-        title,
-        description: 'Use the official OpenSea read-only API; no wallet or transaction access is required.',
-        fields: [
-          { key: 'collectionSlug', label: 'OpenSea collection slug', kind: 'text' },
-          ...(query
-            ? [{ key: 'maxResults', label: 'Maximum events', kind: 'number', min: 1, max: 10, advanced: true }]
-            : [
-                { key: 'targetChannelId', label: 'Discord channel', kind: 'text' },
-                { key: 'intervalSeconds', label: 'Update interval (seconds)', kind: 'number', min: 300, max: 86400 },
-                { key: 'messageTemplate', label: 'Statistics message', kind: 'textarea', advanced: true },
-                ...(key === 'web3.nft_sales' ? [{ key: 'maxResults', label: 'Maximum events', kind: 'number', min: 1, max: 10, advanced: true }] : []),
-              ]),
-        ] as FieldSpec[],
-      },
-    ];
-  }
   if (key === 'web3.crypto_stats' || key === 'web3.crypto_queries') {
     const stats = key === 'web3.crypto_stats';
     return [
@@ -1889,8 +1775,6 @@ const quickSetupSteps: Array<{ key: QuickSetupStepKey; label: string; descriptio
 ];
 
 const externalProviderForFeature = (key: string): ExternalProvider | null => {
-  if (key === 'social.reddit') return 'reddit';
-  if (key === 'social.x') return 'x';
   if (key === 'social.tiktok') return 'tiktok';
   if (key === 'social.instagram') return 'instagram';
   if (key === 'social.kick') return 'kick';
@@ -1899,7 +1783,6 @@ const externalProviderForFeature = (key: string): ExternalProvider | null => {
 };
 
 const externalSourceKey = (provider: ExternalProvider): string => {
-  if (provider === 'reddit') return 'sourceSubreddit';
   if (provider === 'tiktok' || provider === 'instagram') return 'username';
   return 'sourceHandle';
 };
@@ -2165,7 +2048,7 @@ function App() {
         .twitchSubscriptions()
         .then((result) => setTwitchSubscriptions(result.subscriptions))
         .catch(() => undefined);
-      (['reddit', 'x', 'tiktok', 'instagram', 'kick', 'bluesky'] as ExternalProvider[]).forEach((provider) => {
+      (['tiktok', 'instagram', 'kick', 'bluesky'] as ExternalProvider[]).forEach((provider) => {
         void api
           .externalSubscriptions(provider)
           .then((result) =>

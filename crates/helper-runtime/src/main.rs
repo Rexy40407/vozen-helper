@@ -4,8 +4,7 @@ use helper_api::{ApiState, serve as serve_api};
 use helper_core::Config;
 use helper_modules::{
     BlueskyClient, CoinGeckoClient, EntitlementClient, GasClient, InstagramClient, KickClient,
-    OpenSeaClient, RedditClient, RssClient, SiweVerifier, StripeConnectClient, TikTokClient,
-    TwitchClient, XClient, YouTubeClient,
+    RssClient, SiweVerifier, StripeConnectClient, TikTokClient, TwitchClient, YouTubeClient,
 };
 use helper_store::Store;
 use std::time::Instant;
@@ -91,8 +90,6 @@ async fn main() -> Result<()> {
                     rss: Some(RssClient::new()),
                     twitch: TwitchClient::from_env(),
                     bluesky: Some(BlueskyClient::new()),
-                    reddit: RedditClient::from_env(),
-                    x: XClient::from_env(),
                     tiktok: TikTokClient::from_env(),
                     instagram: InstagramClient::from_env(),
                     kick: KickClient::from_env(),
@@ -100,7 +97,6 @@ async fn main() -> Result<()> {
                     siwe: SiweVerifier::from_env(),
                     coingecko: Some(CoinGeckoClient::new()),
                     gas: GasClient::new(),
-                    opensea: OpenSeaClient::new(),
                 },
             );
             let discord = async {

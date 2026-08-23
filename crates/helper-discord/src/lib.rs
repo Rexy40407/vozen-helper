@@ -21,16 +21,14 @@ use helper_core::{
 use helper_modules::{
     BlueskyClient, BlueskyPost, CoinGeckoClient, CoinGeckoQuote, EntitlementClient,
     EthereumRpcClient, GasClient, GasQuote, InstagramClient, InstagramMedia, KickClient,
-    KickStream, OpenSeaClient, OpenSeaCollectionInfo, OpenSeaCollectionStats, OpenSeaSale,
-    RedditClient, RedditPost, RssClient, TikTokClient, TikTokOAuthClient, TikTokVideo, TokenCipher,
-    TwitchChannelSearchResult, TwitchClient, XClient, XPost, YouTubeClient, YouTubeSearchResult,
-    env_flag_is_true, first_env_flag_is_true, format_rss_message, format_twitch_message,
-    format_youtube_message,
+    KickStream, RssClient, TikTokClient, TikTokOAuthClient, TikTokVideo, TokenCipher,
+    TwitchChannelSearchResult, TwitchClient, YouTubeClient, YouTubeSearchResult, env_flag_is_true,
+    first_env_flag_is_true, format_rss_message, format_twitch_message, format_youtube_message,
 };
 use helper_store::{
     BlueskySubscriptionRecord, InstagramSubscriptionRecord, KickSubscriptionRecord,
-    RedditSubscriptionRecord, RssSubscriptionRecord, Store, TikTokSubscriptionRecord,
-    TwitchSubscriptionRecord, XSubscriptionRecord, YouTubeSubscriptionRecord,
+    RssSubscriptionRecord, Store, TikTokSubscriptionRecord, TwitchSubscriptionRecord,
+    YouTubeSubscriptionRecord,
 };
 use rand::seq::SliceRandom;
 use reqwest::Client as HttpClient;
@@ -336,8 +334,6 @@ struct Handler {
     rss: Option<RssClient>,
     twitch: Option<TwitchClient>,
     bluesky: Option<BlueskyClient>,
-    reddit: Option<RedditClient>,
-    x: Option<XClient>,
     tiktok: Option<TikTokClient>,
     tiktok_oauth: Option<TikTokOAuthClient>,
     token_cipher: Option<TokenCipher>,
@@ -345,7 +341,6 @@ struct Handler {
     kick: Option<KickClient>,
     coingecko: Option<CoinGeckoClient>,
     gas: GasClient,
-    opensea: OpenSeaClient,
 }
 
 #[async_trait]
@@ -443,20 +438,6 @@ impl EventHandler for Handler {
                     run_bluesky_worker(http, store, bluesky).await;
                 });
             }
-            if let Some(reddit) = self.reddit.clone() {
-                let store = self.store.clone();
-                let http = ctx.http.clone();
-                tokio::spawn(async move {
-                    run_reddit_worker(http, store, reddit).await;
-                });
-            }
-            if let Some(x) = self.x.clone() {
-                let store = self.store.clone();
-                let http = ctx.http.clone();
-                tokio::spawn(async move {
-                    run_x_worker(http, store, x).await;
-                });
-            }
             if self.tiktok.is_some() || self.tiktok_oauth.is_some() {
                 let store = self.store.clone();
                 let http = ctx.http.clone();
@@ -501,14 +482,6 @@ impl EventHandler for Handler {
                 let gas = self.gas.clone();
                 tokio::spawn(async move {
                     run_gas_tracker_worker(http, store, gas).await;
-                });
-            }
-            {
-                let store = self.store.clone();
-                let http = ctx.http.clone();
-                let opensea = self.opensea.clone();
-                tokio::spawn(async move {
-                    run_opensea_worker(http, store, opensea).await;
                 });
             }
         }
@@ -1012,36 +985,6 @@ impl EventHandler for Handler {
                     .add_string_choice("Arbitrum", "arbitrum")
                     .add_string_choice("Base", "base")
                     .required(false),
-                ),
-            CreateCommand::new("nft-stats")
-                .description("Show read-only OpenSea collection statistics")
-                .add_option(
-                    CreateCommandOption::new(
-                        serenity::all::CommandOptionType::String,
-                        "collection",
-                        "OpenSea collection slug",
-                    )
-                    .required(true),
-                ),
-            CreateCommand::new("nft-query")
-                .description("Query read-only information about an OpenSea collection")
-                .add_option(
-                    CreateCommandOption::new(
-                        serenity::all::CommandOptionType::String,
-                        "collection",
-                        "OpenSea collection slug",
-                    )
-                    .required(true),
-                ),
-            CreateCommand::new("nft-sales")
-                .description("Show recent read-only OpenSea sales")
-                .add_option(
-                    CreateCommandOption::new(
-                        serenity::all::CommandOptionType::String,
-                        "collection",
-                        "OpenSea collection slug",
-                    )
-                    .required(true),
                 ),
             CreateCommand::new("search")
                 .description("Search an approved knowledge provider")
@@ -3855,8 +3798,6 @@ pub async fn run(config: &Config) -> Result<()> {
             rss: Some(RssClient::new()),
             twitch: TwitchClient::from_env(),
             bluesky: Some(BlueskyClient::new()),
-            reddit: RedditClient::from_env(),
-            x: XClient::from_env(),
             tiktok: TikTokClient::from_env(),
             tiktok_oauth: TikTokOAuthClient::from_env(),
             token_cipher: TokenCipher::new(&config.session_secret).ok(),
@@ -3864,7 +3805,6 @@ pub async fn run(config: &Config) -> Result<()> {
             kick: KickClient::from_env(),
             coingecko: Some(CoinGeckoClient::new()),
             gas: GasClient::new(),
-            opensea: OpenSeaClient::new(),
         })
         .application_id(config.discord_application_id.into())
         .await?;
@@ -4143,64 +4083,6 @@ fn format_gas_quote(quote: &GasQuote) -> String {
     )
 }
 
-fn format_nft_stats(stats: &OpenSeaCollectionStats) -> String {
-    let floor = stats
-        .floor_price
-        .map(|value| format!("{value:.4} ETH"))
-        .unwrap_or_else(|| "n/a".into());
-    let volume = stats
-        .volume
-        .map(|value| format!("{value:.4} ETH"))
-        .unwrap_or_else(|| "n/a".into());
-    let sales = stats
-        .sales
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "n/a".into());
-    format!(
-        "**OpenSea — {}**\nFloor: {floor}\nVolume: {volume}\nSales: {sales}\n\nRead-only collection data; not financial advice.",
-        stats.slug
-    )
-}
-
-fn format_nft_collection(info: &OpenSeaCollectionInfo) -> String {
-    let title = info.name.as_deref().unwrap_or(info.slug.as_str());
-    let description = info
-        .description
-        .as_deref()
-        .map(|value| truncate(value, 600))
-        .unwrap_or_else(|| "No public description was provided.".into());
-    let external = info
-        .external_url
-        .as_deref()
-        .map(|url| format!("\n{url}"))
-        .unwrap_or_default();
-    format!(
-        "**{title}** (`{}`)\n{}{}\n\nRead-only OpenSea collection data.",
-        info.slug, description, external
-    )
-    .chars()
-    .take(2_000)
-    .collect()
-}
-
-fn format_nft_sales(sales: &[OpenSeaSale]) -> String {
-    let rows = sales.iter().take(10).map(|sale| {
-        let item = sale.item.as_deref().unwrap_or("item");
-        let price = sale.price.as_deref().unwrap_or("price unavailable");
-        format!("• {item} — {price} (event {})", sale.event_id)
-    });
-    let mut content = format!(
-        "**Recent OpenSea sales — {}**\n{}",
-        sales
-            .first()
-            .map(|sale| sale.collection.as_str())
-            .unwrap_or("collection"),
-        rows.collect::<Vec<_>>().join("\n")
-    );
-    content.push_str("\n\nRead-only collection data; not financial advice.");
-    content.chars().take(2_000).collect()
-}
-
 async fn run_gas_tracker_worker(http: Arc<serenity::http::Http>, store: Store, gas: GasClient) {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     loop {
@@ -4310,158 +4192,6 @@ async fn run_gas_tracker_worker(http: Arc<serenity::http::Http>, store: Store, g
                 "web3_gas_tracker.last_poll_at",
                 &now.to_string(),
             );
-        }
-    }
-}
-
-async fn run_opensea_worker(http: Arc<serenity::http::Http>, store: Store, opensea: OpenSeaClient) {
-    let mut interval = tokio::time::interval(Duration::from_secs(60));
-    loop {
-        interval.tick().await;
-        for key in ["web3.nft_stats", "web3.nft_sales"] {
-            let rows = match store.enabled_feature_settings(key) {
-                Ok(rows) => rows,
-                Err(error) => {
-                    tracing::error!(%error, %key, "OpenSea worker could not load settings");
-                    continue;
-                }
-            };
-            let now = Utc::now().timestamp_millis();
-            for setting in rows {
-                if !feature_enabled(&store, &setting.guild_id, key, None) {
-                    continue;
-                }
-                let config = serde_json::from_str::<serde_json::Value>(&setting.config_json)
-                    .unwrap_or_default();
-                let Some(object) = config.as_object() else {
-                    continue;
-                };
-                let projection_prefix = key.replace('.', "_");
-                let interval_seconds = setting_i64(
-                    &store,
-                    &setting.guild_id,
-                    &format!("{projection_prefix}.interval_seconds"),
-                    object
-                        .get("intervalSeconds")
-                        .and_then(serde_json::Value::as_i64)
-                        .unwrap_or(900),
-                )
-                .clamp(300, 86_400);
-                let last_poll_key = if key == "web3.nft_stats" {
-                    "web3_nft_stats.last_poll_at"
-                } else {
-                    "web3_nft_sales.last_poll_at"
-                };
-                let last_poll = setting_i64(&store, &setting.guild_id, last_poll_key, 0);
-                if last_poll > 0 && now.saturating_sub(last_poll) < interval_seconds * 1_000 {
-                    continue;
-                }
-                let Some(channel_id) = setting_string(
-                    &store,
-                    &setting.guild_id,
-                    &format!("{projection_prefix}.target_channel_id"),
-                )
-                .or_else(|| {
-                    object
-                        .get("targetChannelId")
-                        .and_then(serde_json::Value::as_str)
-                        .map(ToOwned::to_owned)
-                })
-                .and_then(|value| value.parse::<u64>().ok()) else {
-                    continue;
-                };
-                let Some(collection) = setting_string(
-                    &store,
-                    &setting.guild_id,
-                    &format!("{projection_prefix}.collection_slug"),
-                )
-                .or_else(|| {
-                    object
-                        .get("collectionSlug")
-                        .and_then(serde_json::Value::as_str)
-                        .map(ToOwned::to_owned)
-                }) else {
-                    continue;
-                };
-                let mut new_event_id = None;
-                let content = if key == "web3.nft_stats" {
-                    match opensea.collection_stats(&collection).await {
-                        Ok(stats) => {
-                            let template = setting_string(
-                                &store,
-                                &setting.guild_id,
-                                &format!("{projection_prefix}.message_template"),
-                            )
-                            .or_else(|| {
-                                object
-                                    .get("messageTemplate")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(ToOwned::to_owned)
-                            })
-                            .unwrap_or_else(|| "OpenSea update: {collection}".into());
-                            template
-                                .replace("{collection}", &stats.slug)
-                                .replace("{stats}", &format_nft_stats(&stats))
-                                .chars()
-                                .take(2_000)
-                                .collect::<String>()
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, guild_id = %setting.guild_id, "OpenSea stats delivery failed");
-                            continue;
-                        }
-                    }
-                } else {
-                    let max_results = setting_u64(
-                        &store,
-                        &setting.guild_id,
-                        &format!("{projection_prefix}.max_results"),
-                        object
-                            .get("maxResults")
-                            .and_then(serde_json::Value::as_u64)
-                            .unwrap_or(5),
-                    )
-                    .clamp(1, 10) as usize;
-                    let sales = match opensea.sales(&collection, max_results).await {
-                        Ok(sales) => sales,
-                        Err(error) => {
-                            tracing::warn!(%error, guild_id = %setting.guild_id, "OpenSea sales delivery failed");
-                            continue;
-                        }
-                    };
-                    let Some(latest) = sales.first() else {
-                        let _ =
-                            store.set_setting(&setting.guild_id, last_poll_key, &now.to_string());
-                        continue;
-                    };
-                    let event_key = "web3_nft_sales.last_event_id";
-                    if setting_string(&store, &setting.guild_id, event_key).as_deref()
-                        == Some(latest.event_id.as_str())
-                    {
-                        let _ =
-                            store.set_setting(&setting.guild_id, last_poll_key, &now.to_string());
-                        continue;
-                    }
-                    new_event_id = Some(latest.event_id.clone());
-                    format_nft_sales(&sales)
-                };
-                if ChannelId::new(channel_id)
-                    .say(&http, content)
-                    .await
-                    .is_err()
-                {
-                    tracing::warn!(guild_id = %setting.guild_id, %key, "OpenSea Discord delivery failed");
-                    continue;
-                }
-                if let Some(event_id) = new_event_id {
-                    let _ = store.set_setting(
-                        &setting.guild_id,
-                        "web3_nft_sales.last_event_id",
-                        &event_id,
-                    );
-                }
-                let _ = store.set_setting(&setting.guild_id, last_poll_key, &now.to_string());
-            }
         }
     }
 }
@@ -4892,210 +4622,6 @@ fn format_bluesky_message(template: &str, mention: &str, post: &BlueskyPost) -> 
         .replace("{url}", &post.url)
         .replace("{created_at}", &post.created_at)
         .replace("{uri}", &post.uri);
-    let rendered = if mention.is_empty() {
-        rendered
-    } else {
-        format!("{mention} {rendered}")
-    };
-    rendered.chars().take(2_000).collect()
-}
-
-async fn run_reddit_worker(http: Arc<serenity::http::Http>, store: Store, reddit: RedditClient) {
-    let mut interval = tokio::time::interval(Duration::from_secs(15));
-    loop {
-        interval.tick().await;
-        if !env_flag_is_true("REDDIT_COMMERCIAL_APPROVED") {
-            continue;
-        }
-        let due = match store.due_reddit_subscriptions(Utc::now().timestamp_millis(), 25) {
-            Ok(rows) => rows,
-            Err(error) => {
-                tracing::error!(%error, "reddit worker could not load subscriptions");
-                continue;
-            }
-        };
-        for subscription in due {
-            if !feature_enabled(&store, &subscription.guild_id, "social.reddit", None) {
-                let next = Utc::now().timestamp_millis() + subscription.interval_seconds * 1_000;
-                let _ = store.update_reddit_poll(
-                    subscription.id,
-                    subscription.last_post_id.as_deref(),
-                    next,
-                    subscription.failure_count,
-                    Some("feature_disabled"),
-                );
-                continue;
-            }
-            if let Err(error) =
-                process_reddit_subscription(&http, &store, &reddit, &subscription).await
-            {
-                tracing::warn!(%error, subscription_id = subscription.id, "reddit notification failed");
-            }
-        }
-    }
-}
-
-async fn process_reddit_subscription(
-    http: &serenity::http::Http,
-    store: &Store,
-    reddit: &RedditClient,
-    subscription: &RedditSubscriptionRecord,
-) -> Result<()> {
-    let now = Utc::now().timestamp_millis();
-    let interval_ms = subscription.interval_seconds.clamp(300, 86_400) * 1_000;
-    let next = || now + interval_ms;
-    let latest = match reddit.latest_post(&subscription.source_subreddit).await {
-        Ok(post) => post,
-        Err(error) => {
-            let failures = subscription.failure_count.saturating_add(1).min(8);
-            let backoff = (subscription.interval_seconds * (1_i64 << failures.min(4))).min(3_600);
-            store.update_reddit_poll(
-                subscription.id,
-                subscription.last_post_id.as_deref(),
-                now + backoff * 1_000,
-                failures,
-                Some("reddit_provider_failed"),
-            )?;
-            return Err(error);
-        }
-    };
-    let Some(post) = latest else {
-        store.update_reddit_poll(
-            subscription.id,
-            subscription.last_post_id.as_deref(),
-            next(),
-            0,
-            None,
-        )?;
-        return Ok(());
-    };
-    if subscription.last_post_id.is_none() {
-        store.update_reddit_poll(subscription.id, Some(&post.id), next(), 0, None)?;
-        return Ok(());
-    }
-    if subscription.last_post_id.as_deref() == Some(post.id.as_str()) {
-        store.update_reddit_poll(subscription.id, Some(&post.id), next(), 0, None)?;
-        return Ok(());
-    }
-    let content =
-        format_reddit_message(&subscription.message_template, &subscription.mention, &post);
-    let channel_id = subscription
-        .target_channel_id
-        .parse::<u64>()
-        .map_err(|_| anyhow::anyhow!("invalid_discord_channel_id"))?;
-    ChannelId::new(channel_id).say(http, content).await?;
-    store.update_reddit_poll(subscription.id, Some(&post.id), next(), 0, None)?;
-    Ok(())
-}
-
-fn format_reddit_message(template: &str, mention: &str, post: &RedditPost) -> String {
-    let rendered = template
-        .replace("{subreddit}", &post.subreddit)
-        .replace("{title}", &post.title)
-        .replace("{text}", &post.text)
-        .replace("{url}", &post.url)
-        .replace("{permalink}", &post.permalink)
-        .replace("{created_at}", &post.created_at);
-    let rendered = if mention.is_empty() {
-        rendered
-    } else {
-        format!("{mention} {rendered}")
-    };
-    rendered.chars().take(2_000).collect()
-}
-
-async fn run_x_worker(http: Arc<serenity::http::Http>, store: Store, x: XClient) {
-    let mut interval = tokio::time::interval(Duration::from_secs(30));
-    loop {
-        interval.tick().await;
-        if !first_env_flag_is_true(&["X_API_APPROVED", "X_COMMERCIAL_APPROVED"]) {
-            continue;
-        }
-        let due = match store.due_x_subscriptions(Utc::now().timestamp_millis(), 25) {
-            Ok(rows) => rows,
-            Err(error) => {
-                tracing::error!(%error, "x worker could not load subscriptions");
-                continue;
-            }
-        };
-        for subscription in due {
-            if !feature_enabled(&store, &subscription.guild_id, "social.x", None) {
-                let next = Utc::now().timestamp_millis() + subscription.interval_seconds * 1_000;
-                let _ = store.update_x_poll(
-                    subscription.id,
-                    subscription.last_post_id.as_deref(),
-                    next,
-                    subscription.failure_count,
-                    Some("feature_disabled"),
-                );
-                continue;
-            }
-            if let Err(error) = process_x_subscription(&http, &store, &x, &subscription).await {
-                tracing::warn!(%error, subscription_id = subscription.id, "x notification failed");
-            }
-        }
-    }
-}
-
-async fn process_x_subscription(
-    http: &serenity::http::Http,
-    store: &Store,
-    x: &XClient,
-    subscription: &XSubscriptionRecord,
-) -> Result<()> {
-    let now = Utc::now().timestamp_millis();
-    let interval_ms = subscription.interval_seconds.clamp(900, 86_400) * 1_000;
-    let next = || now + interval_ms;
-    let latest = match x.latest_post(&subscription.source_handle).await {
-        Ok(post) => post,
-        Err(error) => {
-            let failures = subscription.failure_count.saturating_add(1).min(8);
-            let backoff = (subscription.interval_seconds * (1_i64 << failures.min(4))).min(3_600);
-            store.update_x_poll(
-                subscription.id,
-                subscription.last_post_id.as_deref(),
-                now + backoff * 1_000,
-                failures,
-                Some("x_provider_failed"),
-            )?;
-            return Err(error);
-        }
-    };
-    let Some(post) = latest else {
-        store.update_x_poll(
-            subscription.id,
-            subscription.last_post_id.as_deref(),
-            next(),
-            0,
-            None,
-        )?;
-        return Ok(());
-    };
-    if subscription.last_post_id.is_none()
-        || subscription.last_post_id.as_deref() == Some(post.id.as_str())
-    {
-        store.update_x_poll(subscription.id, Some(&post.id), next(), 0, None)?;
-        return Ok(());
-    }
-    let content = format_x_message(&subscription.message_template, &subscription.mention, &post);
-    let channel_id = subscription
-        .target_channel_id
-        .parse::<u64>()
-        .map_err(|_| anyhow::anyhow!("invalid_discord_channel_id"))?;
-    ChannelId::new(channel_id).say(http, content).await?;
-    store.update_x_poll(subscription.id, Some(&post.id), next(), 0, None)?;
-    Ok(())
-}
-
-fn format_x_message(template: &str, mention: &str, post: &XPost) -> String {
-    let rendered = template
-        .replace("{handle}", &post.handle)
-        // Keep templates saved by the earlier panel version working.
-        .replace("{sourceHandle}", &post.handle)
-        .replace("{text}", &post.text)
-        .replace("{url}", &post.url)
-        .replace("{created_at}", &post.created_at)
-        .replace("{id}", &post.id);
     let rendered = if mention.is_empty() {
         rendered
     } else {
@@ -7184,94 +6710,6 @@ impl Handler {
                     Err(error) => {
                         warn!(%error, guild_id = %guild_text, network, "gas provider request failed");
                         "The configured gas provider is unavailable right now.".to_string()
-                    }
-                }
-            }
-            "nft-stats" => {
-                let Some(guild_id) = command.guild_id else {
-                    return respond(ctx, command, "This command can only be used in a server.").await;
-                };
-                let guild_text = guild_id.to_string();
-                if !feature_enabled(&self.store, &guild_text, "web3.nft_stats", None) {
-                    return respond(ctx, command, "NFT statistics are disabled in this server. Enable them in the dashboard.").await;
-                }
-                let configured_collection = setting_string(
-                    &self.store,
-                    &guild_text,
-                    "web3_nft_stats.collection_slug",
-                );
-                let collection = option_string(command, "collection")
-                    .map(ToOwned::to_owned)
-                    .or(configured_collection)
-                    .unwrap_or_default();
-                match self.opensea.collection_stats(&collection).await {
-                    Ok(stats) => format_nft_stats(&stats),
-                    Err(error) => {
-                        warn!(%error, guild_id = %guild_text, "OpenSea stats request failed");
-                        "OpenSea is unavailable or not configured. Please try again later.".to_string()
-                    }
-                }
-            }
-            "nft-query" => {
-                let Some(guild_id) = command.guild_id else {
-                    return respond(ctx, command, "This command can only be used in a server.").await;
-                };
-                let guild_text = guild_id.to_string();
-                if !feature_enabled(&self.store, &guild_text, "web3.nft_queries", None) {
-                    return respond(
-                        ctx,
-                        command,
-                        "NFT collection queries are disabled in this server. Enable them in the dashboard.",
-                    )
-                    .await;
-                }
-                let configured_collection = setting_string(
-                    &self.store,
-                    &guild_text,
-                    "web3_nft_queries.collection_slug",
-                );
-                let collection = option_string(command, "collection")
-                    .map(ToOwned::to_owned)
-                    .or(configured_collection)
-                    .unwrap_or_default();
-                match self.opensea.collection_info(&collection).await {
-                    Ok(info) => format_nft_collection(&info),
-                    Err(error) => {
-                        warn!(%error, guild_id = %guild_text, "OpenSea collection query failed");
-                        "OpenSea is unavailable or not configured. Please try again later.".to_string()
-                    }
-                }
-            }
-            "nft-sales" => {
-                let Some(guild_id) = command.guild_id else {
-                    return respond(ctx, command, "This command can only be used in a server.").await;
-                };
-                let guild_text = guild_id.to_string();
-                if !feature_enabled(&self.store, &guild_text, "web3.nft_sales", None) {
-                    return respond(ctx, command, "NFT sales alerts are disabled in this server. Enable them in the dashboard.").await;
-                }
-                let configured_collection = setting_string(
-                    &self.store,
-                    &guild_text,
-                    "web3_nft_sales.collection_slug",
-                );
-                let collection = option_string(command, "collection")
-                    .map(ToOwned::to_owned)
-                    .or(configured_collection)
-                    .unwrap_or_default();
-                let max_results = setting_u64(
-                    &self.store,
-                    &guild_text,
-                    "web3_nft_sales.max_results",
-                    5,
-                )
-                .clamp(1, 10) as usize;
-                match self.opensea.sales(&collection, max_results).await {
-                    Ok(sales) if sales.is_empty() => "No recent OpenSea sales were found.".to_string(),
-                    Ok(sales) => format_nft_sales(&sales),
-                    Err(error) => {
-                        warn!(%error, guild_id = %guild_text, "OpenSea sales request failed");
-                        "OpenSea is unavailable or not configured. Please try again later.".to_string()
                     }
                 }
             }
@@ -11522,22 +10960,9 @@ fn feature_maturity_allows_runtime(key: &str) -> bool {
             "ARBITRUM_RPC_URL",
             "BASE_RPC_URL",
         ]),
-        (helper_contracts::FeatureMaturity::Beta, "web3.nft_stats")
-        | (helper_contracts::FeatureMaturity::Beta, "web3.nft_queries")
-        | (helper_contracts::FeatureMaturity::Beta, "web3.nft_sales") => {
-            configured("OPENSEA_API_KEY")
-        }
         // RSS and podcasts use public HTTP feeds and the worker's SSRF
         // checks; there is no provider secret to require here.
         (helper_contracts::FeatureMaturity::Beta, "social.rss") => true,
-        (helper_contracts::FeatureMaturity::Blocked, "social.reddit") => {
-            approved(&["REDDIT_COMMERCIAL_APPROVED"])
-                && configured("REDDIT_CLIENT_ID")
-                && configured("REDDIT_CLIENT_SECRET")
-        }
-        (helper_contracts::FeatureMaturity::Blocked, "social.x") => {
-            approved(&["X_API_APPROVED", "X_COMMERCIAL_APPROVED"]) && configured("X_BEARER_TOKEN")
-        }
         (helper_contracts::FeatureMaturity::Blocked, "social.tiktok") => {
             approved(&["TIKTOK_APP_APPROVED", "TIKTOK_DISPLAY_API_APPROVED"])
                 && configured("TIKTOK_ACCESS_TOKEN")
@@ -11673,9 +11098,6 @@ fn command_feature_key(name: &str) -> Option<&'static str> {
         "serverstats" => "insights.stats",
         "crypto" => "web3.crypto_queries",
         "gas" => "web3.gas_tracker",
-        "nft-stats" => "web3.nft_stats",
-        "nft-query" => "web3.nft_queries",
-        "nft-sales" => "web3.nft_sales",
         "search" => "utility.search",
         "emojis" => "utility.emojis",
         "invites" => "management.invite_tracker",
@@ -11715,9 +11137,6 @@ fn feature_title(key: &str) -> &'static str {
         "insights.stats" => "Server statistics",
         "web3.crypto_queries" => "Crypto queries",
         "web3.gas_tracker" => "Gas tracker",
-        "web3.nft_stats" => "NFT statistics",
-        "web3.nft_queries" => "NFT queries",
-        "web3.nft_sales" => "NFT sales",
         "utility.search" => "Search",
         "utility.emojis" => "Emojis",
         "management.invite_tracker" => "Invite tracker",
@@ -12508,17 +11927,16 @@ fn approved_wallet_contract(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        HELPER_LANGUAGE_SETTING, HELPER_LOCALES, OpenSeaCollectionInfo, XPost, account_age_days,
+        HELPER_LANGUAGE_SETTING, HELPER_LOCALES, account_age_days,
         adapter::{DiscordAdapter, Effect, FakeDiscordAdapter},
         anti_nuke_containment_deadline, anti_spam_content_metrics, command_feature_key,
         custom_command_channel_ignored, custom_command_is_staff, english_bot_text,
         evaluate_join_gate_verification, evaluate_nickname, feature_enabled, feature_title,
-        format_nft_collection, format_x_message, helper_locale, helper_locale_for_guild,
-        instagram_access_allowed, is_destructive_audit_action, join_burst_armed,
-        parse_custom_command, parse_duration, parse_reminder_delay, parse_scheduled_event_window,
-        reminder_repeat_interval_ms, render_custom_command, rss_retry_seconds,
-        scheduled_action_feature, shadow_mode_enabled, should_cleanup_temp_channel,
-        template_message,
+        helper_locale, helper_locale_for_guild, instagram_access_allowed,
+        is_destructive_audit_action, join_burst_armed, parse_custom_command, parse_duration,
+        parse_reminder_delay, parse_scheduled_event_window, reminder_repeat_interval_ms,
+        render_custom_command, rss_retry_seconds, scheduled_action_feature, shadow_mode_enabled,
+        should_cleanup_temp_channel, template_message,
     };
     use chrono::TimeZone;
     use helper_store::Store;
@@ -12548,30 +11966,6 @@ mod tests {
             .set_setting("guild", HELPER_LANGUAGE_SETTING, "pt-BR")
             .unwrap();
         assert_eq!(helper_locale_for_guild(&store, "guild").unwrap(), "en");
-    }
-
-    #[test]
-    fn x_message_renderer_expands_the_documented_placeholders() {
-        let post = XPost {
-            id: "123".into(),
-            handle: "vozen".into(),
-            text: "A new update".into(),
-            created_at: "2026-08-23T12:00:00Z".into(),
-            url: "https://x.com/vozen/status/123".into(),
-        };
-
-        assert_eq!(
-            format_x_message(
-                "@here @{handle}/{sourceHandle}: {text} | {url} | {created_at} | {id}",
-                "",
-                &post
-            ),
-            "@here @vozen/vozen: A new update | https://x.com/vozen/status/123 | 2026-08-23T12:00:00Z | 123"
-        );
-        assert_eq!(
-            format_x_message("{text}", "<@&123>", &post),
-            "<@&123> A new update"
-        );
     }
 
     #[test]
@@ -12788,16 +12182,6 @@ mod tests {
                         && store_source.contains("due_twitch_subscriptions")
                         && source.contains("process_twitch_subscription")
                 }
-                "social.reddit" => {
-                    api_source.contains("publish_reddit_feature_setting")
-                        && store_source.contains("due_reddit_subscriptions")
-                        && source.contains("process_reddit_subscription")
-                }
-                "social.x" => {
-                    api_source.contains("publish_x_feature_setting")
-                        && store_source.contains("due_x_subscriptions")
-                        && source.contains("process_x_subscription")
-                }
                 "social.tiktok" => {
                     api_source.contains("publish_tiktok_feature_setting")
                         && store_source.contains("due_tiktok_subscriptions")
@@ -12839,10 +12223,6 @@ mod tests {
                     source.contains("run_gas_tracker_worker")
                         && source.contains("web3.gas_tracker.interval_seconds")
                 }
-                "web3.nft_stats" | "web3.nft_sales" => {
-                    source.contains("run_opensea_worker")
-                        && source.contains("enabled_feature_settings(key)")
-                }
                 "web3.crypto_stats" => {
                     source.contains("run_crypto_stats_worker")
                         && source.contains("enabled_feature_settings(\"web3.crypto_stats\")")
@@ -12866,20 +12246,6 @@ mod tests {
         assert_eq!(parse_duration("10weeks"), None);
         assert_eq!(account_age_days(172800, 86400), 1);
         assert_eq!(account_age_days(86400, 172800), 0);
-    }
-
-    #[test]
-    fn nft_query_preview_is_bounded_and_read_only() {
-        let message = format_nft_collection(&OpenSeaCollectionInfo {
-            slug: "vozen-collectibles".into(),
-            name: Some("Vozen Collectibles".into()),
-            description: Some("A public collection description.".into()),
-            image_url: None,
-            external_url: Some("https://example.com/collection".into()),
-        });
-        assert!(message.contains("Vozen Collectibles"));
-        assert!(message.contains("Read-only OpenSea collection data."));
-        assert!(message.len() <= 2_000);
     }
 
     #[test]
@@ -13128,7 +12494,6 @@ mod tests {
             ("rank", "studio.rank_card"),
             ("leaderboard", "community.leaderboard"),
             ("crypto", "web3.crypto_queries"),
-            ("nft-sales", "web3.nft_sales"),
             ("giveaway-start", "community.giveaways"),
             ("poll", "management.polls"),
             ("workflow-create", "management.workflows"),

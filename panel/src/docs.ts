@@ -37,11 +37,9 @@ const featureSlugs: Record<string, string> = {
   'social.instagram': 'alerts/instagram',
   'social.kick': 'alerts/kick',
   'social.podcasts': 'alerts/podcasts',
-  'social.reddit': 'alerts/reddit',
   'social.rss': 'alerts/rss',
   'social.tiktok': 'alerts/tiktok',
   'social.twitch': 'alerts/twitch',
-  'social.x': 'alerts/x',
   'social.youtube': 'alerts/youtube',
   'studio.rank_card': 'roles-and-progression/xp-card',
   'support.tickets': 'support/tickets',
@@ -57,9 +55,6 @@ const featureSlugs: Record<string, string> = {
   'web3.crypto_stats': 'web3/crypto-statistics',
   'web3.gas_tracker': 'web3/gas-tracker',
   'web3.gating': 'web3/wallet-gating',
-  'web3.nft_queries': 'web3/nft-queries',
-  'web3.nft_sales': 'web3/nft-sales',
-  'web3.nft_stats': 'web3/nft-statistics',
 };
 
 export function docsUrlForFeature(key: string | undefined): string | null {
