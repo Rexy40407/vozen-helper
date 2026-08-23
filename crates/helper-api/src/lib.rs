@@ -695,16 +695,18 @@ async fn tiktok_oauth_status(
         .store
         .tiktok_grant(&claims.guild_id)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let sandbox = tiktok_sandbox_enabled();
     Ok(Json(match grant {
         Some(grant) => serde_json::json!({
             "connected": true,
+            "sandbox": sandbox,
             "openId": grant.open_id,
             "displayName": grant.display_name,
             "scopes": grant.scopes.split(',').map(str::trim).filter(|v| !v.is_empty()).collect::<Vec<_>>(),
             "accessExpiresAt": grant.access_expires_at,
             "updatedAt": grant.updated_at
         }),
-        None => serde_json::json!({"connected": false}),
+        None => serde_json::json!({"connected": false, "sandbox": sandbox}),
     }))
 }
 
@@ -3443,6 +3445,14 @@ fn tiktok_approved() -> bool {
     first_env_flag_is_true(&["TIKTOK_APP_APPROVED", "TIKTOK_DISPLAY_API_APPROVED"])
 }
 
+/// TikTok requires first-time Display API integrations to demonstrate the
+/// complete flow with developer-portal test users before App Review.  This
+/// flag exposes that real OAuth-backed flow without claiming production
+/// approval or enabling the legacy global access-token fallback.
+fn tiktok_sandbox_enabled() -> bool {
+    first_env_flag_is_true(&["TIKTOK_SANDBOX_MODE"])
+}
+
 async fn tiktok_health(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -3456,12 +3466,14 @@ async fn tiktok_health(
     let oauth_configured = TikTokOAuthClient::from_env().is_some();
     let configured = connected || state.tiktok.is_some();
     let approved = tiktok_approved();
+    let sandbox = tiktok_sandbox_enabled();
     Ok(Json(serde_json::json!({
         "provider": "tiktok",
         "configured": configured,
         "connected": connected,
         "oauthConfigured": oauth_configured,
         "apiApproval": approved,
+        "sandbox": sandbox,
         "status": if connected { "ready" } else if !oauth_configured && !configured { "dependency_down" } else { "authorization_required" },
         "readOnly": true,
         "scopes": ["user.info.basic", "video.list"],
@@ -8872,7 +8884,10 @@ fn provider_runtime_ready(state: &ApiState, key: &str) -> bool {
         "web3.nft_stats" | "web3.nft_queries" | "web3.nft_sales" => state.opensea.has_api_key(),
         "social.reddit" => state.reddit.is_some() && reddit_approved(),
         "social.x" => state.x.is_some() && x_approved(),
-        "social.tiktok" => state.tiktok.is_some() && tiktok_approved(),
+        "social.tiktok" => {
+            (state.tiktok.is_some() && tiktok_approved())
+                || (TikTokOAuthClient::from_env().is_some() && tiktok_sandbox_enabled())
+        }
         "social.instagram" => {
             state
                 .instagram
@@ -8983,7 +8998,10 @@ fn provider_dependencies_ready(state: &ApiState, key: &str) -> bool {
         "web3.nft_stats" | "web3.nft_queries" | "web3.nft_sales" => state.opensea.has_api_key(),
         "social.reddit" => state.reddit.is_some() && reddit_approved(),
         "social.x" => state.x.is_some() && x_approved(),
-        "social.tiktok" => state.tiktok.is_some() && tiktok_approved(),
+        "social.tiktok" => {
+            (state.tiktok.is_some() && tiktok_approved())
+                || (TikTokOAuthClient::from_env().is_some() && tiktok_sandbox_enabled())
+        }
         "social.instagram" => {
             state
                 .instagram

@@ -4181,6 +4181,11 @@ function TikTokConnection() {
   return (
     <section className="card config-section">
       <small className="eyebrow">CONTA TIKTOK</small>
+      {status?.sandbox && (
+        <p className="tip feature-requirement">
+          Sandbox de revisão ativo — esta ligação usa uma conta de teste autorizada no TikTok Developer Portal.
+        </p>
+      )}
       <h3>{status?.connected ? 'TikTok ligado' : 'Liga a conta que publica os vídeos'}</h3>
       <p>
         {status?.connected

@@ -196,6 +196,7 @@ export type ExternalSubscription = {
 export type ExternalProvider = 'reddit' | 'x' | 'tiktok' | 'instagram' | 'kick' | 'bluesky';
 export type TikTokOAuthStatus = {
   connected: boolean;
+  sandbox?: boolean;
   openId?: string;
   displayName?: string;
   scopes?: string[];
