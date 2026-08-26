@@ -3600,15 +3600,10 @@ impl EventHandler for Handler {
                         let _ = ChannelId::new(channel)
                             .say(
                                 &ctx.http,
-                                format!(
-                                    "Anti-spam: <@{}> — {} ({})",
-                                    message.author.id,
-                                    decision.reason,
-                                    if decision.should_act {
-                                        "action"
-                                    } else {
-                                        "monitoring"
-                                    },
+                                anti_spam_log_message(
+                                    &message.author.id.to_string(),
+                                    &decision.matched,
+                                    decision.should_act,
                                 ),
                             )
                             .await;
@@ -3663,17 +3658,14 @@ impl EventHandler for Handler {
                         );
                         let warning_targets =
                             anti_spam_warning_targets(warning_delivery.as_deref());
-                        let reason = format!(
-                            "Automatic action carried out after anti-spam detected excessive message activity ({}).",
-                            decision.matched.join(", ")
-                        );
+                        let explanation = anti_spam_member_explanation(&decision.matched);
                         if warning_targets.chat
                             && let Err(error) = message
                                 .channel_id
                                 .say(
                                     &ctx.http,
                                     format!(
-                                        "<@{}>, you have received an automatic warning. Reason: {reason}",
+                                        "⚠️ <@{}>, please slow down. {explanation} The configured moderation action was applied.",
                                         message.author.id
                                     ),
                                 )
@@ -3692,7 +3684,7 @@ impl EventHandler for Handler {
                                 .direct_message(
                                     &ctx.http,
                                     CreateMessage::new().content(format!(
-                                        "You have received an automatic warning from Vozen Helper. Reason: {reason}"
+                                        "⚠️ You received an anti-spam warning from Vozen Helper. {explanation} The configured moderation action was applied."
                                     )),
                                 )
                                 .await
@@ -11497,6 +11489,57 @@ fn anti_spam_warning_targets(delivery: Option<&str>) -> AntiSpamWarningTargets {
     }
 }
 
+/// Turn internal anti-spam signal identifiers into an explanation that a
+/// member or moderator can understand without knowing implementation details.
+fn anti_spam_warning_reason(matched: &[String]) -> String {
+    let mut reasons = matched
+        .iter()
+        .filter_map(|signal| match signal.as_str() {
+            "flood" => Some("sending too many messages in a short time"),
+            "duplicate" => Some("repeating the same message"),
+            "mentions" => Some("mentioning too many people"),
+            "links" => Some("posting too many links"),
+            "caps" => Some("using too many capital letters"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    match reasons.len() {
+        0 => "unusual message activity".to_owned(),
+        1 => reasons[0].to_owned(),
+        2 => format!("{} and {}", reasons[0], reasons[1]),
+        _ => {
+            let last = reasons.pop().expect("multiple anti-spam reasons");
+            format!("{}, and {last}", reasons.join(", "))
+        }
+    }
+}
+
+fn anti_spam_log_message(user_id: &str, matched: &[String], should_act: bool) -> String {
+    let reason = anti_spam_warning_reason(matched);
+    let detection = if reason == "unusual message activity" {
+        format!("Anti-spam detected unusual message activity from <@{user_id}>.")
+    } else {
+        format!("Anti-spam detected that <@{user_id}> was {reason}.")
+    };
+    let outcome = if should_act {
+        "The configured moderation action was applied."
+    } else {
+        "Monitoring only; no moderation action was applied."
+    };
+
+    format!("⚠️ {detection} {outcome}")
+}
+
+fn anti_spam_member_explanation(matched: &[String]) -> String {
+    let reason = anti_spam_warning_reason(matched);
+    if reason == "unusual message activity" {
+        "Anti-spam detected unusual message activity.".to_owned()
+    } else {
+        format!("Anti-spam detected that you were {reason}.")
+    }
+}
+
 /// Measure content once before entering the shared anti-spam evaluator. URL
 /// tokens count toward the link rule but do not distort the uppercase ratio.
 fn anti_spam_content_metrics(content: &str) -> (u32, u32, u32) {
@@ -12075,10 +12118,11 @@ mod tests {
     use super::{
         HELPER_LANGUAGE_SETTING, HELPER_LOCALES, account_age_days,
         adapter::{DiscordAdapter, Effect, FakeDiscordAdapter},
-        anti_nuke_containment_deadline, anti_spam_content_metrics, anti_spam_warning_targets,
-        command_feature_key, custom_command_channel_ignored, custom_command_is_staff,
-        english_bot_text, evaluate_join_gate_verification, evaluate_nickname, feature_enabled,
-        feature_title, helper_locale, helper_locale_for_guild, instagram_access_allowed,
+        anti_nuke_containment_deadline, anti_spam_content_metrics, anti_spam_log_message,
+        anti_spam_warning_reason, anti_spam_warning_targets, command_feature_key,
+        custom_command_channel_ignored, custom_command_is_staff, english_bot_text,
+        evaluate_join_gate_verification, evaluate_nickname, feature_enabled, feature_title,
+        helper_locale, helper_locale_for_guild, instagram_access_allowed,
         is_destructive_audit_action, join_burst_armed, parse_custom_command, parse_duration,
         parse_reminder_delay, parse_scheduled_event_window, reminder_repeat_interval_ms,
         render_custom_command, rss_retry_seconds, scheduled_action_feature, shadow_mode_enabled,
@@ -12160,6 +12204,38 @@ mod tests {
         let invalid_targets = anti_spam_warning_targets(Some("invalid"));
         assert!(invalid_targets.chat);
         assert!(invalid_targets.dm);
+    }
+
+    #[test]
+    fn anti_spam_alerts_explain_the_detection_in_plain_language() {
+        let matched = vec!["flood".to_owned()];
+
+        assert_eq!(
+            anti_spam_warning_reason(&matched),
+            "sending too many messages in a short time"
+        );
+        assert_eq!(
+            anti_spam_log_message("42", &matched, true),
+            "⚠️ Anti-spam detected that <@42> was sending too many messages in a short time. The configured moderation action was applied."
+        );
+    }
+
+    #[test]
+    fn anti_spam_alerts_join_multiple_reasons_naturally() {
+        let matched = vec![
+            "duplicate".to_owned(),
+            "mentions".to_owned(),
+            "links".to_owned(),
+        ];
+
+        assert_eq!(
+            anti_spam_warning_reason(&matched),
+            "repeating the same message, mentioning too many people, and posting too many links"
+        );
+        assert_eq!(
+            anti_spam_log_message("42", &["future-rule".to_owned()], false),
+            "⚠️ Anti-spam detected unusual message activity from <@42>. Monitoring only; no moderation action was applied."
+        );
     }
 
     #[test]
