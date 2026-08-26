@@ -29,6 +29,11 @@ check(foundation.includes('flex: 0 0 44px'), 'XP color swatches must keep a squa
 check(foundation.includes('aspect-ratio: 1;'), 'XP color swatches must keep a circular aspect ratio');
 check(foundation.includes('max-width: 44px'), 'XP color swatches must not be compressed by flex layout');
 check(foundation.includes('--panel-control-height: 44px'), 'interactive controls need a 44px minimum token');
+check(
+  foundation.includes(".panel-main .toggle-field input[type='checkbox']")
+    && foundation.includes('min-height: 22px'),
+  'toggle controls must keep their compact horizontal dimensions inside a touch-friendly field',
+);
 check(foundation.includes('.panel-sidebar .nav'), 'sidebar navigation must be scoped and touch friendly');
 check(foundation.includes('prefers-reduced-motion'), 'motion must have a reduced-motion fallback');
 check(index.includes("font-src 'self'"), 'CSP must allow only self-hosted fonts');
