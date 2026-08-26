@@ -11518,17 +11518,17 @@ fn anti_spam_warning_reason(matched: &[String]) -> String {
 fn anti_spam_log_message(user_id: &str, matched: &[String], should_act: bool) -> String {
     let reason = anti_spam_warning_reason(matched);
     let detection = if reason == "unusual message activity" {
-        format!("Anti-spam detected unusual message activity from <@{user_id}>.")
+        format!("Unusual message activity was detected from <@{user_id}>.")
     } else {
-        format!("Anti-spam detected that <@{user_id}> was {reason}.")
+        format!("<@{user_id}> was {reason}.")
     };
     let outcome = if should_act {
-        "The configured moderation action was applied."
+        "Vozen Helper took the action selected in this server's settings."
     } else {
-        "Monitoring only; no moderation action was applied."
+        "No action was taken; this was logged for review."
     };
 
-    format!("⚠️ {detection} {outcome}")
+    format!("⚠️ Anti-spam alert: {detection} {outcome}")
 }
 
 fn anti_spam_member_explanation(matched: &[String]) -> String {
@@ -12216,7 +12216,7 @@ mod tests {
         );
         assert_eq!(
             anti_spam_log_message("42", &matched, true),
-            "⚠️ Anti-spam detected that <@42> was sending too many messages in a short time. The configured moderation action was applied."
+            "⚠️ Anti-spam alert: <@42> was sending too many messages in a short time. Vozen Helper took the action selected in this server's settings."
         );
     }
 
@@ -12234,7 +12234,7 @@ mod tests {
         );
         assert_eq!(
             anti_spam_log_message("42", &["future-rule".to_owned()], false),
-            "⚠️ Anti-spam detected unusual message activity from <@42>. Monitoring only; no moderation action was applied."
+            "⚠️ Anti-spam alert: Unusual message activity was detected from <@42>. No action was taken; this was logged for review."
         );
     }
 
