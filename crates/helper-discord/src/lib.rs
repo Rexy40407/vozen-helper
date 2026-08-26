@@ -3618,17 +3618,43 @@ impl EventHandler for Handler {
                             let _ = message.delete(&ctx.http).await;
                         }
                         if decision.timeout_seconds > 0 {
-                            let until = (chrono::Utc::now()
-                                + chrono::Duration::seconds(decision.timeout_seconds as i64))
-                            .to_rfc3339();
-                            let _ = guild_id
+                            let until = chrono::Utc::now()
+                                + chrono::Duration::seconds(decision.timeout_seconds as i64);
+                            match guild_id
                                 .edit_member(
                                     &ctx.http,
                                     message.author.id,
                                     serenity::all::EditMember::new()
-                                        .disable_communication_until(until),
+                                        .disable_communication_until(until.to_rfc3339()),
                                 )
-                                .await;
+                                .await
+                            {
+                                Ok(_) => {
+                                    let payload = serde_json::json!({
+                                        "expected_until_unix": until.timestamp(),
+                                    });
+                                    if let Err(error) = self.store.schedule_typed(
+                                        &guild_text,
+                                        "anti_spam_untimeout",
+                                        &message.author.id.to_string(),
+                                        until.timestamp_millis() + 1_500,
+                                        &payload.to_string(),
+                                    ) {
+                                        warn!(
+                                            %error,
+                                            guild_id = %guild_text,
+                                            member_id = %message.author.id,
+                                            "failed to schedule anti-spam timeout release"
+                                        );
+                                    }
+                                }
+                                Err(error) => warn!(
+                                    %error,
+                                    guild_id = %guild_text,
+                                    member_id = %message.author.id,
+                                    "failed to apply anti-spam timeout"
+                                ),
+                            }
                         }
                         let _ = message
                             .channel_id
@@ -11168,6 +11194,20 @@ fn scheduled_action_feature(action_type: &str) -> Option<&'static str> {
     }
 }
 
+fn should_clear_anti_spam_timeout(
+    expected_until_unix: i64,
+    current_until_unix: Option<i64>,
+    now_unix: i64,
+) -> bool {
+    let Some(current_until_unix) = current_until_unix else {
+        return false;
+    };
+
+    // Discord may round the RFC3339 value to whole seconds. Only clear the
+    // timeout we created; a later moderator timeout must remain untouched.
+    now_unix >= expected_until_unix && current_until_unix.abs_diff(expected_until_unix) <= 2
+}
+
 fn should_cleanup_temp_channel(new_channel_id: Option<serenity::all::ChannelId>) -> bool {
     // A move is not an abandonment. Without the optional Serenity cache we
     // cannot safely inspect the remaining occupants, so defer cleanup until
@@ -11646,6 +11686,41 @@ async fn deliver_scheduled_action(
     payload: &str,
 ) -> Result<()> {
     let value: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+    if action_type == "anti_spam_untimeout" {
+        let guild = guild_id
+            .parse::<u64>()
+            .map(serenity::all::GuildId::new)
+            .map_err(|_| anyhow::anyhow!("invalid anti-spam timeout guild"))?;
+        let user = target_id
+            .parse::<u64>()
+            .map(serenity::all::UserId::new)
+            .map_err(|_| anyhow::anyhow!("invalid anti-spam timeout user"))?;
+        let expected_until_unix = value
+            .get("expected_until_unix")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(|| anyhow::anyhow!("anti-spam timeout deadline missing"))?;
+        let member = guild.member(http, user).await?;
+        let current_until_unix = member
+            .communication_disabled_until
+            .as_ref()
+            .map(|timestamp| timestamp.unix_timestamp());
+        if should_clear_anti_spam_timeout(
+            expected_until_unix,
+            current_until_unix,
+            Utc::now().timestamp(),
+        ) {
+            guild
+                .edit_member(
+                    http,
+                    user,
+                    serenity::all::EditMember::new().enable_communication(),
+                )
+                .await?;
+            info!(%guild_id, %target_id, "released expired anti-spam timeout");
+        }
+        store.delete_scheduled_action(id)?;
+        return Ok(());
+    }
     // Scheduled work can outlive the revision that created it.  Consume jobs
     // for a feature that was disabled instead of allowing stale actions to
     // mutate the server after the owner turned that module off.
@@ -11936,7 +12011,7 @@ mod tests {
         is_destructive_audit_action, join_burst_armed, parse_custom_command, parse_duration,
         parse_reminder_delay, parse_scheduled_event_window, reminder_repeat_interval_ms,
         render_custom_command, rss_retry_seconds, scheduled_action_feature, shadow_mode_enabled,
-        should_cleanup_temp_channel, template_message,
+        should_cleanup_temp_channel, should_clear_anti_spam_timeout, template_message,
     };
     use chrono::TimeZone;
     use helper_store::Store;
@@ -11974,6 +12049,15 @@ mod tests {
         assert!(instagram_access_allowed(false, true));
         assert!(instagram_access_allowed(true, true));
         assert!(!instagram_access_allowed(false, false));
+    }
+
+    #[test]
+    fn anti_spam_release_only_clears_the_timeout_it_created() {
+        assert!(should_clear_anti_spam_timeout(1_000, Some(1_000), 1_000));
+        assert!(should_clear_anti_spam_timeout(1_000, Some(1_002), 1_001));
+        assert!(!should_clear_anti_spam_timeout(1_000, Some(1_120), 1_001));
+        assert!(!should_clear_anti_spam_timeout(1_000, Some(1_000), 999));
+        assert!(!should_clear_anti_spam_timeout(1_000, None, 1_001));
     }
 
     #[test]
