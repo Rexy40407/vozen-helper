@@ -8956,7 +8956,8 @@ impl AntiSpamAdapter {
                         {"key":"windowSeconds","label":"Janela de tempo (segundos)","kind":"number","min":3,"max":60,"help":"As mensagens antigas saem automaticamente desta janela."},
                         {"key":"duplicateLimit","label":"Repetições iguais","kind":"number","min":2,"max":12,"help":"Quantas mensagens iguais acionam a regra."},
                         {"key":"maxLinks","label":"Limite de links por mensagem","kind":"number","min":1,"max":20,"help":"Quantos links numa mensagem acionam a regra."},
-                        {"key":"timeoutSeconds","label":"Timeout inicial (segundos)","kind":"number","min":0,"max":86400,"help":"Usa 0 para apenas registar o incidente."}
+                        {"key":"timeoutSeconds","label":"Timeout inicial (segundos)","kind":"number","min":0,"max":86400,"help":"Usa 0 para apenas registar o incidente."},
+                        {"key":"warningDelivery","label":"Enviar aviso por","kind":"select","options":[["chat","Apenas no chat"],["dm","Apenas por mensagem privada"],["both","Chat e mensagem privada"]],"help":"Escolhe onde o membro recebe o aviso automático. Se a mensagem privada estiver bloqueada, a moderação continua a funcionar."}
                     ]
                 },
                 {
@@ -8983,6 +8984,7 @@ impl AntiSpamAdapter {
             "windowSeconds": 10,
             "duplicateLimit": 3,
             "timeoutSeconds": 60,
+            "warningDelivery": "both",
             "mentionLimit": 5,
             "maxLinks": 5,
             "capsPercent": 80,
@@ -9088,6 +9090,19 @@ impl FeatureAdapter for AntiSpamAdapter {
                 });
             }
         }
+        if let Some(value) = config.get("warningDelivery") {
+            let valid = value
+                .as_str()
+                .is_some_and(|delivery| matches!(delivery, "chat" | "dm" | "both"));
+            if !valid {
+                issues.push(ValidationIssue {
+                    path: "warningDelivery".into(),
+                    code: "invalid_warning_delivery".into(),
+                    message: "Escolhe aviso no chat, por mensagem privada ou nos dois.".into(),
+                    severity: "error".into(),
+                });
+            }
+        }
         issues
     }
 
@@ -9113,6 +9128,12 @@ impl FeatureAdapter for AntiSpamAdapter {
         }
         if let Some(value) = object.get("logChannel").and_then(serde_json::Value::as_str) {
             add("security.antispam.log_channel", value.to_string());
+        }
+        if let Some(value) = object
+            .get("warningDelivery")
+            .and_then(serde_json::Value::as_str)
+        {
+            add("security.antispam.warning_delivery", value.to_string());
         }
         for (field, setting) in [
             ("ignoredChannels", "security.antispam.ignored_channels"),
@@ -11638,6 +11659,7 @@ mod tests {
         assert_eq!(descriptor.defaults["maxLinks"], 5);
         assert_eq!(descriptor.defaults["capsPercent"], 80);
         assert_eq!(descriptor.defaults["deleteMessage"], false);
+        assert_eq!(descriptor.defaults["warningDelivery"], "both");
         assert!(descriptor.schema["sections"].as_array().unwrap().len() >= 2);
         let issues = adapter.validate(&serde_json::json!({
             "floodCount": 2,
@@ -11647,6 +11669,7 @@ mod tests {
             "deleteMessage": "yes",
             "ignoredChannels": [""],
             "logChannel": "not-a-discord-id",
+            "warningDelivery": "nowhere",
             "alertOnly": "true"
         }));
         assert!(issues.iter().any(|issue| issue.path == "floodCount"));
@@ -11656,6 +11679,7 @@ mod tests {
         assert!(issues.iter().any(|issue| issue.path == "deleteMessage"));
         assert!(issues.iter().any(|issue| issue.path == "ignoredChannels"));
         assert!(issues.iter().any(|issue| issue.path == "logChannel"));
+        assert!(issues.iter().any(|issue| issue.path == "warningDelivery"));
         assert!(issues.iter().any(|issue| issue.path == "alertOnly"));
         let projection = adapter.runtime_projection(&serde_json::json!({
             "floodCount": 8,
@@ -11663,6 +11687,7 @@ mod tests {
             "capsPercent": 70,
             "capsMinLetters": 10,
             "deleteMessage": true,
+            "warningDelivery": "dm",
             "ignoredChannels": ["123"],
             "alertOnly": true
         }));
@@ -11671,6 +11696,7 @@ mod tests {
         assert!(projection.contains(&("security.antispam.caps_percent".into(), "70".into())));
         assert!(projection.contains(&("security.antispam.caps_min_letters".into(), "10".into())));
         assert!(projection.contains(&("security.antispam.delete_message".into(), "true".into())));
+        assert!(projection.contains(&("security.antispam.warning_delivery".into(), "dm".into())));
         assert!(projection.contains(&("security.antispam.ignored_channels".into(), "123".into())));
         assert!(projection.contains(&("security.antispam.alert_only".into(), "true".into())));
         assert!(feature_adapter("community.levels").is_some());

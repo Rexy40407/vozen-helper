@@ -3656,16 +3656,57 @@ impl EventHandler for Handler {
                                 ),
                             }
                         }
-                        let _ = message
-                            .channel_id
-                            .say(
-                                &ctx.http,
-                                format!(
-                                    "<@{}>, please slow down — anti-spam recorded this incident.",
-                                    message.author.id
-                                ),
-                            )
-                            .await;
+                        let warning_delivery = setting_string(
+                            &self.store,
+                            &guild_text,
+                            "security.antispam.warning_delivery",
+                        );
+                        let warning_targets =
+                            anti_spam_warning_targets(warning_delivery.as_deref());
+                        let reason = format!(
+                            "Automatic action carried out after anti-spam detected excessive message activity ({}).",
+                            decision.matched.join(", ")
+                        );
+                        if warning_targets.chat
+                            && let Err(error) = message
+                                .channel_id
+                                .say(
+                                    &ctx.http,
+                                    format!(
+                                        "<@{}>, you have received an automatic warning. Reason: {reason}",
+                                        message.author.id
+                                    ),
+                                )
+                                .await
+                        {
+                            warn!(
+                                %error,
+                                guild_id = %guild_text,
+                                member_id = %message.author.id,
+                                "failed to send anti-spam warning in the channel"
+                            );
+                        }
+                        if warning_targets.dm
+                            && let Err(error) = message
+                                .author
+                                .direct_message(
+                                    &ctx.http,
+                                    CreateMessage::new().content(format!(
+                                        "You have received an automatic warning from Vozen Helper. Reason: {reason}"
+                                    )),
+                                )
+                                .await
+                        {
+                            // Members can disable DMs from server members. The moderation
+                            // action must remain successful even when Discord rejects this
+                            // optional notification.
+                            warn!(
+                                %error,
+                                guild_id = %guild_text,
+                                member_id = %message.author.id,
+                                "failed to send anti-spam warning by direct message"
+                            );
+                        }
                     }
                 }
             }
@@ -11426,6 +11467,36 @@ fn anti_spam_policy_for_store(store: &Store, guild_id: &str) -> AntiSpamPolicy {
     }))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AntiSpamWarningTargets {
+    chat: bool,
+    dm: bool,
+}
+
+/// Resolve where the automatic anti-spam warning is delivered. Existing
+/// servers do not have this setting projected yet, so absence and malformed
+/// legacy values deliberately use the safest visible default: both targets.
+fn anti_spam_warning_targets(delivery: Option<&str>) -> AntiSpamWarningTargets {
+    match delivery.map(str::trim) {
+        Some("chat") => AntiSpamWarningTargets {
+            chat: true,
+            dm: false,
+        },
+        Some("dm") => AntiSpamWarningTargets {
+            chat: false,
+            dm: true,
+        },
+        Some("both") | None => AntiSpamWarningTargets {
+            chat: true,
+            dm: true,
+        },
+        Some(_) => AntiSpamWarningTargets {
+            chat: true,
+            dm: true,
+        },
+    }
+}
+
 /// Measure content once before entering the shared anti-spam evaluator. URL
 /// tokens count toward the link rule but do not distort the uppercase ratio.
 fn anti_spam_content_metrics(content: &str) -> (u32, u32, u32) {
@@ -12004,10 +12075,10 @@ mod tests {
     use super::{
         HELPER_LANGUAGE_SETTING, HELPER_LOCALES, account_age_days,
         adapter::{DiscordAdapter, Effect, FakeDiscordAdapter},
-        anti_nuke_containment_deadline, anti_spam_content_metrics, command_feature_key,
-        custom_command_channel_ignored, custom_command_is_staff, english_bot_text,
-        evaluate_join_gate_verification, evaluate_nickname, feature_enabled, feature_title,
-        helper_locale, helper_locale_for_guild, instagram_access_allowed,
+        anti_nuke_containment_deadline, anti_spam_content_metrics, anti_spam_warning_targets,
+        command_feature_key, custom_command_channel_ignored, custom_command_is_staff,
+        english_bot_text, evaluate_join_gate_verification, evaluate_nickname, feature_enabled,
+        feature_title, helper_locale, helper_locale_for_guild, instagram_access_allowed,
         is_destructive_audit_action, join_burst_armed, parse_custom_command, parse_duration,
         parse_reminder_delay, parse_scheduled_event_window, reminder_repeat_interval_ms,
         render_custom_command, rss_retry_seconds, scheduled_action_feature, shadow_mode_enabled,
@@ -12066,6 +12137,29 @@ mod tests {
             anti_spam_content_metrics("LOUD https://vozen.org/docs, www.vozen.org"),
             (2, 4, 4)
         );
+    }
+
+    #[test]
+    fn anti_spam_warning_delivery_supports_chat_dm_and_both() {
+        let default_targets = anti_spam_warning_targets(None);
+        assert!(default_targets.chat);
+        assert!(default_targets.dm);
+
+        let chat_targets = anti_spam_warning_targets(Some("chat"));
+        assert!(chat_targets.chat);
+        assert!(!chat_targets.dm);
+
+        let dm_targets = anti_spam_warning_targets(Some("dm"));
+        assert!(!dm_targets.chat);
+        assert!(dm_targets.dm);
+
+        let both_targets = anti_spam_warning_targets(Some("both"));
+        assert!(both_targets.chat);
+        assert!(both_targets.dm);
+
+        let invalid_targets = anti_spam_warning_targets(Some("invalid"));
+        assert!(invalid_targets.chat);
+        assert!(invalid_targets.dm);
     }
 
     #[test]
