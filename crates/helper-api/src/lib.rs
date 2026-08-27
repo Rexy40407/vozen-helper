@@ -5226,6 +5226,17 @@ fn internal_feature_dependency(dependency: &str) -> Option<&'static str> {
     }
 }
 
+fn runtime_gateway_intent(dependency: &str) -> Option<&'static str> {
+    match dependency {
+        "message_content" | "message_content_intent" => Some("MESSAGE_CONTENT"),
+        "guild_members" | "guild_members_intent" => Some("GUILD_MEMBERS"),
+        "voice_states" => Some("GUILD_VOICE_STATES"),
+        "interactions" => Some("GUILDS"),
+        "message_events" => Some("GUILD_MESSAGES"),
+        _ => None,
+    }
+}
+
 fn collect_configured_resources(
     value: &serde_json::Value,
     path: &str,
@@ -5384,7 +5395,7 @@ async fn generic_feature_preflight(
     let mut required_permissions = Vec::new();
     let mut bot_permission_results = serde_json::Map::new();
     let mut user_permission_results = serde_json::Map::new();
-    let mut missing_intents = Vec::new();
+    let mut required_intents = BTreeSet::new();
 
     if let Some(descriptor) = &descriptor {
         for dependency in &descriptor.dependencies {
@@ -5435,17 +5446,8 @@ async fn generic_feature_preflight(
                         "error",
                     );
                 }
-            } else if matches!(
-                dependency.as_str(),
-                "message_content"
-                    | "message_content_intent"
-                    | "guild_members"
-                    | "guild_members_intent"
-                    | "voice_states"
-                    | "interactions"
-                    | "message_events"
-            ) {
-                missing_intents.push(dependency.clone());
+            } else if let Some(intent) = runtime_gateway_intent(dependency) {
+                required_intents.insert(intent);
             } else if request.enabled
                 && dependency
                     .chars()
@@ -5465,19 +5467,6 @@ async fn generic_feature_preflight(
                 );
             }
         }
-    }
-
-    if !missing_intents.is_empty() {
-        add_dependency_issue(
-            &mut issues,
-            "dependencies.intents".into(),
-            "intent_requires_runtime_check",
-            format!(
-                "This feature requires Discord gateway intents: {}. Verify them in the Developer Portal and bot runtime.",
-                missing_intents.join(", ")
-            ),
-            "warning",
-        );
     }
 
     let mut configured_channels = BTreeSet::new();
@@ -5713,7 +5702,8 @@ async fn generic_feature_preflight(
             "configuredChannels": configured_channels,
             "configuredRoles": configured_roles,
             "discordResourcesFresh": snapshot.channels_ready && snapshot.roles_ready,
-            "missingIntents": missing_intents
+            "requiredIntents": required_intents,
+            "missingIntents": Vec::<String>::new()
         }
     })))
 }
@@ -12434,6 +12424,22 @@ mod tests {
             Some("community.levels")
         );
         assert_eq!(internal_feature_dependency("scheduler"), None);
+    }
+
+    #[test]
+    fn published_gateway_dependencies_map_to_runtime_intents() {
+        for (dependency, intent) in [
+            ("message_content", "MESSAGE_CONTENT"),
+            ("message_content_intent", "MESSAGE_CONTENT"),
+            ("guild_members", "GUILD_MEMBERS"),
+            ("guild_members_intent", "GUILD_MEMBERS"),
+            ("voice_states", "GUILD_VOICE_STATES"),
+            ("interactions", "GUILDS"),
+            ("message_events", "GUILD_MESSAGES"),
+        ] {
+            assert_eq!(runtime_gateway_intent(dependency), Some(intent));
+        }
+        assert_eq!(runtime_gateway_intent("unknown_dependency"), None);
     }
 
     #[tokio::test]
