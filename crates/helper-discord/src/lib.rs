@@ -38,9 +38,9 @@ use serenity::{
         CommandInteraction, Context, CreateActionRow, CreateAllowedMentions, CreateAttachment,
         CreateButton, CreateChannel, CreateCommand, CreateCommandOption, CreateEmbed,
         CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage,
-        CreateMessage, EditChannel, EditMessage, EventHandler, GatewayIntents, Interaction,
+        CreateMessage, EditChannel, EditMessage, EventHandler, GatewayIntents, Guild, Interaction,
         MessageId, MessageUpdateEvent, PermissionOverwrite, PermissionOverwriteType, Permissions,
-        ReactionType, Ready, RoleId,
+        ReactionType, Ready, RoleId, UnavailableGuild,
     },
     async_trait,
 };
@@ -345,6 +345,30 @@ struct Handler {
 
 #[async_trait]
 impl EventHandler for Handler {
+    async fn guild_create(&self, _ctx: Context, guild: Guild, _is_new: Option<bool>) {
+        // The store makes this idempotent, so startup GuildCreate replays do
+        // not inflate acquisition. A first observation is intentionally a
+        // join: it gives a newly enabled lifecycle table a valid baseline.
+        let _ = self
+            .store
+            .record_growth_join(&guild.id.to_string(), Utc::now().timestamp_millis());
+    }
+
+    async fn guild_delete(
+        &self,
+        _ctx: Context,
+        incomplete: UnavailableGuild,
+        _full: Option<Guild>,
+    ) {
+        // Discord sends unavailable=true for a temporary outage. It is not a
+        // bot removal and must never count as churn.
+        if !incomplete.unavailable {
+            let _ = self
+                .store
+                .record_growth_departure(&incomplete.id.to_string(), Utc::now().timestamp_millis());
+        }
+    }
+
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!(user = %ready.user.name, "helper gateway ready");
         for guild in &ready.guilds {
@@ -1962,6 +1986,16 @@ impl EventHandler for Handler {
                             ),
                         )
                         .await;
+                } else if let Some(guild_id) = command.guild_id {
+                    let now = Utc::now().timestamp_millis();
+                    if command.data.name == "setup" {
+                        let _ = self
+                            .store
+                            .record_growth_setup_completed(&guild_id.to_string(), now);
+                    }
+                    let _ = self
+                        .store
+                        .record_growth_activity(&guild_id.to_string(), now);
                 }
             }
             Interaction::Component(component) => {
@@ -1977,6 +2011,11 @@ impl EventHandler for Handler {
                             ),
                         )
                         .await;
+                } else if let Some(guild_id) = component.guild_id {
+                    let _ = self.store.record_growth_activity(
+                        &guild_id.to_string(),
+                        Utc::now().timestamp_millis(),
+                    );
                 }
             }
             _ => {}

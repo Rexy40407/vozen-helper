@@ -41,7 +41,10 @@ use rand::RngCore;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
@@ -103,6 +106,7 @@ pub fn router(state: ApiState) -> Router {
             "/api/admin/private-tracker/handoff",
             post(create_private_tracker_handoff),
         )
+        .route("/api/admin/growth", get(admin_growth))
         .route("/api/oauth/start", post(oauth_start_post))
         .route("/api/install/start", get(oauth_install_start))
         .route("/api/oauth/callback", get(oauth_callback))
@@ -382,14 +386,28 @@ async fn oauth_start_post(
 /// Discord only accepts registered OAuth callback URIs. Keeping the flow here
 /// means the panel never has to guess at a static callback URL, and lets us
 /// safely create the panel session after Discord adds the bot to a server.
+#[derive(Debug, Deserialize)]
+struct InstallStartQuery {
+    source: Option<String>,
+}
+
 async fn oauth_install_start(
     State(state): State<Arc<ApiState>>,
+    Query(query): Query<InstallStartQuery>,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    let source = query.source.as_deref().unwrap_or("unknown");
+    if source != "unknown" && helper_store::growth_source(source).is_none() {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_install_source",
+        ));
+    }
     let code_verifier = new_code_verifier();
     let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
+    let install_marker = format!("{INSTALL_FLOW_MARKER}:{source}");
     let authorization_url = oauth_authorization_url(
         &state,
-        INSTALL_FLOW_MARKER,
+        &install_marker,
         &code_challenge,
         &code_verifier,
         OAuthFlow::Install,
@@ -567,7 +585,10 @@ async fn oauth_callback(
             "oauth_token_missing",
         ));
     }
-    let guild_id = if parts[0] == INSTALL_FLOW_MARKER {
+    let install_source = parts[0]
+        .strip_prefix(&format!("{INSTALL_FLOW_MARKER}:"))
+        .or_else(|| (parts[0] == INSTALL_FLOW_MARKER).then_some("unknown"));
+    let guild_id = if install_source.is_some() {
         token
             .get("guild")
             .and_then(|guild| guild.get("id"))
@@ -581,14 +602,20 @@ async fn oauth_callback(
     };
     let success_redirect = state.oauth_success_redirect.clone();
     let mut response = create_session_inner(
-        State(state),
+        State(state.clone()),
         headers,
         Json(SessionRequest {
             token: access_token.to_string(),
-            guild_id,
+            guild_id: guild_id.clone(),
         }),
     )
     .await?;
+    if let Some(source) = install_source {
+        state
+            .store
+            .record_growth_install(&guild_id, source, Utc::now().timestamp_millis())
+            .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    }
     // `create_session_inner` uses this internal response header to pass the
     // opaque session to the legacy OAuth transport. Always remove it before
     // redirecting so a browser can only receive a session through the cookie.
@@ -602,7 +629,11 @@ async fn oauth_callback(
             "invalid_oauth_success_redirect",
         )
     })?;
-    if !oauth_redirect_uses_cookie_session(&success_url) {
+    let uses_cookie_session = oauth_redirect_uses_cookie_session(&success_url);
+    if install_source.is_some() {
+        success_url.query_pairs_mut().append_pair("installed", "1");
+    }
+    if !uses_cookie_session {
         let session_token = session_token.ok_or_else(|| {
             client_error(StatusCode::INTERNAL_SERVER_ERROR, "session_token_missing")
         })?;
@@ -641,6 +672,114 @@ async fn health() -> impl IntoResponse {
         version: env!("CARGO_PKG_VERSION"),
         timestamp: Utc::now().to_rfc3339(),
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct GrowthQuery {
+    from: Option<String>,
+    to: Option<String>,
+}
+
+/// Aggregate-only growth reporting for the dedicated owner tracker.  A normal
+/// server-admin session is deliberately insufficient: this route never
+/// returns guild IDs, but acquisition and retention are still business-wide
+/// information.
+async fn admin_growth(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Query(query): Query<GrowthQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    let owner_id = state
+        .private_tracker_owner_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "private_tracker_unavailable"))?;
+    if claims.user_id != owner_id {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            "private_tracker_forbidden",
+        ));
+    }
+    let today = Utc::now().date_naive();
+    let to = query
+        .to
+        .unwrap_or_else(|| today.format("%Y-%m-%d").to_string());
+    let to_date = chrono::NaiveDate::parse_from_str(&to, "%Y-%m-%d")
+        .map_err(|_| client_error(StatusCode::BAD_REQUEST, "bad_range"))?;
+    let from = query
+        .from
+        .unwrap_or_else(|| (to_date - Duration::days(6)).format("%Y-%m-%d").to_string());
+    let from_date = chrono::NaiveDate::parse_from_str(&from, "%Y-%m-%d")
+        .map_err(|_| client_error(StatusCode::BAD_REQUEST, "bad_range"))?;
+    let span = (to_date - from_date).num_days();
+    if !(0..90).contains(&span) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "bad_range"));
+    }
+    let overview = state
+        .store
+        .growth_overview(&from, &to, Utc::now().timestamp_millis())
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let mut daily = BTreeMap::<(String, String), serde_json::Value>::new();
+    for point in overview.daily {
+        let row = daily
+            .entry((point.day.clone(), point.source.clone()))
+            .or_insert_with(|| {
+                serde_json::json!({
+                    "day": point.day,
+                    "source": point.source,
+                    "joins": 0,
+                    "leaves": 0,
+                    "setupCompleted": 0,
+                    "firstValue": 0,
+                    "active": 0,
+                })
+            });
+        let field = match point.event.as_str() {
+            "join" => "joins",
+            "leave" => "leaves",
+            "setup_completed" => "setupCompleted",
+            "first_value" => "firstValue",
+            "active" => "active",
+            _ => continue,
+        };
+        row[field] = serde_json::Value::from(point.value);
+    }
+    let daily = daily.into_values().collect::<Vec<_>>();
+    let setup_completed = daily
+        .iter()
+        .filter_map(|point| {
+            point
+                .get("setupCompleted")
+                .and_then(serde_json::Value::as_i64)
+        })
+        .sum::<i64>();
+    let first_value = daily
+        .iter()
+        .filter_map(|point| point.get("firstValue").and_then(serde_json::Value::as_i64))
+        .sum::<i64>();
+    let joins = overview.joins;
+    let rate = |value| {
+        if joins == 0 {
+            0.0
+        } else {
+            value as f64 / joins as f64
+        }
+    };
+    Ok(Json(serde_json::json!({
+        "product": "helper",
+        "currentGuilds": overview.active_guilds,
+        "joins": joins,
+        "leaves": overview.leaves,
+        "net": overview.net,
+        "setupCompleted": setup_completed,
+        "firstValue": first_value,
+        "setupRate": rate(setup_completed),
+        "activationRate": rate(first_value),
+        "retainedW7Rate": overview.retained_w7,
+        "retainedW30Rate": overview.retained_w30,
+        "daily": daily,
+    })))
 }
 
 #[derive(Debug, Serialize)]
@@ -9678,6 +9817,10 @@ async fn update_feature_config(
                 client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
             }
         })?;
+    state
+        .store
+        .record_growth_setup_completed(&claims.guild_id, Utc::now().timestamp_millis())
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     Ok(Json(serde_json::json!({
         "ok": true,
         "guildId": claims.guild_id,

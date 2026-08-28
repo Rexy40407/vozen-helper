@@ -1,5 +1,8 @@
 //! SQLite persistence with an intentionally small, auditable surface.
 
+mod growth_lifecycle;
+pub use growth_lifecycle::{GrowthDailyMetric, GrowthOverview, growth_source};
+
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Duration, Utc};
 use helper_contracts::{EntitlementSnapshot, SessionClaims, is_valid_workflow_reaction};
@@ -946,6 +949,10 @@ impl Store {
         conn.execute_batch("CREATE TABLE IF NOT EXISTS birthdays (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, month INTEGER NOT NULL, day INTEGER NOT NULL, last_announced_year INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE INDEX IF NOT EXISTS idx_birthdays_day ON birthdays(month,day,last_announced_year); CREATE TABLE IF NOT EXISTS economy_accounts (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, balance INTEGER NOT NULL DEFAULT 0, last_daily_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE INDEX IF NOT EXISTS idx_economy_guild_balance ON economy_accounts(guild_id,balance DESC); CREATE TABLE IF NOT EXISTS economy_ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, user_id TEXT NOT NULL, amount INTEGER NOT NULL, reason TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_economy_ledger_account ON economy_ledger(guild_id,user_id,created_at DESC); CREATE TABLE IF NOT EXISTS temp_channels (guild_id TEXT NOT NULL, channel_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_temp_channels_guild ON temp_channels(guild_id); CREATE TABLE IF NOT EXISTS voice_sessions (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, channel_id TEXT NOT NULL, started_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE INDEX IF NOT EXISTS idx_voice_sessions_guild ON voice_sessions(guild_id,started_at);")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS economy_cooldowns (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, kind TEXT NOT NULL, last_claim_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id,kind)); CREATE INDEX IF NOT EXISTS idx_economy_cooldowns_kind ON economy_cooldowns(guild_id,kind,last_claim_at);")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS provider_events (provider TEXT NOT NULL, event_id TEXT NOT NULL, payload TEXT NOT NULL, received_at INTEGER NOT NULL, PRIMARY KEY(provider,event_id));")?;
+        // Acquisition data is deliberately separate from member/server content.
+        // It is limited to the lifecycle needed for activation and retention,
+        // and departed guild rows are erased by the regular retention sweep.
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS helper_growth_lifecycle (guild_id TEXT PRIMARY KEY, first_joined_at INTEGER NOT NULL, last_joined_at INTEGER NOT NULL, install_source TEXT NOT NULL DEFAULT 'unknown', setup_completed_at INTEGER, first_value_at INTEGER, last_activity_at INTEGER, departed_at INTEGER); CREATE INDEX IF NOT EXISTS idx_helper_growth_departed ON helper_growth_lifecycle(departed_at); CREATE TABLE IF NOT EXISTS helper_growth_activity_day (guild_id TEXT NOT NULL, day TEXT NOT NULL, PRIMARY KEY(guild_id,day)); CREATE TABLE IF NOT EXISTS helper_growth_daily_metric (day TEXT NOT NULL, source TEXT NOT NULL, event TEXT NOT NULL, value INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day,source,event));")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS siwe_nonces (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, nonce TEXT NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER, created_at INTEGER NOT NULL, PRIMARY KEY(guild_id,nonce)); CREATE INDEX IF NOT EXISTS idx_siwe_nonces_expiry ON siwe_nonces(expires_at,used_at);")?;
         let oauth_verifier_exists: i64 = conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('helper_oauth_states') WHERE name='code_verifier'",
@@ -4554,6 +4561,8 @@ impl Store {
             "DELETE FROM quarantine WHERE guild_id=?1",
             "DELETE FROM starboard WHERE guild_id=?1",
             "DELETE FROM helper_usage WHERE guild_id=?1",
+            "DELETE FROM helper_growth_lifecycle WHERE guild_id=?1",
+            "DELETE FROM helper_growth_activity_day WHERE guild_id=?1",
             "DELETE FROM settings WHERE guild_id=?1",
         ] {
             tx.execute(statement, [guild_id])?;
@@ -4595,6 +4604,19 @@ impl Store {
             tx.execute(
                 "DELETE FROM activity_log WHERE created_at < ?1",
                 [cutoff_90d],
+            )?,
+        );
+        // Remove the per-guild activity keys with their lifecycle rows. The
+        // aggregate daily metrics have no guild identity and remain available.
+        tx.execute(
+            "DELETE FROM helper_growth_activity_day WHERE guild_id IN (SELECT guild_id FROM helper_growth_lifecycle WHERE departed_at IS NOT NULL AND departed_at < ?1)",
+            [cutoff_30d],
+        )?;
+        remove(
+            "growth_lifecycle",
+            tx.execute(
+                "DELETE FROM helper_growth_lifecycle WHERE departed_at IS NOT NULL AND departed_at < ?1",
+                [cutoff_30d],
             )?,
         );
         remove(
