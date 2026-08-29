@@ -26,6 +26,7 @@ oauth_secret="${DISCORD_OAUTH_CLIENT_SECRET:?set DISCORD_OAUTH_CLIENT_SECRET to 
 vozen_oauth_client_id="${VOZEN_ECOSYSTEM_OAUTH_CLIENT_ID:-1537738930722443364}"
 private_tracker_client_id="${HELPER_PRIVATE_TRACKER_CLIENT_ID:-$(read_existing_env_value HELPER_PRIVATE_TRACKER_CLIENT_ID)}"
 private_tracker_owner_id="${HELPER_PRIVATE_TRACKER_OWNER_ID:-$(read_existing_env_value HELPER_PRIVATE_TRACKER_OWNER_ID)}"
+topgg_token="${HELPER_TOPGG_TOKEN:-$(read_existing_env_value HELPER_TOPGG_TOKEN)}"
 
 mkdir -p "$release" "$root/shared/data"
 tar -xzf /home/vozen/helper-release.tgz -C "$release"
@@ -45,6 +46,7 @@ sed -i \
   -e '/^HELPER_PRODUCT_ROOT=/d' \
   -e '/^HELPER_BIND_ADDR=/d' \
   -e '/^HELPER_SESSION_SECRET=/d' \
+  -e '/^HELPER_TOPGG_TOKEN=/d' \
   -e '/^HELPER_ALLOWED_ORIGIN=/d' \
   -e '/^HELPER_API_ONLY=/d' \
   -e '/^HELPER_ALLOW_LEGACY_SESSION=/d' \
@@ -69,6 +71,9 @@ if [[ -n "$private_tracker_client_id" || -n "$private_tracker_owner_id" ]]; then
   : "${private_tracker_owner_id:?set HELPER_PRIVATE_TRACKER_CLIENT_ID and HELPER_PRIVATE_TRACKER_OWNER_ID together}"
   printf 'HELPER_PRIVATE_TRACKER_CLIENT_ID=%s\n' "$private_tracker_client_id" >> "$root/shared/.env"
   printf 'HELPER_PRIVATE_TRACKER_OWNER_ID=%s\n' "$private_tracker_owner_id" >> "$root/shared/.env"
+fi
+if [[ -n "$topgg_token" ]]; then
+  printf 'HELPER_TOPGG_TOKEN=%s\n' "$topgg_token" >> "$root/shared/.env"
 fi
 if [[ -n "${VOZEN_ENTITLEMENT_URL:-}" || -n "${VOZEN_ENTITLEMENT_SECRET:-}" ]]; then
   : "${VOZEN_ENTITLEMENT_URL:?set both VOZEN_ENTITLEMENT_URL and VOZEN_ENTITLEMENT_SECRET}"
