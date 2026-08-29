@@ -27,8 +27,8 @@ use helper_modules::{
 };
 use helper_store::{
     BlueskySubscriptionRecord, InstagramSubscriptionRecord, KickSubscriptionRecord,
-    RssSubscriptionRecord, Store, TikTokSubscriptionRecord, TwitchSubscriptionRecord,
-    YouTubeSubscriptionRecord,
+    RssSubscriptionRecord, Store, TikTokSubscriptionRecord, TopggSyncDetail,
+    TwitchSubscriptionRecord, YouTubeSubscriptionRecord,
 };
 use rand::seq::SliceRandom;
 use reqwest::Client as HttpClient;
@@ -45,7 +45,7 @@ use serenity::{
     async_trait,
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -55,6 +55,12 @@ use std::{
 use tracing::{info, warn};
 
 mod rank_card;
+mod topgg_metrics;
+
+use crate::topgg_metrics::{
+    ReqwestTopggMetricsHttp, TOPGG_POST_INTERVAL, TopggMetricsTrigger,
+    post_topgg_stats_with_shards, validate_topgg_v1_token,
+};
 
 /// A small side-effect boundary used by policy tests. Production handlers
 /// still use Serenity directly, while the fake makes permission failures and
@@ -319,6 +325,48 @@ pub mod adapter {
 
 type DuplicateMessageCache = Arc<Mutex<HashMap<String, VecDeque<(Instant, String)>>>>;
 
+/// Exact process-local view of guild membership for Top.gg. IDs never leave
+/// the process: persistence keeps only aggregate counts and delivery health.
+#[derive(Clone, Default)]
+struct TopggGuilds {
+    ids: Arc<Mutex<HashSet<u64>>>,
+    ready: Arc<AtomicBool>,
+}
+
+impl TopggGuilds {
+    fn set_ready(&self, guilds: impl IntoIterator<Item = u64>) {
+        let mut ids = self.ids.lock().expect("topgg guild set mutex poisoned");
+        ids.clear();
+        ids.extend(guilds);
+        self.ready.store(true, Ordering::Release);
+    }
+
+    fn insert(&self, guild_id: u64) -> bool {
+        self.ids
+            .lock()
+            .expect("topgg guild set mutex poisoned")
+            .insert(guild_id)
+    }
+
+    fn remove(&self, guild_id: u64) -> bool {
+        self.ids
+            .lock()
+            .expect("topgg guild set mutex poisoned")
+            .remove(&guild_id)
+    }
+
+    fn count(&self) -> usize {
+        self.ids
+            .lock()
+            .expect("topgg guild set mutex poisoned")
+            .len()
+    }
+
+    fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+}
+
 #[derive(Clone)]
 struct Handler {
     store: Store,
@@ -329,6 +377,8 @@ struct Handler {
     nuke_events: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
     xp_awarded_at: Arc<Mutex<HashMap<String, Instant>>>,
     scheduler_started: Arc<AtomicBool>,
+    topgg_trigger: Option<TopggMetricsTrigger>,
+    topgg_guilds: Option<TopggGuilds>,
     entitlements: Option<EntitlementClient>,
     youtube: Option<YouTubeClient>,
     rss: Option<RssClient>,
@@ -352,6 +402,15 @@ impl EventHandler for Handler {
         let _ = self
             .store
             .record_growth_join(&guild.id.to_string(), Utc::now().timestamp_millis());
+        if self
+            .topgg_guilds
+            .as_ref()
+            .is_some_and(|guilds| guilds.insert(guild.id.get()))
+        {
+            if let Some(trigger) = &self.topgg_trigger {
+                trigger.request_sync();
+            }
+        }
     }
 
     async fn guild_delete(
@@ -366,11 +425,26 @@ impl EventHandler for Handler {
             let _ = self
                 .store
                 .record_growth_departure(&incomplete.id.to_string(), Utc::now().timestamp_millis());
+            if self
+                .topgg_guilds
+                .as_ref()
+                .is_some_and(|guilds| guilds.remove(incomplete.id.get()))
+            {
+                if let Some(trigger) = &self.topgg_trigger {
+                    trigger.request_sync();
+                }
+            }
         }
     }
 
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!(user = %ready.user.name, "helper gateway ready");
+        if let Some(guilds) = &self.topgg_guilds {
+            guilds.set_ready(ready.guilds.iter().map(|guild| guild.id.get()));
+            if let Some(trigger) = &self.topgg_trigger {
+                trigger.request_sync();
+            }
+        }
         for guild in &ready.guilds {
             let guild_id = guild.id.to_string();
             if !feature_enabled(&self.store, &guild_id, "management.nickname", None) {
@@ -3882,6 +3956,25 @@ pub async fn run(config: &Config) -> Result<()> {
         | GatewayIntents::AUTO_MODERATION_EXECUTION
         | GatewayIntents::MESSAGE_CONTENT;
     let store = Store::open(&config.database_url)?;
+    let (topgg_trigger, topgg_guilds) = if let Some(token) = config.topgg_token.clone() {
+        let (trigger, guilds) = spawn_topgg_metrics(
+            config.discord_application_id.to_string(),
+            token,
+            store.clone(),
+        );
+        (Some(trigger), Some(guilds))
+    } else {
+        // No token is an intentional disabled state, but it must be visible in
+        // the private tracker instead of silently looking healthy.
+        let _ = store.record_topgg_sync_attempt(
+            Utc::now().timestamp_millis(),
+            None,
+            None,
+            false,
+            TopggSyncDetail::Unconfigured,
+        );
+        (None, None)
+    };
     let mut client = Client::builder(&config.discord_token, intents)
         .event_handler(Handler {
             store,
@@ -3892,6 +3985,8 @@ pub async fn run(config: &Config) -> Result<()> {
             nuke_events: Arc::new(Mutex::new(HashMap::new())),
             xp_awarded_at: Arc::new(Mutex::new(HashMap::new())),
             scheduler_started: Arc::new(AtomicBool::new(false)),
+            topgg_trigger,
+            topgg_guilds,
             entitlements: EntitlementClient::new(
                 config.entitlement_url.clone(),
                 config.entitlement_secret.clone(),
@@ -3912,6 +4007,66 @@ pub async fn run(config: &Config) -> Result<()> {
         .await?;
     client.start().await?;
     Ok(())
+}
+
+fn spawn_topgg_metrics(
+    client_id: String,
+    token: String,
+    store: Store,
+) -> (TopggMetricsTrigger, TopggGuilds) {
+    let trigger = TopggMetricsTrigger::default();
+    let guilds = TopggGuilds::default();
+    let worker_trigger = trigger.clone();
+    let worker_guilds = guilds.clone();
+    tokio::spawn(async move {
+        let Ok(http) = ReqwestTopggMetricsHttp::new() else {
+            let _ = store.record_topgg_sync_attempt(
+                Utc::now().timestamp_millis(),
+                None,
+                None,
+                false,
+                TopggSyncDetail::TransportFailure,
+            );
+            return;
+        };
+        // A zero during gateway connection would be a false public metric.
+        while !worker_guilds.is_ready() {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        let mut interval = tokio::time::interval(TOPGG_POST_INTERVAL);
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {},
+                _ = worker_trigger.notified() => {},
+            }
+            let server_count = worker_guilds.count();
+            let validation = validate_topgg_v1_token(&http, &token).await;
+            let (outcome, sent_server_count) = if validation.succeeded() {
+                (
+                    post_topgg_stats_with_shards(&http, &client_id, &token, server_count, 1).await,
+                    Some(server_count),
+                )
+            } else {
+                (validation, None)
+            };
+            let _ = store.record_topgg_sync_attempt(
+                Utc::now().timestamp_millis(),
+                outcome.status(),
+                sent_server_count,
+                outcome.succeeded(),
+                outcome.detail(),
+            );
+            if !outcome.succeeded() {
+                warn!(
+                    detail = outcome.detail().as_storage(),
+                    status = ?outcome.status(),
+                    server_count,
+                    "helper Top.gg v1 validation or metrics publish failed"
+                );
+            }
+        }
+    });
+    (trigger, guilds)
 }
 
 async fn run_youtube_worker(http: Arc<serenity::http::Http>, store: Store, youtube: YouTubeClient) {

@@ -26,6 +26,9 @@ pub struct Config {
     pub session_secret: String,
     pub entitlement_url: Option<String>,
     pub entitlement_secret: Option<String>,
+    /// Optional current Top.gg v1 token for aggregate server-count publishing.
+    /// The runtime treats an absent token as an observable disabled integration.
+    pub topgg_token: Option<String>,
     pub environment: String,
     pub api_only: bool,
 }
@@ -64,6 +67,7 @@ impl Config {
             session_secret: required("HELPER_SESSION_SECRET")?,
             entitlement_url: env::var("VOZEN_ENTITLEMENT_URL").ok(),
             entitlement_secret: env::var("VOZEN_ENTITLEMENT_SECRET").ok(),
+            topgg_token: optional_env("HELPER_TOPGG_TOKEN"),
             environment: env::var("NODE_ENV").unwrap_or_else(|_| "production".into()),
             api_only: env::var("HELPER_API_ONLY")
                 .is_ok_and(|value| value.eq_ignore_ascii_case("true")),

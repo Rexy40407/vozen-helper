@@ -2,6 +2,8 @@
 
 mod growth_lifecycle;
 pub use growth_lifecycle::{GrowthDailyMetric, GrowthOverview, growth_source};
+mod topgg_sync;
+pub use topgg_sync::{TopggSyncDetail, TopggSyncStatus};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Duration, Utc};
@@ -952,7 +954,7 @@ impl Store {
         // Acquisition data is deliberately separate from member/server content.
         // It is limited to the lifecycle needed for activation and retention,
         // and departed guild rows are erased by the regular retention sweep.
-        conn.execute_batch("CREATE TABLE IF NOT EXISTS helper_growth_lifecycle (guild_id TEXT PRIMARY KEY, first_joined_at INTEGER NOT NULL, last_joined_at INTEGER NOT NULL, install_source TEXT NOT NULL DEFAULT 'unknown', setup_completed_at INTEGER, first_value_at INTEGER, last_activity_at INTEGER, departed_at INTEGER); CREATE INDEX IF NOT EXISTS idx_helper_growth_departed ON helper_growth_lifecycle(departed_at); CREATE TABLE IF NOT EXISTS helper_growth_activity_day (guild_id TEXT NOT NULL, day TEXT NOT NULL, PRIMARY KEY(guild_id,day)); CREATE TABLE IF NOT EXISTS helper_growth_daily_metric (day TEXT NOT NULL, source TEXT NOT NULL, event TEXT NOT NULL, value INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day,source,event));")?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS helper_growth_lifecycle (guild_id TEXT PRIMARY KEY, first_joined_at INTEGER NOT NULL, last_joined_at INTEGER NOT NULL, install_source TEXT NOT NULL DEFAULT 'unknown', setup_completed_at INTEGER, first_value_at INTEGER, last_activity_at INTEGER, departed_at INTEGER); CREATE INDEX IF NOT EXISTS idx_helper_growth_departed ON helper_growth_lifecycle(departed_at); CREATE TABLE IF NOT EXISTS helper_growth_activity_day (guild_id TEXT NOT NULL, day TEXT NOT NULL, PRIMARY KEY(guild_id,day)); CREATE TABLE IF NOT EXISTS helper_growth_daily_metric (day TEXT NOT NULL, source TEXT NOT NULL, event TEXT NOT NULL, value INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day,source,event)); CREATE TABLE IF NOT EXISTS helper_topgg_sync_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), last_attempt_at INTEGER NOT NULL, last_success_at INTEGER, last_status INTEGER, last_server_count INTEGER, last_detail TEXT NOT NULL DEFAULT 'unknown', consecutive_failures INTEGER NOT NULL DEFAULT 0);")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS siwe_nonces (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, nonce TEXT NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER, created_at INTEGER NOT NULL, PRIMARY KEY(guild_id,nonce)); CREATE INDEX IF NOT EXISTS idx_siwe_nonces_expiry ON siwe_nonces(expires_at,used_at);")?;
         let oauth_verifier_exists: i64 = conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('helper_oauth_states') WHERE name='code_verifier'",

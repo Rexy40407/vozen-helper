@@ -33,7 +33,7 @@ use helper_store::{
     BlueskySubscriptionRecord, BlueskySubscriptionWrite, InstagramSubscriptionRecord,
     InstagramSubscriptionWrite, KickSubscriptionRecord, KickSubscriptionWrite,
     RssSubscriptionRecord, RssSubscriptionWrite, Store, TikTokSubscriptionRecord,
-    TikTokSubscriptionWrite, TwitchSubscriptionRecord, TwitchSubscriptionWrite,
+    TikTokSubscriptionWrite, TopggSyncStatus, TwitchSubscriptionRecord, TwitchSubscriptionWrite,
     YouTubeSubscriptionRecord, YouTubeSubscriptionWrite,
 };
 use hmac::{Hmac, Mac};
@@ -718,10 +718,16 @@ async fn admin_growth(
     if !(0..90).contains(&span) {
         return Err(client_error(StatusCode::BAD_REQUEST, "bad_range"));
     }
+    let now_ms = Utc::now().timestamp_millis();
     let overview = state
         .store
-        .growth_overview(&from, &to, Utc::now().timestamp_millis())
+        .growth_overview(&from, &to, now_ms)
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let topgg = state
+        .store
+        .topgg_sync_status(now_ms)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let topgg = topgg_admin_payload(topgg, overview.active_guilds);
     let mut daily = BTreeMap::<(String, String), serde_json::Value>::new();
     for point in overview.daily {
         let row = daily
@@ -781,7 +787,37 @@ async fn admin_growth(
         "retainedW7Rate": overview.retained_w7,
         "retainedW30Rate": overview.retained_w30,
         "daily": daily,
+        "topgg": topgg,
     })))
+}
+
+fn topgg_admin_payload(
+    status: Option<TopggSyncStatus>,
+    current_server_count: i64,
+) -> Option<serde_json::Value> {
+    status.map(|status| {
+        let drift_percent = status.last_server_count.map(|reported| {
+            if reported == 0 {
+                if current_server_count == 0 { 0.0 } else { 1.0 }
+            } else {
+                (current_server_count.saturating_sub(reported).unsigned_abs() as f64)
+                    / reported.unsigned_abs().max(1) as f64
+            }
+        });
+        let alert = status.stale || drift_percent.is_some_and(|value| value > 0.05);
+        serde_json::json!({
+            "lastAttemptAt": status.last_attempt_at,
+            "lastSuccessAt": status.last_success_at,
+            "lastStatus": status.last_status,
+            "lastServerCount": status.last_server_count,
+            "currentServerCount": current_server_count,
+            "lastDetail": status.last_detail,
+            "consecutiveFailures": status.consecutive_failures,
+            "stale": status.stale,
+            "driftPercent": drift_percent,
+            "alert": alert,
+        })
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -11382,6 +11418,39 @@ mod tests {
     };
     use helper_store::Store;
     use tower::ServiceExt;
+
+    #[test]
+    fn topgg_owner_payload_alerts_on_staleness_or_more_than_five_percent_drift() {
+        let healthy = TopggSyncStatus {
+            last_attempt_at: 1_000,
+            last_success_at: Some(1_000),
+            last_status: Some(204),
+            last_server_count: Some(100),
+            last_detail: helper_store::TopggSyncDetail::Delivered,
+            consecutive_failures: 0,
+            stale: false,
+        };
+        let boundary = topgg_admin_payload(Some(healthy), 105).expect("payload");
+        assert_eq!(boundary["alert"], false);
+        assert_eq!(boundary["driftPercent"], serde_json::json!(0.05));
+
+        let drifted = topgg_admin_payload(Some(healthy), 106).expect("payload");
+        assert_eq!(drifted["alert"], true);
+        assert_eq!(drifted["lastDetail"], "delivered");
+
+        let reduced = topgg_admin_payload(Some(healthy), 50).expect("payload");
+        assert_eq!(reduced["driftPercent"], serde_json::json!(0.5));
+        assert_eq!(reduced["alert"], true);
+
+        let stale = TopggSyncStatus {
+            stale: true,
+            ..healthy
+        };
+        assert_eq!(
+            topgg_admin_payload(Some(stale), 100).unwrap()["alert"],
+            true
+        );
+    }
 
     #[test]
     fn instagram_development_mode_only_bypasses_the_external_approval_gate() {
