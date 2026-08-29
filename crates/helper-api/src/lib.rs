@@ -4717,11 +4717,7 @@ async fn fetch_discord_guilds(
         .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "discord_response_unreadable"))?;
     if !guilds_status.is_success() {
         tracing::warn!(%guilds_status, body_len = guilds_body.len(), "Discord guild list request failed");
-        let (status, code) = match guilds_status {
-            StatusCode::UNAUTHORIZED => (StatusCode::UNAUTHORIZED, "invalid_token"),
-            StatusCode::FORBIDDEN => (StatusCode::FORBIDDEN, "discord_scope_missing"),
-            _ => (StatusCode::BAD_GATEWAY, "discord_guilds_unavailable"),
-        };
+        let (status, code) = discord_guilds_error(guilds_status);
         return Err(client_error(status, code));
     }
     serde_json::from_str(&guilds_body).map_err(|_| {
@@ -4731,6 +4727,15 @@ async fn fetch_discord_guilds(
         );
         client_error(StatusCode::BAD_GATEWAY, "invalid_discord_response")
     })
+}
+
+fn discord_guilds_error(status: StatusCode) -> (StatusCode, &'static str) {
+    match status {
+        StatusCode::UNAUTHORIZED => (StatusCode::UNAUTHORIZED, "invalid_token"),
+        StatusCode::FORBIDDEN => (StatusCode::FORBIDDEN, "discord_scope_missing"),
+        StatusCode::TOO_MANY_REQUESTS => (StatusCode::TOO_MANY_REQUESTS, "discord_rate_limited"),
+        _ => (StatusCode::BAD_GATEWAY, "discord_guilds_unavailable"),
+    }
 }
 
 async fn fetch_bot_guild_by_id(
@@ -13678,6 +13683,14 @@ mod tests {
         );
         assert!(parameter("state").contains('.'));
         assert!(parameter("code_challenge").len() >= 43);
+    }
+
+    #[test]
+    fn discord_guild_rate_limit_is_preserved_for_clients() {
+        let (status, code) = discord_guilds_error(StatusCode::TOO_MANY_REQUESTS);
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(code, "discord_rate_limited");
     }
 
     #[test]
