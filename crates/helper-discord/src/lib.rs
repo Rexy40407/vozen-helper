@@ -434,6 +434,10 @@ impl EventHandler for Handler {
             tokio::spawn(async move {
                 run_anti_raid_expiry_worker(anti_raid_store).await;
             });
+            let growth_lifecycle_store = self.store.clone();
+            tokio::spawn(async move {
+                run_growth_lifecycle_purge_worker(growth_lifecycle_store).await;
+            });
             if let Some(youtube) = self.youtube.clone() {
                 let store = self.store.clone();
                 let http = ctx.http.clone();
@@ -4472,6 +4476,24 @@ async fn run_anti_raid_expiry_worker(store: Store) {
                 }
             }
         }
+    }
+}
+
+/// Purge only lifecycle rows whose confirmed departure is older than the
+/// documented 30-day retention period. Running once immediately and then
+/// daily keeps the data boundary correct even when the bot is long-lived.
+async fn run_growth_lifecycle_purge_worker(store: Store) {
+    loop {
+        match store.purge_growth_lifecycle(Utc::now().timestamp_millis()) {
+            Ok(purged) if purged > 0 => {
+                info!(purged, "purged expired Helper growth lifecycle rows");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(%error, "could not purge expired Helper growth lifecycle rows");
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
     }
 }
 
