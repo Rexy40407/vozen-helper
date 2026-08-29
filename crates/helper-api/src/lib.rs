@@ -51,7 +51,9 @@ use uuid::Uuid;
 type HmacSha256 = Hmac<Sha256>;
 const COOKIE: &str = "vh_session";
 const INSTALL_FLOW_MARKER: &str = "install";
-const HELPER_INSTALL_PERMISSIONS: &str = "1099780071606";
+// Instalação base: View Channel, Send Messages, Embed Links e Read Message History.
+// Permissões sensíveis são verificadas pelo passaporte antes de cada módulo ser publicado.
+const HELPER_INSTALL_PERMISSIONS: &str = "84992";
 const SESSION_RESPONSE_HEADER: &str = "x-vozen-session";
 const SESSION_MAX_HOURS: i64 = 8;
 const IDLE_MINUTES: i64 = 30;
@@ -13585,6 +13587,21 @@ mod tests {
         assert_eq!(parameter("client_id"), "client");
         assert_eq!(parameter("redirect_uri"), "https://example.test/callback");
         assert_eq!(parameter("permissions"), HELPER_INSTALL_PERMISSIONS);
+        let permissions = parameter("permissions").parse::<u64>().unwrap();
+        for bit in [10_u8, 11, 14, 16] {
+            assert_ne!(
+                permissions & (1_u64 << bit),
+                0,
+                "base permission bit {bit} is missing"
+            );
+        }
+        for bit in [1_u8, 2, 3, 4, 5, 7, 13, 28, 40] {
+            assert_eq!(
+                permissions & (1_u64 << bit),
+                0,
+                "sensitive permission bit {bit} leaked into the base install"
+            );
+        }
         assert_eq!(parameter("integration_type"), "0");
         assert_eq!(
             parameter("scope"),
