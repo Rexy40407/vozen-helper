@@ -406,10 +406,9 @@ impl EventHandler for Handler {
             .topgg_guilds
             .as_ref()
             .is_some_and(|guilds| guilds.insert(guild.id.get()))
+            && let Some(trigger) = &self.topgg_trigger
         {
-            if let Some(trigger) = &self.topgg_trigger {
-                trigger.request_sync();
-            }
+            trigger.request_sync();
         }
     }
 
@@ -429,21 +428,18 @@ impl EventHandler for Handler {
                 .topgg_guilds
                 .as_ref()
                 .is_some_and(|guilds| guilds.remove(incomplete.id.get()))
+                && let Some(trigger) = &self.topgg_trigger
             {
-                if let Some(trigger) = &self.topgg_trigger {
-                    trigger.request_sync();
-                }
+                trigger.request_sync();
             }
         }
     }
 
     async fn ready(&self, ctx: Context, ready: Ready) {
         info!(user = %ready.user.name, "helper gateway ready");
-        if let Some(guilds) = &self.topgg_guilds {
+        if let (Some(guilds), Some(trigger)) = (&self.topgg_guilds, &self.topgg_trigger) {
             guilds.set_ready(ready.guilds.iter().map(|guild| guild.id.get()));
-            if let Some(trigger) = &self.topgg_trigger {
-                trigger.request_sync();
-            }
+            trigger.request_sync();
         }
         for guild in &ready.guilds {
             let guild_id = guild.id.to_string();
