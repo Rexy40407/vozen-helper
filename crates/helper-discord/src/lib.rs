@@ -9075,6 +9075,12 @@ impl Handler {
                 let visible = Permissions::VIEW_CHANNEL
                     | Permissions::SEND_MESSAGES
                     | Permissions::READ_MESSAGE_HISTORY;
+                let staff_role_id = setting_u64_optional(
+                    &self.store,
+                    &guild_id.to_string(),
+                    "support.ticket.staff_role_id",
+                )
+                .map(RoleId::new);
                 let mut overwrites = vec![
                     PermissionOverwrite {
                         allow: Permissions::empty(),
@@ -9089,20 +9095,21 @@ impl Handler {
                         kind: PermissionOverwriteType::Member(component.user.id),
                     },
                     PermissionOverwrite {
-                        allow: visible | Permissions::MANAGE_CHANNELS,
+                        // Keep role pings scoped to private ticket channels. This
+                        // lets Helper notify a configured support role even when
+                        // that role is not globally mentionable.
+                        allow: visible
+                            | Permissions::MANAGE_CHANNELS
+                            | Permissions::MENTION_EVERYONE,
                         deny: Permissions::empty(),
                         kind: PermissionOverwriteType::Member(bot_id),
                     },
                 ];
-                if let Ok(Some(raw_role)) = self
-                    .store
-                    .get_setting(&guild_id.to_string(), "support.ticket.staff_role_id")
-                    && let Ok(role_id) = raw_role.parse::<u64>()
-                {
+                if let Some(role_id) = staff_role_id {
                     overwrites.push(PermissionOverwrite {
                         allow: visible,
                         deny: Permissions::empty(),
-                        kind: PermissionOverwriteType::Role(RoleId::new(role_id)),
+                        kind: PermissionOverwriteType::Role(role_id),
                     });
                 }
                 let category_id = self
@@ -9142,15 +9149,18 @@ impl Handler {
                     chrono::Utc::now().timestamp_millis() + sla_ms,
                     &serde_json::json!({"channel_id": channel.id.to_string()}).to_string(),
                 )?;
+                let content = ticket_opening_message(component.user.id, staff_role_id);
+                let mut allowed_mentions = CreateAllowedMentions::new().users([component.user.id]);
+                if let Some(role_id) = staff_role_id {
+                    allowed_mentions = allowed_mentions.roles([role_id]);
+                }
                 channel
                     .id
                     .send_message(
                         &ctx.http,
                         serenity::all::CreateMessage::new()
-                            .content(format!(
-                                "Hello <@{}>. Tell us what you need.",
-                                component.user.id
-                            ))
+                            .content(content)
+                            .allowed_mentions(allowed_mentions)
                             .components(vec![CreateActionRow::Buttons(vec![
                                 CreateButton::new("ticket:claim")
                                     .label("Claim")
@@ -9169,27 +9179,19 @@ impl Handler {
                 .await
             }
             "ticket:claim" => {
-                let is_staff = if let Ok(Some(raw_role)) = self
-                    .store
-                    .get_setting(&guild_id.to_string(), "support.ticket.staff_role_id")
-                {
-                    raw_role.parse::<u64>().ok().is_some_and(|role_id| {
-                        component.member.as_ref().is_some_and(|member| {
-                            member.roles.iter().any(|role| role.get() == role_id)
-                                || member.permissions.is_some_and(|permissions| {
-                                    permissions.contains(Permissions::MANAGE_CHANNELS)
-                                        || permissions.contains(Permissions::ADMINISTRATOR)
-                                })
-                        })
-                    })
-                } else {
-                    component.member.as_ref().is_some_and(|member| {
-                        member.permissions.is_some_and(|permissions| {
-                            permissions.contains(Permissions::MANAGE_CHANNELS)
-                                || permissions.contains(Permissions::ADMINISTRATOR)
-                        })
-                    })
-                };
+                let is_staff = ticket_actor_is_staff(
+                    ctx,
+                    guild_id,
+                    component.user.id,
+                    component.member.as_ref(),
+                    setting_u64_optional(
+                        &self.store,
+                        &guild_id.to_string(),
+                        "support.ticket.staff_role_id",
+                    )
+                    .map(RoleId::new),
+                )
+                .await;
                 if !is_staff {
                     return respond_component(
                         ctx,
@@ -9222,18 +9224,19 @@ impl Handler {
                     return respond_component(ctx, component, "Ticket not found.").await;
                 };
                 let is_opener = ticket.user_id == component.user.id.to_string();
-                let is_staff = if let Ok(Some(raw_role)) = self
-                    .store
-                    .get_setting(&guild_id.to_string(), "support.ticket.staff_role_id")
-                {
-                    raw_role.parse::<u64>().ok().is_some_and(|role_id| {
-                        component.member.as_ref().is_some_and(|member| {
-                            member.roles.iter().any(|role| role.get() == role_id)
-                        })
-                    })
-                } else {
-                    false
-                };
+                let is_staff = ticket_actor_is_staff(
+                    ctx,
+                    guild_id,
+                    component.user.id,
+                    component.member.as_ref(),
+                    setting_u64_optional(
+                        &self.store,
+                        &guild_id.to_string(),
+                        "support.ticket.staff_role_id",
+                    )
+                    .map(RoleId::new),
+                )
+                .await;
                 if !is_opener && !is_staff {
                     return respond_component(
                         ctx,
@@ -9286,18 +9289,19 @@ impl Handler {
                     return respond_component(ctx, component, "Ticket not found.").await;
                 };
                 let is_opener = ticket_for_auth.user_id == component.user.id.to_string();
-                let is_staff = if let Ok(Some(raw_role)) = self
-                    .store
-                    .get_setting(&guild_id.to_string(), "support.ticket.staff_role_id")
-                {
-                    raw_role.parse::<u64>().ok().is_some_and(|role_id| {
-                        component.member.as_ref().is_some_and(|member| {
-                            member.roles.iter().any(|role| role.get() == role_id)
-                        })
-                    })
-                } else {
-                    false
-                };
+                let is_staff = ticket_actor_is_staff(
+                    ctx,
+                    guild_id,
+                    component.user.id,
+                    component.member.as_ref(),
+                    setting_u64_optional(
+                        &self.store,
+                        &guild_id.to_string(),
+                        "support.ticket.staff_role_id",
+                    )
+                    .map(RoleId::new),
+                )
+                .await;
                 if !is_opener && !is_staff {
                     return respond_component(
                         ctx,
@@ -11531,6 +11535,80 @@ fn template_message(
     render_bounded_template_message(&template, slot, &fallback)
 }
 
+fn ticket_opening_message(
+    opener_id: serenity::all::UserId,
+    staff_role_id: Option<RoleId>,
+) -> String {
+    let staff_notice = staff_role_id
+        .map(|role_id| format!("\n<@&{role_id}>, a new ticket needs your attention."))
+        .unwrap_or_default();
+    format!("Hello <@{opener_id}>. Tell us what you need.{staff_notice}")
+}
+
+fn ticket_member_is_staff(
+    configured_role_id: Option<RoleId>,
+    member_roles: &[RoleId],
+    permissions: Permissions,
+    is_guild_owner: bool,
+) -> bool {
+    configured_role_id.is_some_and(|role_id| member_roles.contains(&role_id))
+        || is_guild_owner
+        || permissions.contains(Permissions::MANAGE_CHANNELS)
+        || permissions.contains(Permissions::ADMINISTRATOR)
+}
+
+/// Component payloads can omit resolved permissions and can lag behind a role
+/// change. Accept a valid snapshot immediately, then verify against Discord's
+/// current member and role state before denying a ticket action.
+async fn ticket_actor_is_staff(
+    ctx: &Context,
+    guild_id: serenity::all::GuildId,
+    user_id: serenity::all::UserId,
+    interaction_member: Option<&serenity::all::Member>,
+    configured_role_id: Option<RoleId>,
+) -> bool {
+    if interaction_member.is_some_and(|member| {
+        ticket_member_is_staff(
+            configured_role_id,
+            &member.roles,
+            member.permissions.unwrap_or_else(Permissions::empty),
+            false,
+        )
+    }) {
+        return true;
+    }
+
+    let (member, guild) = tokio::join!(
+        guild_id.member(&ctx.http, user_id),
+        guild_id.to_partial_guild(&ctx.http),
+    );
+    let Ok(member) = member else {
+        return false;
+    };
+    if configured_role_id.is_some_and(|role_id| member.roles.contains(&role_id)) {
+        return true;
+    }
+    let Ok(guild) = guild else {
+        return false;
+    };
+    let mut permissions = guild
+        .roles
+        .get(&RoleId::new(guild_id.get()))
+        .map(|role| role.permissions)
+        .unwrap_or_else(Permissions::empty);
+    for role_id in &member.roles {
+        if let Some(role) = guild.roles.get(role_id) {
+            permissions |= role.permissions;
+        }
+    }
+    ticket_member_is_staff(
+        configured_role_id,
+        &member.roles,
+        permissions,
+        guild.owner_id == user_id,
+    )
+}
+
 fn setting_u64(store: &Store, guild_id: &str, key: &str, default: u64) -> u64 {
     setting_string(store, guild_id, key)
         .and_then(|value| value.parse::<u64>().ok())
@@ -12339,6 +12417,7 @@ mod tests {
         parse_reminder_delay, parse_scheduled_event_window, reminder_repeat_interval_ms,
         render_custom_command, rss_retry_seconds, scheduled_action_feature, shadow_mode_enabled,
         should_cleanup_temp_channel, should_clear_anti_spam_timeout, template_message,
+        ticket_member_is_staff, ticket_opening_message,
     };
     use chrono::TimeZone;
     use helper_store::Store;
@@ -12601,6 +12680,55 @@ mod tests {
         assert!(custom_command_is_staff(Some(
             serenity::all::Permissions::MANAGE_GUILD
         )));
+    }
+
+    #[test]
+    fn ticket_opening_message_notifies_only_the_configured_support_role() {
+        let message = ticket_opening_message(
+            serenity::all::UserId::new(7),
+            Some(serenity::all::RoleId::new(9)),
+        );
+        assert!(message.contains("<@7>"));
+        assert!(message.contains("<@&9>"));
+
+        let message_without_staff = ticket_opening_message(serenity::all::UserId::new(7), None);
+        assert!(message_without_staff.contains("<@7>"));
+        assert!(!message_without_staff.contains("<@&"));
+    }
+
+    #[test]
+    fn ticket_actions_accept_support_role_and_server_administrators() {
+        let staff_role = serenity::all::RoleId::new(9);
+        assert!(ticket_member_is_staff(
+            Some(staff_role),
+            &[staff_role],
+            serenity::all::Permissions::empty(),
+            false,
+        ));
+        assert!(ticket_member_is_staff(
+            Some(staff_role),
+            &[],
+            serenity::all::Permissions::MANAGE_CHANNELS,
+            false,
+        ));
+        assert!(ticket_member_is_staff(
+            None,
+            &[],
+            serenity::all::Permissions::ADMINISTRATOR,
+            false,
+        ));
+        assert!(ticket_member_is_staff(
+            None,
+            &[],
+            serenity::all::Permissions::empty(),
+            true,
+        ));
+        assert!(!ticket_member_is_staff(
+            Some(staff_role),
+            &[],
+            serenity::all::Permissions::empty(),
+            false,
+        ));
     }
 
     #[test]
