@@ -4,7 +4,7 @@ import { normalizeForMatch } from './normalize.js';
 // topo da lista) e decancer (nomes ilegíveis). Puro.
 
 // Caracteres usados para "hoisting" (aparecem antes de letras na ordenação).
-const HOIST_CHARS = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~！＂＃";
+const HOIST_CHARS = '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~！＂＃';
 
 /** Precisa de dehoist? (começa com um caractere de hoisting). */
 export function needsDehoist(name: string): boolean {

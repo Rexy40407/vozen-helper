@@ -1,8 +1,4 @@
-import {
-  SlashCommandBuilder,
-  MessageFlags,
-  type Message,
-} from 'discord.js';
+import { SlashCommandBuilder, MessageFlags, type Message } from 'discord.js';
 import type { AppContext } from '../context.js';
 import type { Command } from '../commands/index.js';
 import { setAfk, getAfk, clearAfk } from './store.js';
@@ -20,7 +16,10 @@ const afk: Command = {
     if (!interaction.inCachedGuild()) return;
     const reason = interaction.options.getString('reason') ?? 'AFK';
     setAfk(ctx.db, interaction.guildId, interaction.user.id, reason, Date.now());
-    await interaction.reply({ content: `Marked you as AFK: ${reason}`, flags: MessageFlags.Ephemeral });
+    await interaction.reply({
+      content: `Marked you as AFK: ${reason}`,
+      flags: MessageFlags.Ephemeral,
+    });
   },
 };
 
@@ -32,7 +31,12 @@ export async function handleAfkMessage(ctx: AppContext, message: Message): Promi
   const own = getAfk(ctx.db, message.guildId, message.author.id);
   if (own && Date.now() - own.since > 3000) {
     clearAfk(ctx.db, message.guildId, message.author.id);
-    await message.reply({ content: `Welcome back! I've removed your AFK.`, allowedMentions: { repliedUser: false } }).catch(() => undefined);
+    await message
+      .reply({
+        content: `Welcome back! I've removed your AFK.`,
+        allowedMentions: { repliedUser: false },
+      })
+      .catch(() => undefined);
   }
 
   // 2) Avisar se mencionou alguém que está AFK.
@@ -43,7 +47,9 @@ export async function handleAfkMessage(ctx: AppContext, message: Message): Promi
     if (afkState) notes.push(`${u.username} is AFK: ${afkState.reason}`);
   }
   if (notes.length) {
-    await message.reply({ content: notes.join('\n'), allowedMentions: { repliedUser: false } }).catch(() => undefined);
+    await message
+      .reply({ content: notes.join('\n'), allowedMentions: { repliedUser: false } })
+      .catch(() => undefined);
   }
 }
 

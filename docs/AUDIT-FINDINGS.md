@@ -1,6 +1,7 @@
 # Vozen-helper — Auditoria intensiva (findings)
 
 ## ✅ CORRIGIDO (2026-07-15, TDD, suite 189 verde)
+
 - **CS-P2-1** starboard race → lock por-mensagem (`keyedLock.ts` novo + `starboard.ts`); teste.
 - **CS-P2-2** `/suggestion` sem defer → `deferReply` + `editReply` (`suggestions.ts`).
 - **CS-P3-3** ticket open double-click → lock por (guild,user) (`tickets.ts`).
@@ -10,6 +11,7 @@
 - **SEC-P3-b** logout enchia Set em memória → verify-before-revoke (`api/server.ts`).
 
 ## ⏳ POR FAZER
+
 - **SEC-P2** cookie sem expiry/revogação (meter token assinado no cookie, ou dropar o cookie).
 - **SEC-P3-a** rate-limit bucket global (trustProxy/keyGenerator) · **SEC-P3-c** segredo reutilizado
   · **SEC-P3-e** OAuth cross-app · **SEC-P3-f** CSRF implícito.
@@ -19,7 +21,6 @@
 
 ---
 
-
 > Auditoria de 2026-07-15. 4 agentes read-only; 2 concluíram (segurança do painel API,
 > comunidade+store), 2 falharam por limite de sessão (moderação/eventos, cobertura/ficheiros)
 > — **a re-correr**. Baseline: build/typecheck/lint 0, 188 testes, `npm audit` 0 CVEs.
@@ -27,6 +28,7 @@
 > ficheiros, suite de testes como rede. Remoções de ficheiros só com OK do dono.
 
 ## Segurança — Painel API (concluído)
+
 Veredicto: **0 P1.** Núcleo de auth sólido (sem bypass, sem token forjável, sem SQLi, sem
 escrita arbitrária de settings). 1 P2 + 6 P3.
 
@@ -49,6 +51,7 @@ escrita arbitrária de settings). 1 P2 + 6 P3.
   não explícito — frágil a mudanças futuras (ex.: registar formbody). Considerar Origin check.
 
 ## Comunidade + Store (concluído)
+
 2 P2 + vários P3. Verificados CORRETOS (não mexer): leveling (síncrono, upsert atómico),
 scheduler (reentrância + idempotente), vote dedup (PK), giveaway entries, migrações
 append-only, cache TTL 4s, GDPR erase (sem cache user-keyed), export (omite notes/moderator_id).
@@ -76,11 +79,13 @@ append-only, cache TTL 4s, GDPR erase (sem cache user-keyed), export (omite note
   (`gdpr.ts:35-107`); `deleteUserData` deixa votos de outros órfãos até à sweep diária.
 - **CS-P3-11** (high): `renderWelcome` dead code (`text.ts:4-12`, nunca chamado).
 
-## Falharam (re-correr quando reset) 
+## Falharam (re-correr quando reset)
+
 - Moderação/eventos (correção) — a25515d4: ia ler funções-folha que processam input não confiável.
 - Cobertura/tech-debt/ficheiros/docs — a0b5e38506: ia verificar abertura da DB (comment "read-only"
   mas painel escreve) + base de retenção dos tickets.
 
 ## Deps
+
 `npm audit` 0. Outdated (majors sem CVE): better-sqlite3 12, @fastify/rate-limit 11, dotenv 17,
 typescript 7, vitest 4, @types/node 26. Baixa prioridade (risco de breakage > ganho).

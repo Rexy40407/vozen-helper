@@ -79,72 +79,72 @@ O Vozen deve copiar o princípio de clareza, não esta pressão comercial nem a 
 
 ### Entrada, gestão e segurança
 
-| Feature MEE6 | Como funciona no MEE6 | Estado no Vozen | O que falta ou deve melhorar |
-|---|---|---|---|
-| Dashboard | Servidor → catálogo → configuração de plugin | Parcial | O painel atual só expõe Overview e Rank card; precisa de catálogo, estados, pesquisa e configuração das capacidades existentes. |
-| Welcome & Goodbye | Canal, DM, welcome card, farewell, verificação e auto-role, com variáveis e defaults [V] | Parcial | Welcome existe; falta um fluxo visual único para canal, DM, despedida, card, role e teste. |
-| Welcome Channel | Destino estruturado para recém-chegados, gerido pelo bot [?] | Falta/adjacente | Welcome normal não substitui uma área guiada de regras, informação e primeiros passos. |
-| Reaction Roles | Template ou zero; texto/embed; emoji, botão ou dropdown; múltiplas escolhas; publicar [V] | Parcial | Self-role panels existem, mas estão limitados e sem builder visual, modos verify/unique e escala. |
-| Moderator | Comandos, AutoMod, immunity roles, filtros, razões e audit logs [V] | Existe, backend mais forte | Expor configuração por objetivo, permissões por ação, preview da consequência e preflight de hierarchy. |
-| Automations | Trigger + condições + ações obrigatórias; Save/Publish [V] | Parcial | O MVP do Vozen cobre sobretudo mensagem + contains + reply. Faltam triggers de join/role/reação/voz, condições combinadas, ações e editor visual. |
-| Custom Commands | Resposta, variáveis, argumentos, defaults, role actions e acesso por role/canal [V] | Parcial | Tags e workflows cobrem o básico; faltam argumentos, variáveis claras, defaults, ações e editor/teste. |
-| Invite Tracker | Links próprios, /invites, /inviter e leaderboard [V] | Falta/paridade antiga não confirmada | Implementação Rust persistente, anti-abuso, atribuição transparente e painel de campanhas. |
-| Tickets | Painel com botão cria canal privado e mensagem inicial [V] | Existe, mais forte | O Vozen já tem claim, close, transcript, routing, notas, SLA e rating; falta tornar a configuração e publicação acessíveis no painel. |
-| Settings | Comandos globais e allow/deny por roles/canais; Bot Master delegado [V] | Parcial | Backend tem permissões, quotas, saúde, privacidade e import/export; falta uma área coerente, delegação RBAC e linguagem simples. |
+| Feature MEE6      | Como funciona no MEE6                                                                     | Estado no Vozen                      | O que falta ou deve melhorar                                                                                                                      |
+| ----------------- | ----------------------------------------------------------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Dashboard         | Servidor → catálogo → configuração de plugin                                              | Parcial                              | O painel atual só expõe Overview e Rank card; precisa de catálogo, estados, pesquisa e configuração das capacidades existentes.                   |
+| Welcome & Goodbye | Canal, DM, welcome card, farewell, verificação e auto-role, com variáveis e defaults [V]  | Parcial                              | Welcome existe; falta um fluxo visual único para canal, DM, despedida, card, role e teste.                                                        |
+| Welcome Channel   | Destino estruturado para recém-chegados, gerido pelo bot [?]                              | Falta/adjacente                      | Welcome normal não substitui uma área guiada de regras, informação e primeiros passos.                                                            |
+| Reaction Roles    | Template ou zero; texto/embed; emoji, botão ou dropdown; múltiplas escolhas; publicar [V] | Parcial                              | Self-role panels existem, mas estão limitados e sem builder visual, modos verify/unique e escala.                                                 |
+| Moderator         | Comandos, AutoMod, immunity roles, filtros, razões e audit logs [V]                       | Existe, backend mais forte           | Expor configuração por objetivo, permissões por ação, preview da consequência e preflight de hierarchy.                                           |
+| Automations       | Trigger + condições + ações obrigatórias; Save/Publish [V]                                | Parcial                              | O MVP do Vozen cobre sobretudo mensagem + contains + reply. Faltam triggers de join/role/reação/voz, condições combinadas, ações e editor visual. |
+| Custom Commands   | Resposta, variáveis, argumentos, defaults, role actions e acesso por role/canal [V]       | Parcial                              | Tags e workflows cobrem o básico; faltam argumentos, variáveis claras, defaults, ações e editor/teste.                                            |
+| Invite Tracker    | Links próprios, /invites, /inviter e leaderboard [V]                                      | Falta/paridade antiga não confirmada | Implementação Rust persistente, anti-abuso, atribuição transparente e painel de campanhas.                                                        |
+| Tickets           | Painel com botão cria canal privado e mensagem inicial [V]                                | Existe, mais forte                   | O Vozen já tem claim, close, transcript, routing, notas, SLA e rating; falta tornar a configuração e publicação acessíveis no painel.             |
+| Settings          | Comandos globais e allow/deny por roles/canais; Bot Master delegado [V]                   | Parcial                              | Backend tem permissões, quotas, saúde, privacidade e import/export; falta uma área coerente, delegação RBAC e linguagem simples.                  |
 
 ### Progressão, comunidade e utilidades
 
-| Feature MEE6 | Como funciona no MEE6 | Estado no Vozen | O que falta ou deve melhorar |
-|---|---|---|---|
-| Levels | XP por texto, exclusões, mensagem, role rewards e /rank [V] | Existe | Rank card já está implementado; faltam no painel regras de XP, cooldown/anti-farm, exclusões, role rewards, reset e explicação do cálculo. |
-| XP Leaderboard | Página que pode ser pública e indexada; CTA de entrada Premium [V] | Existe no bot, painel parcial | Página pública própria, privacidade opt-out, filtros por período e melhor ligação entre leaderboard, rank e rewards. |
-| Rank card | Default do servidor via Premium; cartão pessoal via Pro [V] | Existe | Continuar com banners e composição originais; acrescentar apenas UX própria, acessibilidade e publicação segura. |
-| Achievements | Marcos com anúncio e variáveis de jogador/conquista [V] | Falta | Motor de objetivos, progresso, recompensas, anti-abuso e biblioteca original de achievements. |
-| Starboards | Mensagens populares destacadas num canal [?] | Existe | Configuração visual de canal, emoji, threshold, conteúdo permitido, opt-out e moderação. |
-| Emojis | Plugin confirmado; mecânica pública atual pouco documentada [V/?] | Falta | Baixa prioridade: definir primeiro o problema real — gestão, pack, sugestão ou comandos de emoji. |
-| Polls | /poll, votação e /poll-end [V] | Existe | Builder visual, preview, calendário, permissões, resultados/export e templates. |
-| Embed Messages | Composer de título, corpo, fields, links, markdown e mentions [V] | Parcial | A API Studio/templates existe; falta editor visual completo com preview Discord, teste, draft e publish. |
-| Search Anything | Pesquisa externa dentro do Discord; providers atuais não documentados [?] | Falta | Só vale fazer com providers definidos, filtros de segurança e proposta clara; não é gap prioritário. |
-| Help | Plugin/comando de ajuda [V] | Existe | Transformar /help em ajuda contextual também no painel, com pesquisa por intenção e exemplos. |
-| Timers / Reminders | Mensagens configuráveis e agendadas/recorrentes [V/?] | Parcial | Reminders existem; falta calendário visual, recorrência, timezone, histórico e controlo de falhas. |
-| Statistics Channels | Canais cujo nome mostra contadores [V] | Parcial | Generalizar o counter atual para membros, boosts, online, YouTube/Twitch e limites de atualização. |
-| Temporary Channels | Hubs criam espaços temporários e gerem owner/permissões [V] | Falta | Lifecycle seguro, ownership transfer, limite por guild, limpeza automática e templates. |
-| Giveaways | Builder, XP/coins como prémio, requisitos, weighted odds, Save/Publish e reroll [V] | Existe | Já tem persistência, eligibility, list, end e reroll; faltam draft/publicação visual, odds ponderadas, preview e campanhas. |
-| Birthdays | Data, anúncio, idade opcional e birthday role [V] | Falta | Só deve entrar com privacidade por defeito, ano opcional, timezone e opt-out. |
-| Economy | Coins por daily/work/jogos, streak, loja, roles/items e boosts [V] | Falta | É um produto novo: ledger, antifraude, balanceamento, loja, sinks, moderação e suporte. Não é quick win. |
+| Feature MEE6        | Como funciona no MEE6                                                               | Estado no Vozen               | O que falta ou deve melhorar                                                                                                               |
+| ------------------- | ----------------------------------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Levels              | XP por texto, exclusões, mensagem, role rewards e /rank [V]                         | Existe                        | Rank card já está implementado; faltam no painel regras de XP, cooldown/anti-farm, exclusões, role rewards, reset e explicação do cálculo. |
+| XP Leaderboard      | Página que pode ser pública e indexada; CTA de entrada Premium [V]                  | Existe no bot, painel parcial | Página pública própria, privacidade opt-out, filtros por período e melhor ligação entre leaderboard, rank e rewards.                       |
+| Rank card           | Default do servidor via Premium; cartão pessoal via Pro [V]                         | Existe                        | Continuar com banners e composição originais; acrescentar apenas UX própria, acessibilidade e publicação segura.                           |
+| Achievements        | Marcos com anúncio e variáveis de jogador/conquista [V]                             | Falta                         | Motor de objetivos, progresso, recompensas, anti-abuso e biblioteca original de achievements.                                              |
+| Starboards          | Mensagens populares destacadas num canal [?]                                        | Existe                        | Configuração visual de canal, emoji, threshold, conteúdo permitido, opt-out e moderação.                                                   |
+| Emojis              | Plugin confirmado; mecânica pública atual pouco documentada [V/?]                   | Falta                         | Baixa prioridade: definir primeiro o problema real — gestão, pack, sugestão ou comandos de emoji.                                          |
+| Polls               | /poll, votação e /poll-end [V]                                                      | Existe                        | Builder visual, preview, calendário, permissões, resultados/export e templates.                                                            |
+| Embed Messages      | Composer de título, corpo, fields, links, markdown e mentions [V]                   | Parcial                       | A API Studio/templates existe; falta editor visual completo com preview Discord, teste, draft e publish.                                   |
+| Search Anything     | Pesquisa externa dentro do Discord; providers atuais não documentados [?]           | Falta                         | Só vale fazer com providers definidos, filtros de segurança e proposta clara; não é gap prioritário.                                       |
+| Help                | Plugin/comando de ajuda [V]                                                         | Existe                        | Transformar /help em ajuda contextual também no painel, com pesquisa por intenção e exemplos.                                              |
+| Timers / Reminders  | Mensagens configuráveis e agendadas/recorrentes [V/?]                               | Parcial                       | Reminders existem; falta calendário visual, recorrência, timezone, histórico e controlo de falhas.                                         |
+| Statistics Channels | Canais cujo nome mostra contadores [V]                                              | Parcial                       | Generalizar o counter atual para membros, boosts, online, YouTube/Twitch e limites de atualização.                                         |
+| Temporary Channels  | Hubs criam espaços temporários e gerem owner/permissões [V]                         | Falta                         | Lifecycle seguro, ownership transfer, limite por guild, limpeza automática e templates.                                                    |
+| Giveaways           | Builder, XP/coins como prémio, requisitos, weighted odds, Save/Publish e reroll [V] | Existe                        | Já tem persistência, eligibility, list, end e reroll; faltam draft/publicação visual, odds ponderadas, preview e campanhas.                |
+| Birthdays           | Data, anúncio, idade opcional e birthday role [V]                                   | Falta                         | Só deve entrar com privacidade por defeito, ano opcional, timezone e opt-out.                                                              |
+| Economy             | Coins por daily/work/jogos, streak, loja, roles/items e boosts [V]                  | Falta                         | É um produto novo: ledger, antifraude, balanceamento, loja, sinks, moderação e suporte. Não é quick win.                                   |
 
 ### Alertas sociais
 
 O padrão do MEE6 é provider → conta/feed público → canal Discord → mensagem/mention → guardar. As integrações dependem de atrasos e restrições dos providers. O MEE6 documenta limites Premium de 300 Twitch, 10 TikTok, 75 X, 10 Bluesky, 100 YouTube, Reddit, Instagram e RSS, 300 Kick e 100 Podcasts. [Limites oficiais](https://help.mee6.xyz/support/solutions/articles/101000490834-mee6-social-alerts-for-discord-limits-and-restrictions)
 
-| Provider | MEE6 | Vozen | Leitura |
-|---|---|---|---|
-| Twitch | Live alert, mensagem/role/canal, preview atualizado e auto-delete [V] | Falta | Prioridade alta para comunidades de creators. |
-| YouTube | Novo vídeo; limitações para lives, privados, agendados e members-only [V] | Falta | Prioridade alta; explicar claramente o que não é suportado. |
-| RSS | Feed universal, até 100 no plano documentado [V] | Falta | Melhor terceiro conector: cobre sites, blogs e podcasts sem integração específica. |
-| TikTok | Novo vídeo [V] | Falta | Prioridade média; limite e estabilidade do provider são riscos. |
-| X / Twitter | Nova publicação [V] | Falta | Prioridade média/baixa devido a custo e alterações frequentes de API. |
-| Bluesky | Provider suportado; filtros não documentados [V/?] | Falta | Pode ser mais simples e aberto, mas a procura deve ser validada. |
-| Reddit | Novas publicações; requer webhook no MEE6 [V] | Falta | Prioridade média depois de RSS. |
-| Instagram | Nova publicação [V] | Falta | APIs/restrições tornam suporte mais caro. |
-| Kick | Live alert [V] | Falta | Útil para creators depois de Twitch. |
-| Podcasts | Novo episódio com variáveis [V] | Falta | RSS pode entregar grande parte do valor primeiro. |
+| Provider    | MEE6                                                                      | Vozen | Leitura                                                                            |
+| ----------- | ------------------------------------------------------------------------- | ----- | ---------------------------------------------------------------------------------- |
+| Twitch      | Live alert, mensagem/role/canal, preview atualizado e auto-delete [V]     | Falta | Prioridade alta para comunidades de creators.                                      |
+| YouTube     | Novo vídeo; limitações para lives, privados, agendados e members-only [V] | Falta | Prioridade alta; explicar claramente o que não é suportado.                        |
+| RSS         | Feed universal, até 100 no plano documentado [V]                          | Falta | Melhor terceiro conector: cobre sites, blogs e podcasts sem integração específica. |
+| TikTok      | Novo vídeo [V]                                                            | Falta | Prioridade média; limite e estabilidade do provider são riscos.                    |
+| X / Twitter | Nova publicação [V]                                                       | Falta | Prioridade média/baixa devido a custo e alterações frequentes de API.              |
+| Bluesky     | Provider suportado; filtros não documentados [V/?]                        | Falta | Pode ser mais simples e aberto, mas a procura deve ser validada.                   |
+| Reddit      | Novas publicações; requer webhook no MEE6 [V]                             | Falta | Prioridade média depois de RSS.                                                    |
+| Instagram   | Nova publicação [V]                                                       | Falta | APIs/restrições tornam suporte mais caro.                                          |
+| Kick        | Live alert [V]                                                            | Falta | Útil para creators depois de Twitch.                                               |
+| Podcasts    | Novo episódio com variáveis [V]                                           | Falta | RSS pode entregar grande parte do valor primeiro.                                  |
 
 ### Receita, Web3, identidade e IA
 
-| Feature MEE6 | Como funciona | Estado no Vozen | Recomendação |
-|---|---|---|---|
-| Monetize | Memberships/donations dão roles, canais ou benefícios; Stripe trata billing [V] | Falta | Adiar. Pagamentos, IVA, refunds, chargebacks, KYC e suporte transformam isto num produto financeiro/comercial. |
-| NFT/Crypto Statistics | Canais com OpenSea/CoinGecko, refresh de 20/5 minutos [V] | Falta | Nicho; não reforça o posicionamento atual do Vozen. |
-| NFT queries | Pesquisa de coleções/ativos [?] | Falta | Adiar. |
-| NFT sales/listings | Alertas de vendas e listagens [?] | Falta | Adiar. |
-| Crypto statistics/queries | Preços e dados de moedas [V/?] | Falta | Adiar; provider e compliance de comunicação financeira. |
-| Gas Tracker | Custo de transações; mecânica atual não documentada [?] | Falta | Adiar. |
-| Gating | Wallet connect, regra de holdings e role automática [V] | Falta | Alto risco operacional, de segurança, fraude e privacidade; fora do core. |
-| Bot Personalizer | Dono cria app Discord, fornece token/secret e muda avatar/nome/status [V] | Falta | Não prioritário. Guardar tokens de bots de terceiros aumenta muito o blast radius e suporte. |
-| AI Characters | Personas instaladas por servidor e canais permitidos [V] | Falta | Produto separado; só considerar com objetivo e política de segurança próprios. |
-| MEE6 AI | Geração de texto/imagem e backstory, com quotas [V] | Falta | Não copiar como checkbox. Procurar primeiro um caso Vozen específico, como explicação de moderação ou setup assistido. |
-| Premium | Plugins pagos por servidor; Pro, AI, Characters e Web3 são separados [V] | Existe packaging próprio | Manter planos Vozen simples e limites explicáveis; não repetir a fragmentação do MEE6. |
+| Feature MEE6              | Como funciona                                                                   | Estado no Vozen          | Recomendação                                                                                                           |
+| ------------------------- | ------------------------------------------------------------------------------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| Monetize                  | Memberships/donations dão roles, canais ou benefícios; Stripe trata billing [V] | Falta                    | Adiar. Pagamentos, IVA, refunds, chargebacks, KYC e suporte transformam isto num produto financeiro/comercial.         |
+| NFT/Crypto Statistics     | Canais com OpenSea/CoinGecko, refresh de 20/5 minutos [V]                       | Falta                    | Nicho; não reforça o posicionamento atual do Vozen.                                                                    |
+| NFT queries               | Pesquisa de coleções/ativos [?]                                                 | Falta                    | Adiar.                                                                                                                 |
+| NFT sales/listings        | Alertas de vendas e listagens [?]                                               | Falta                    | Adiar.                                                                                                                 |
+| Crypto statistics/queries | Preços e dados de moedas [V/?]                                                  | Falta                    | Adiar; provider e compliance de comunicação financeira.                                                                |
+| Gas Tracker               | Custo de transações; mecânica atual não documentada [?]                         | Falta                    | Adiar.                                                                                                                 |
+| Gating                    | Wallet connect, regra de holdings e role automática [V]                         | Falta                    | Alto risco operacional, de segurança, fraude e privacidade; fora do core.                                              |
+| Bot Personalizer          | Dono cria app Discord, fornece token/secret e muda avatar/nome/status [V]       | Falta                    | Não prioritário. Guardar tokens de bots de terceiros aumenta muito o blast radius e suporte.                           |
+| AI Characters             | Personas instaladas por servidor e canais permitidos [V]                        | Falta                    | Produto separado; só considerar com objetivo e política de segurança próprios.                                         |
+| MEE6 AI                   | Geração de texto/imagem e backstory, com quotas [V]                             | Falta                    | Não copiar como checkbox. Procurar primeiro um caso Vozen específico, como explicação de moderação ou setup assistido. |
+| Premium                   | Plugins pagos por servidor; Pro, AI, Characters e Web3 são separados [V]        | Existe packaging próprio | Manter planos Vozen simples e limites explicáveis; não repetir a fragmentação do MEE6.                                 |
 
 ## O que o Vozen tem, mas precisa de mostrar e melhorar
 
@@ -294,16 +294,16 @@ Para cada feature:
 6. manter proveniência de ícones, imagens, fontes, templates e banners;
 7. fazer uma revisão visual final para garantir impressão global diferente.
 
-| Conduta | Risco indicativo |
-|---|---:|
-| Implementar de raiz a mesma feature genérica | Baixo |
-| Observar manualmente comportamento autorizado e escrever requisitos próprios | Baixo–médio |
-| UI original inspirada apenas nos princípios de clareza | Baixo–médio |
-| Fluxo, taxonomia, wording e output muito próximos | Médio |
-| Importar dados MEE6 fornecidos por clientes sem validação | Médio–alto |
-| Copiar código, textos, imagens, ícones, templates ou screenshots | Alto |
-| Scraping, APIs privadas, decompilação ou contornar controlos | Alto |
-| Branding que pareça oficial ou afiliado ao MEE6 | Alto |
+| Conduta                                                                      | Risco indicativo |
+| ---------------------------------------------------------------------------- | ---------------: |
+| Implementar de raiz a mesma feature genérica                                 |            Baixo |
+| Observar manualmente comportamento autorizado e escrever requisitos próprios |      Baixo–médio |
+| UI original inspirada apenas nos princípios de clareza                       |      Baixo–médio |
+| Fluxo, taxonomia, wording e output muito próximos                            |            Médio |
+| Importar dados MEE6 fornecidos por clientes sem validação                    |       Médio–alto |
+| Copiar código, textos, imagens, ícones, templates ou screenshots             |             Alto |
+| Scraping, APIs privadas, decompilação ou contornar controlos                 |             Alto |
+| Branding que pareça oficial ou afiliado ao MEE6                              |             Alto |
 
 ## Fontes principais
 

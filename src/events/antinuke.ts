@@ -33,7 +33,8 @@ export async function handleAuditForNuke(
   tracker: NukeTracker,
   now = Date.now(),
 ): Promise<void> {
-  if (!isFeatureEnabled(ctx.db, ctx.env.guildId, 'antinuke', ctx.modConfig.antiNuke.enabled)) return;
+  if (!isFeatureEnabled(ctx.db, ctx.env.guildId, 'antinuke', ctx.modConfig.antiNuke.enabled))
+    return;
   if (guild.id !== ctx.env.guildId) return;
   const executorId = entry.executorId;
   if (!executorId || isImmune(ctx, guild, executorId)) return;
@@ -53,7 +54,11 @@ export async function handleAuditForNuke(
 
   const reason = `Anti-nuke: ${count}× ${kind} in ${Math.round(ctx.modConfig.antiNuke.windowMs / 1000)}s`;
   if (ctx.modConfig.antiNuke.alertOnly) {
-    await alertOwner(ctx, guild, `⚠️ (alert) <@${executorId}> — ${reason}. Quarantine NOT applied (alertOnly).`);
+    await alertOwner(
+      ctx,
+      guild,
+      `⚠️ (alert) <@${executorId}> — ${reason}. Quarantine NOT applied (alertOnly).`,
+    );
     log.warn(reason + ' — alertOnly, sem ação.');
     return;
   }
@@ -61,7 +66,12 @@ export async function handleAuditForNuke(
   tracker.reset(executorId);
   const member = await guild.members.fetch(executorId).catch(() => null);
   if (member) await quarantineMember(ctx, guild, member, reason, now);
-  else await alertOwner(ctx, guild, `🚨 <@${executorId}> — ${reason}, but I couldn't find them as a member.`);
+  else
+    await alertOwner(
+      ctx,
+      guild,
+      `🚨 <@${executorId}> — ${reason}, but I couldn't find them as a member.`,
+    );
 }
 
 async function handleBotAdd(

@@ -91,7 +91,12 @@ export function getChannelSettingsView(
   const eff = (k: string, def: string): string => (map[k] != null ? map[k] : def);
   const lev = modConfig.community.leveling;
   return [
-    { key: 'chan.log', label: 'Canal de logs (moderação)', kind: 'channel', value: eff('chan.log', '') },
+    {
+      key: 'chan.log',
+      label: 'Canal de logs (moderação)',
+      kind: 'channel',
+      value: eff('chan.log', ''),
+    },
     {
       key: 'chan.suggestions',
       label: 'Canal de sugestões',

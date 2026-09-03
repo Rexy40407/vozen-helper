@@ -498,8 +498,7 @@ export const api = {
     request<{ ok: boolean; name: string }>(`/api/custom-commands/${encodeURIComponent(name)}`, {
       method: 'DELETE',
     }),
-  rolePanels: () =>
-    request<{ guildId: string; panels: RolePanelRecord[] }>('/api/role-panels'),
+  rolePanels: () => request<{ guildId: string; panels: RolePanelRecord[] }>('/api/role-panels'),
   createRolePanel: (payload: {
     channel: string;
     title: string;
@@ -513,14 +512,17 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
-  updateRolePanel: (messageId: string, payload: {
-    channel: string;
-    title: string;
-    description: string;
-    roleIds: string[];
-    selectionMode: 'multiple' | 'unique';
-    removeOnUnselect: boolean;
-  }) =>
+  updateRolePanel: (
+    messageId: string,
+    payload: {
+      channel: string;
+      title: string;
+      description: string;
+      roleIds: string[];
+      selectionMode: 'multiple' | 'unique';
+      removeOnUnselect: boolean;
+    },
+  ) =>
     request<{ ok: boolean; messageId: string; config: FeatureConfig }>(
       `/api/role-panels/${encodeURIComponent(messageId)}`,
       {
@@ -530,9 +532,12 @@ export const api = {
       },
     ),
   deleteRolePanel: (messageId: string) =>
-    request<{ ok: boolean; messageId: string }>(`/api/role-panels/${encodeURIComponent(messageId)}`, {
-      method: 'DELETE',
-    }),
+    request<{ ok: boolean; messageId: string }>(
+      `/api/role-panels/${encodeURIComponent(messageId)}`,
+      {
+        method: 'DELETE',
+      },
+    ),
   repairRolePanel: (messageId: string) =>
     request<{ ok: boolean; messageId: string; config: FeatureConfig }>(
       `/api/role-panels/${encodeURIComponent(messageId)}/repair`,
@@ -744,8 +749,7 @@ export const api = {
     }),
   deleteRssSubscription: (id: number) =>
     request<{ deleted: boolean; id: number }>(`/api/config/rss/${id}`, { method: 'DELETE' }),
-  rssHealth: (id: number) =>
-    request<RssSubscriptionHealth>(`/api/config/rss/${id}/health`),
+  rssHealth: (id: number) => request<RssSubscriptionHealth>(`/api/config/rss/${id}/health`),
   testRssDelivery: (
     id: number,
     payload: {
@@ -852,9 +856,7 @@ export const api = {
       }),
     }),
   externalSubscriptions: (provider: ExternalProvider) =>
-    request<{ guildId: string; subscriptions: ExternalSubscription[] }>(
-      `/api/config/${provider}`,
-    ),
+    request<{ guildId: string; subscriptions: ExternalSubscription[] }>(`/api/config/${provider}`),
   createExternalSubscription: (
     provider: ExternalProvider,
     payload: {
@@ -920,8 +922,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
-  tiktokOAuthStatus: () =>
-    request<TikTokOAuthStatus>('/api/providers/tiktok/oauth/status'),
+  tiktokOAuthStatus: () => request<TikTokOAuthStatus>('/api/providers/tiktok/oauth/status'),
   startTikTokOAuth: () =>
     request<{ authorization_url: string }>('/api/providers/tiktok/oauth/start', {
       method: 'POST',

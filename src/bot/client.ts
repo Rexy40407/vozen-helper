@@ -26,7 +26,13 @@ export function createClient(): Client {
       GatewayIntentBits.GuildMessageReactions,
     ],
     // Partials para eventos de mensagens/reações não-cacheadas (logging + starboard).
-    partials: [Partials.Message, Partials.GuildMember, Partials.User, Partials.Reaction, Partials.Channel],
+    partials: [
+      Partials.Message,
+      Partials.GuildMember,
+      Partials.User,
+      Partials.Reaction,
+      Partials.Channel,
+    ],
     makeCache: Options.cacheWithLimits(Options.DefaultMakeCacheSettings),
   });
 }

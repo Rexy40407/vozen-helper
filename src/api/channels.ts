@@ -31,7 +31,11 @@ export async function fetchGuildChannels(
  * '' = limpar (usar default). 'current' só é válido para `chan.levelup`.
  * `xp.exclude` é uma lista CSV de IDs.
  */
-export function validateChannelValue(key: string, value: string, validIds: ReadonlySet<string>): boolean {
+export function validateChannelValue(
+  key: string,
+  value: string,
+  validIds: ReadonlySet<string>,
+): boolean {
   if (value === '') return true; // limpar → volta ao default
   if (key === 'chan.levelup' && value === 'current') return true;
   if (key === 'xp.exclude') {

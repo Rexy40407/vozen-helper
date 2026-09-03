@@ -4,6 +4,7 @@
 > README. **Drift check** (sem git): confirma os exports vivos de `store.ts`.
 
 ## Status
+
 - **Prioridade**: P2 · **Esforço**: S · **Risco**: LOW · **Depende de**: nenhum
 - **Categoria**: tests · **Planned at**: N/A (não é repo git), 2026-07-14
 
@@ -22,10 +23,19 @@ produção. É o teste de maior ROI: o padrão já existe, é só replicar.
 - Padrão de teste existente — `tests/community.test.ts`:
   ```ts
   import { initDb } from '../src/store/db.js';
-  import { createSuggestion, voteSuggestion, countSuggestionVotes, addXp, /* ... */ } from '../src/community/store.js';
+  import {
+    createSuggestion,
+    voteSuggestion,
+    countSuggestionVotes,
+    addXp /* ... */,
+  } from '../src/community/store.js';
   let db: Database.Database;
-  beforeEach(() => { db = initDb(':memory:'); });
-  it('...', () => { /* asserts */ });
+  beforeEach(() => {
+    db = initDb(':memory:');
+  });
+  it('...', () => {
+    /* asserts */
+  });
   ```
 - Funções por cobrir (assinaturas em `src/community/store.ts` — abre o ficheiro e
   confirma antes de escrever os testes):
@@ -38,10 +48,10 @@ produção. É o teste de maior ROI: o padrão já existe, é só replicar.
 
 ## Comandos
 
-| Objetivo | Comando | Esperado |
-|-----------|---------|----------|
-| Testes | `npx vitest run` | todos passam |
-| Typecheck | `npm run typecheck` | exit 0 |
+| Objetivo  | Comando             | Esperado     |
+| --------- | ------------------- | ------------ |
+| Testes    | `npx vitest run`    | todos passam |
+| Typecheck | `npm run typecheck` | exit 0       |
 
 ## Scope
 
@@ -55,6 +65,7 @@ produção. É o teste de maior ROI: o padrão já existe, é só replicar.
 
 Estende `tests/community.test.ts` (ou cria `tests/communityStore.test.ts`) com, para
 cada domínio, um teste do caminho feliz + 1 borda:
+
 - **AFK**: set→get devolve reason/since; clear remove (get→null); clear de inexistente → false.
 - **Self-roles**: set→get devolve `{roleId, mode}`; `getSelfRolesForMessage` devolve todos os do msgId; upsert (setSelfRole 2× no mesmo customId) atualiza.
 - **Stats**: `incrStat` 3× 'messages' num dia + 1 noutro dia → `getStatsTotals` soma 4; joins/leaves independentes.

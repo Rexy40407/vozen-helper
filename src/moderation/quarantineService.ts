@@ -60,7 +60,11 @@ export async function unquarantineMember(
       await member.roles.add(valid, 'Quarantine ended');
     } catch (err) {
       log.error('Falha a repor cargos na unquarantine:', err);
-      await alertOwner(ctx, guild, `⚠️ Couldn't restore <@${member.id}>'s roles — quarantine kept.`);
+      await alertOwner(
+        ctx,
+        guild,
+        `⚠️ Couldn't restore <@${member.id}>'s roles — quarantine kept.`,
+      );
       return false;
     }
   }
@@ -82,7 +86,8 @@ export async function alertOwner(ctx: AppContext, guild: Guild, message: string)
   const channelId = ctx.modConfig.logging.channels.mod;
   if (channelId) {
     const ch = await ctx.client.channels.fetch(channelId).catch(() => null);
-    if (ch && ch.isTextBased() && !ch.isDMBased()) await ch.send({ embeds: [embed] }).catch(() => undefined);
+    if (ch && ch.isTextBased() && !ch.isDMBased())
+      await ch.send({ embeds: [embed] }).catch(() => undefined);
   }
   const owner = await guild.fetchOwner().catch(() => null);
   await owner?.send({ embeds: [embed] }).catch(() => undefined);

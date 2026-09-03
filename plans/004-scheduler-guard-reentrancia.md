@@ -4,6 +4,7 @@
 > README. **Drift check** (sem git): excertos vs código vivo antes de editar.
 
 ## Status
+
 - **Prioridade**: P2 · **Esforço**: S · **Risco**: LOW · **Depende de**: nenhum
 - **Categoria**: bug · **Planned at**: N/A (não é repo git), 2026-07-14
 
@@ -21,6 +22,7 @@ corre antes de qualquer await.)
 ## Estado atual
 
 `src/moderation/scheduler.ts`, classe `ExpiryScheduler`:
+
 ```ts
 async runDue(now: number): Promise<void> {
   const due = getDueActions(this.db, now);
@@ -36,15 +38,16 @@ start(nowProvider: () => number = Date.now): void {
   this.timer.unref?.();
 }
 ```
+
 `getDueActions` (`src/store/cases.ts`) devolve tudo com `execute_at <= now`;
 `deleteScheduled(db, id)` apaga por id.
 
 ## Comandos
 
-| Objetivo | Comando | Esperado |
-|-----------|---------|----------|
-| Typecheck/Build | `npm run typecheck` / `npm run build` | exit 0 |
-| Testes | `npx vitest run` | todos passam |
+| Objetivo        | Comando                               | Esperado     |
+| --------------- | ------------------------------------- | ------------ |
+| Typecheck/Build | `npm run typecheck` / `npm run build` | exit 0       |
+| Testes          | `npx vitest run`                      | todos passam |
 
 ## Scope
 
@@ -57,6 +60,7 @@ alterar. `getDueActions`/`deleteScheduled` — não alterar.
 ### Passo 1: flag de reentrância
 
 Adiciona um campo `private running = false;` e envolve o corpo de `runDue`:
+
 ```ts
 async runDue(now: number): Promise<void> {
   if (this.running) return;        // evita sobreposição de passagens
@@ -81,6 +85,7 @@ async runDue(now: number): Promise<void> {
 `ExpiryScheduler` recebe `db`, `client`, `runner`, `tickMs` no construtor — testável
 com um `client` fake (`{}` as never) e um `runner` que regista as ações que recebe. Em
 `tests/` (novo `tests/scheduler.test.ts`):
+
 1. `initDb(':memory:')`; agenda 1 ação `reminder` vencida (`scheduleAction` com
    `executeAt` no passado).
 2. Cria o scheduler com um `runner` LENTO (devolve uma Promise que resolves quando tu

@@ -26,13 +26,13 @@ These seven areas remain blocked until the dependency is configured and
 approved. This is intentional: enabling a card without its provider would
 create a setting that cannot deliver anything.
 
-| Feature | Server-side requirement |
-| --- | --- |
-| Instagram | `META_INSTAGRAM_ACCESS_TOKEN`, `META_INSTAGRAM_USER_ID`, Meta approval; an explicitly enabled `META_INSTAGRAM_DEVELOPMENT_MODE=true` may be used only for an authorised tester account while the Meta app remains in development |
-| TikTok | `TIKTOK_ACCESS_TOKEN`, Display API review, `TIKTOK_APP_APPROVED=true` |
-| Kick | `KICK_ACCESS_TOKEN`, official API/webhook approval, `KICK_APP_APPROVED=true` |
-| Server monetization | Stripe Connect credentials, signed webhooks, KYC/tax/refund support, `STRIPE_CONNECT_APPROVED=true` |
-| Wallet gating | `SIWE_DOMAIN`, `SIWE_URI`, `SIWE_SESSION_SECRET`, approved RPC and contract allow-list |
+| Feature             | Server-side requirement                                                                                                                                                                                                          |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Instagram           | `META_INSTAGRAM_ACCESS_TOKEN`, `META_INSTAGRAM_USER_ID`, Meta approval; an explicitly enabled `META_INSTAGRAM_DEVELOPMENT_MODE=true` may be used only for an authorised tester account while the Meta app remains in development |
+| TikTok              | `TIKTOK_ACCESS_TOKEN`, Display API review, `TIKTOK_APP_APPROVED=true`                                                                                                                                                            |
+| Kick                | `KICK_ACCESS_TOKEN`, official API/webhook approval, `KICK_APP_APPROVED=true`                                                                                                                                                     |
+| Server monetization | Stripe Connect credentials, signed webhooks, KYC/tax/refund support, `STRIPE_CONNECT_APPROVED=true`                                                                                                                              |
+| Wallet gating       | `SIWE_DOMAIN`, `SIWE_URI`, `SIWE_SESSION_SECRET`, approved RPC and contract allow-list                                                                                                                                           |
 
 Secrets belong only in the VPS environment (or a secret manager). They must
 never be pasted into Discord, the panel, commits, logs or this document.

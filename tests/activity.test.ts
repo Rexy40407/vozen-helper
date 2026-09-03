@@ -53,7 +53,14 @@ describe('attributeInvite — descobre por que convite o membro entrou', () => {
 
 describe('activity store — logActivity / getRecentActivity', () => {
   it('regista e devolve do mais recente ao mais antigo, com detail em JSON', () => {
-    logActivity(db, { guildId: G, type: 'join', userId: 'u1', userTag: 'Zé#1', detail: { inviteCode: 'abc', inviterId: 'inv1' }, createdAt: 100 });
+    logActivity(db, {
+      guildId: G,
+      type: 'join',
+      userId: 'u1',
+      userTag: 'Zé#1',
+      detail: { inviteCode: 'abc', inviterId: 'inv1' },
+      createdAt: 100,
+    });
     logActivity(db, { guildId: G, type: 'leave', userId: 'u2', userTag: 'Ana#2', createdAt: 200 });
 
     const rows = getRecentActivity(db, G, 50);
@@ -65,7 +72,8 @@ describe('activity store — logActivity / getRecentActivity', () => {
   });
 
   it('filtra por tipo e respeita o limite', () => {
-    for (let i = 0; i < 5; i++) logActivity(db, { guildId: G, type: 'join', userId: 'u' + i, createdAt: i });
+    for (let i = 0; i < 5; i++)
+      logActivity(db, { guildId: G, type: 'join', userId: 'u' + i, createdAt: i });
     logActivity(db, { guildId: G, type: 'leave', userId: 'x', createdAt: 99 });
     expect(getRecentActivity(db, G, 50, 'join')).toHaveLength(5);
     expect(getRecentActivity(db, G, 2)).toHaveLength(2);

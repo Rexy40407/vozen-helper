@@ -30,7 +30,11 @@ export function pruneCooldowns(map: Map<string, number>, now: number, cooldownMs
 }
 
 /** Escolhe o cargo (ou cargos) a aplicar num dado nível. */
-export function rolesForLevel(level: number, ladder: readonly LevelRole[], stack: boolean): { add: string[]; remove: string[] } {
+export function rolesForLevel(
+  level: number,
+  ladder: readonly LevelRole[],
+  stack: boolean,
+): { add: string[]; remove: string[] } {
   const earned = ladder.filter((r) => r.level <= level).sort((a, b) => a.level - b.level);
   if (!earned.length) return { add: [], remove: [] };
   if (stack) return { add: earned.map((r) => r.roleId), remove: [] };
@@ -39,7 +43,11 @@ export function rolesForLevel(level: number, ladder: readonly LevelRole[], stack
 }
 
 async function applyLevelRoles(ctx: AppContext, member: GuildMember, level: number): Promise<void> {
-  const { add, remove } = rolesForLevel(level, ctx.modConfig.community.leveling.levelRoles, ctx.modConfig.community.leveling.stackRoles);
+  const { add, remove } = rolesForLevel(
+    level,
+    ctx.modConfig.community.leveling.levelRoles,
+    ctx.modConfig.community.leveling.stackRoles,
+  );
   const botTop = member.guild.members.me?.roles.highest.position ?? 0;
   const guildHas = (id: string) => {
     const role = member.guild.roles.cache.get(id);
@@ -47,12 +55,20 @@ async function applyLevelRoles(ctx: AppContext, member: GuildMember, level: numb
   };
   const toAdd = add.filter((id) => guildHas(id) && !member.roles.cache.has(id));
   const toRemove = remove.filter((id) => guildHas(id) && member.roles.cache.has(id));
-  if (toAdd.length) await member.roles.add(toAdd, 'Level role').catch((e) => log.debug('level role add:', (e as Error).message));
-  if (toRemove.length) await member.roles.remove(toRemove, 'Level role (replace)').catch(() => undefined);
+  if (toAdd.length)
+    await member.roles
+      .add(toAdd, 'Level role')
+      .catch((e) => log.debug('level role add:', (e as Error).message));
+  if (toRemove.length)
+    await member.roles.remove(toRemove, 'Level role (replace)').catch(() => undefined);
 }
 
 /** Processa uma mensagem para XP. */
-export async function handleXpMessage(ctx: AppContext, message: Message, now = Date.now()): Promise<void> {
+export async function handleXpMessage(
+  ctx: AppContext,
+  message: Message,
+  now = Date.now(),
+): Promise<void> {
   const cfg = ctx.modConfig.community.leveling;
   if (
     !isFeatureEnabled(ctx.db, ctx.env.guildId, 'leveling', cfg.enabled) ||
@@ -61,7 +77,12 @@ export async function handleXpMessage(ctx: AppContext, message: Message, now = D
     message.guildId !== ctx.env.guildId
   )
     return;
-  if (isExemptChannel(message.channelId, resolveXpExcluded(ctx.db, ctx.env.guildId, cfg.noXpChannelIds, now)))
+  if (
+    isExemptChannel(
+      message.channelId,
+      resolveXpExcluded(ctx.db, ctx.env.guildId, cfg.noXpChannelIds, now),
+    )
+  )
     return;
 
   const key = `${message.guildId}:${message.author.id}`;
@@ -76,7 +97,8 @@ export async function handleXpMessage(ctx: AppContext, message: Message, now = D
   const oldLevel = levelFromXp(before);
   const newLevel = levelFromXp(after);
   if (newLevel > oldLevel) {
-    const member = message.member ?? (await message.guild.members.fetch(message.author.id).catch(() => null));
+    const member =
+      message.member ?? (await message.guild.members.fetch(message.author.id).catch(() => null));
     if (member) await applyLevelRoles(ctx, member, newLevel);
     const announceId = resolveLevelupChannel(ctx.db, ctx.env.guildId, cfg.announceChannelId, now);
     const text = `🎉 <@${message.author.id}> leveled up to **level ${newLevel}**!`;
@@ -94,7 +116,9 @@ const rank: Command = {
   data: new SlashCommandBuilder()
     .setName('rank')
     .setDescription('Shows your level and XP.')
-    .addUserOption((o) => o.setName('user').setDescription('Another member')) as SlashCommandBuilder,
+    .addUserOption((o) =>
+      o.setName('user').setDescription('Another member'),
+    ) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const user = interaction.options.getUser('user') ?? interaction.user;
@@ -116,13 +140,24 @@ const rank: Command = {
 
 const leaderboard: Command = {
   public: true,
-  data: new SlashCommandBuilder().setName('leaderboard').setDescription('Top 10 XP in the server.') as SlashCommandBuilder,
+  data: new SlashCommandBuilder()
+    .setName('leaderboard')
+    .setDescription('Top 10 XP in the server.') as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const top = getLeaderboard(ctx.db, interaction.guildId, 10);
-    if (!top.length) return void interaction.reply({ content: 'No XP recorded yet.', flags: MessageFlags.Ephemeral });
-    const lines = top.map((row, i) => `**${i + 1}.** <@${row.userId}> — level ${levelFromXp(row.xp)} (${row.xp} XP)`);
-    const embed = new EmbedBuilder().setTitle('🏆 Leaderboard').setColor(0xfee75c).setDescription(lines.join('\n'));
+    if (!top.length)
+      return void interaction.reply({
+        content: 'No XP recorded yet.',
+        flags: MessageFlags.Ephemeral,
+      });
+    const lines = top.map(
+      (row, i) => `**${i + 1}.** <@${row.userId}> — level ${levelFromXp(row.xp)} (${row.xp} XP)`,
+    );
+    const embed = new EmbedBuilder()
+      .setTitle('🏆 Leaderboard')
+      .setColor(0xfee75c)
+      .setDescription(lines.join('\n'));
     await interaction.reply({ embeds: [embed] });
   },
 };

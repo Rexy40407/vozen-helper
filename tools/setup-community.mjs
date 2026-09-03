@@ -4,13 +4,7 @@
 // Uso: node tools/setup-community.mjs   (lê DISCORD_TOKEN/GUILD_ID do .env)
 
 import 'dotenv/config';
-import {
-  Client,
-  GatewayIntentBits,
-  Events,
-  ChannelType,
-  PermissionFlagsBits,
-} from 'discord.js';
+import { Client, GatewayIntentBits, Events, ChannelType, PermissionFlagsBits } from 'discord.js';
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -21,8 +15,7 @@ client.once(Events.ClientReady, async (c) => {
   const everyone = guild.roles.everyone;
   const out = {};
 
-  const findChannel = (name) =>
-    guild.channels.cache.find((ch) => ch.name === name);
+  const findChannel = (name) => guild.channels.cache.find((ch) => ch.name === name);
   const findRole = (name) => guild.roles.cache.find((r) => r.name === name);
 
   const textCategory = guild.channels.cache.find(
@@ -60,7 +53,12 @@ client.once(Events.ClientReady, async (c) => {
     if (!ch) {
       const ov = [{ id: everyone.id, deny: [PermissionFlagsBits.ViewChannel] }];
       if (staffRoleId) ov.push({ id: staffRoleId, allow: [PermissionFlagsBits.ViewChannel] });
-      ch = await guild.channels.create({ name, type: ChannelType.GuildText, parent: parent?.id, permissionOverwrites: ov });
+      ch = await guild.channels.create({
+        name,
+        type: ChannelType.GuildText,
+        parent: parent?.id,
+        permissionOverwrites: ov,
+      });
       console.log(`criado (staff) ${name}`);
     } else {
       console.log(`reutilizado ${name}`);

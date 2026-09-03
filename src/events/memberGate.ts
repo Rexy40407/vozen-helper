@@ -36,7 +36,8 @@ export async function handleMemberJoin(
     const saved = getStickyRoles(ctx.db, member.guild.id, member.id);
     if (saved.length) {
       const valid = saved.filter((r) => member.guild.roles.cache.has(r) && r !== member.guild.id);
-      if (valid.length) await member.roles.add(valid, 'Sticky roles (rejoin)').catch(() => undefined);
+      if (valid.length)
+        await member.roles.add(valid, 'Sticky roles (rejoin)').catch(() => undefined);
       clearStickyRoles(ctx.db, member.guild.id, member.id);
     }
   }
@@ -45,15 +46,19 @@ export async function handleMemberJoin(
   //    screening (pending), espera-se pelo fim (handleMemberVerify trata disso).
   const autoRoleId = ctx.modConfig.verification.autoRoleId;
   if (autoRoleId && !member.pending && member.guild.roles.cache.has(autoRoleId)) {
-    await member.roles.add(autoRoleId, 'Entry auto-role').catch((err) =>
-      log.error('Falha a dar o auto-role:', (err as Error).message),
-    );
+    await member.roles
+      .add(autoRoleId, 'Entry auto-role')
+      .catch((err) => log.error('Falha a dar o auto-role:', (err as Error).message));
   }
 
   // 3) Join gate.
   if (isFeatureEnabled(ctx.db, ctx.env.guildId, 'joingate', ctx.modConfig.joinGate.enabled)) {
     const verdict = evaluateJoin(
-      { accountAgeMs: accountAgeMs(member.id, now), hasAvatar: member.user.avatar !== null, username: member.user.username },
+      {
+        accountAgeMs: accountAgeMs(member.id, now),
+        hasAvatar: member.user.avatar !== null,
+        username: member.user.username,
+      },
       ctx.modConfig.joinGate,
     );
     if (verdict.action !== 'none') {
@@ -107,7 +112,8 @@ async function enterRaidMode(ctx: AppContext, member: GuildMember, count: number
   const channelId = cfg.alertChannelId ?? ctx.modConfig.logging.channels.mod;
   if (channelId) {
     const ch = await ctx.client.channels.fetch(channelId).catch(() => null);
-    if (ch && ch.isTextBased() && !ch.isDMBased()) await ch.send({ embeds: [embed] }).catch(() => undefined);
+    if (ch && ch.isTextBased() && !ch.isDMBased())
+      await ch.send({ embeds: [embed] }).catch(() => undefined);
   }
 }
 

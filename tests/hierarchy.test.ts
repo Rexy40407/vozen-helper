@@ -3,18 +3,31 @@ import { canBotActOn, canModeratorActOn } from '../src/moderation/hierarchy.js';
 
 describe('canBotActOn', () => {
   it('pode agir sobre alguém abaixo', () => {
-    expect(canBotActOn({ botTopPosition: 10, targetTopPosition: 5, targetIsOwner: false }).ok).toBe(true);
+    expect(canBotActOn({ botTopPosition: 10, targetTopPosition: 5, targetIsOwner: false }).ok).toBe(
+      true,
+    );
   });
   it('não age sobre o dono', () => {
-    expect(canBotActOn({ botTopPosition: 10, targetTopPosition: 5, targetIsOwner: true }).ok).toBe(false);
+    expect(canBotActOn({ botTopPosition: 10, targetTopPosition: 5, targetIsOwner: true }).ok).toBe(
+      false,
+    );
   });
   it('não age sobre role igual ou superior', () => {
-    expect(canBotActOn({ botTopPosition: 5, targetTopPosition: 5, targetIsOwner: false }).ok).toBe(false);
-    expect(canBotActOn({ botTopPosition: 5, targetTopPosition: 8, targetIsOwner: false }).ok).toBe(false);
+    expect(canBotActOn({ botTopPosition: 5, targetTopPosition: 5, targetIsOwner: false }).ok).toBe(
+      false,
+    );
+    expect(canBotActOn({ botTopPosition: 5, targetTopPosition: 8, targetIsOwner: false }).ok).toBe(
+      false,
+    );
   });
   it('não age sobre si próprio', () => {
     expect(
-      canBotActOn({ botTopPosition: 10, targetTopPosition: 5, targetIsOwner: false, targetIsSelf: true }).ok,
+      canBotActOn({
+        botTopPosition: 10,
+        targetTopPosition: 5,
+        targetIsOwner: false,
+        targetIsSelf: true,
+      }).ok,
     ).toBe(false);
   });
 });

@@ -69,7 +69,8 @@ export function scanForScam(
 ): { hit: boolean; domain: string; kind: 'blacklist' | 'lookalike' | '' } {
   for (const domain of extractDomains(text)) {
     if (isBlacklistedDomain(domain, blacklist)) return { hit: true, domain, kind: 'blacklist' };
-    if (isLookalikeDomain(domain, protectedDomains)) return { hit: true, domain, kind: 'lookalike' };
+    if (isLookalikeDomain(domain, protectedDomains))
+      return { hit: true, domain, kind: 'lookalike' };
   }
   return { hit: false, domain: '', kind: '' };
 }

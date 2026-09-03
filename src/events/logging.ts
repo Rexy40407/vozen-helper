@@ -1,10 +1,4 @@
-import {
-  Events,
-  EmbedBuilder,
-  AuditLogEvent,
-  type Client,
-  type EmbedField,
-} from 'discord.js';
+import { Events, EmbedBuilder, AuditLogEvent, type Client, type EmbedField } from 'discord.js';
 import type { AppContext } from '../context.js';
 import type { LogCategory } from '../config.js';
 import { pickLogChannel, shouldIgnore } from '../logging/router.js';
@@ -22,11 +16,7 @@ import { log } from '../log.js';
 // Logging completo. Cada evento relevante é formatado e enviado para o canal da sua
 // categoria (config.logging.channels). Ignora canais/utilizadores da ignore list.
 
-async function sendLog(
-  ctx: AppContext,
-  category: LogCategory,
-  embed: EmbedBuilder,
-): Promise<void> {
+async function sendLog(ctx: AppContext, category: LogCategory, embed: EmbedBuilder): Promise<void> {
   // Override do painel (canal único p/ todas as categorias) ou o default por-categoria.
   const channelId =
     resolveChannelId(ctx.db, ctx.env.guildId, 'log', null) ??
@@ -34,7 +24,9 @@ async function sendLog(
   if (!channelId) return;
   const channel = await ctx.client.channels.fetch(channelId).catch(() => null);
   if (channel && channel.isTextBased() && !channel.isDMBased()) {
-    await channel.send({ embeds: [embed] }).catch((err) => log.debug('log falhou:', (err as Error).message));
+    await channel
+      .send({ embeds: [embed] })
+      .catch((err) => log.debug('log falhou:', (err as Error).message));
   }
 }
 
@@ -52,7 +44,11 @@ export function registerLoggingHandlers(client: Client, ctx: AppContext): void {
       .setColor(0xed4245)
       .setDescription(truncate(message.content || '*(no cached content)*'))
       .addFields(
-        { name: 'Author', value: message.author ? `<@${message.author.id}>` : 'unknown', inline: true },
+        {
+          name: 'Author',
+          value: message.author ? `<@${message.author.id}>` : 'unknown',
+          inline: true,
+        },
         { name: 'Channel', value: `<#${message.channelId}>`, inline: true },
       );
     void sendLog(ctx, 'messages', embed);
@@ -95,7 +91,8 @@ export function registerLoggingHandlers(client: Client, ctx: AppContext): void {
       .setTitle('Member left')
       .setColor(0xed4245)
       .setDescription(`<@${member.id}> (${member.user.tag})`);
-    if (roles.length) embed.addFields({ name: 'Roles they had', value: truncate(roles.join(' '), 900) });
+    if (roles.length)
+      embed.addFields({ name: 'Roles they had', value: truncate(roles.join(' '), 900) });
     void sendLog(ctx, 'members', embed);
   });
 
@@ -110,8 +107,18 @@ export function registerLoggingHandlers(client: Client, ctx: AppContext): void {
       });
     }
     const rd = diffRoles([...oldM.roles.cache.keys()], [...newM.roles.cache.keys()]);
-    if (rd.added.length) fields.push({ name: 'Roles +', value: rd.added.map((r) => `<@&${r}>`).join(' '), inline: true });
-    if (rd.removed.length) fields.push({ name: 'Roles −', value: rd.removed.map((r) => `<@&${r}>`).join(' '), inline: true });
+    if (rd.added.length)
+      fields.push({
+        name: 'Roles +',
+        value: rd.added.map((r) => `<@&${r}>`).join(' '),
+        inline: true,
+      });
+    if (rd.removed.length)
+      fields.push({
+        name: 'Roles −',
+        value: rd.removed.map((r) => `<@&${r}>`).join(' '),
+        inline: true,
+      });
     if (!fields.length) return;
     const embed = new EmbedBuilder()
       .setTitle('Member updated')
@@ -128,9 +135,13 @@ export function registerLoggingHandlers(client: Client, ctx: AppContext): void {
     let text: string | null = null;
     if (!oldS.channelId && newS.channelId) text = `joined <#${newS.channelId}>`;
     else if (oldS.channelId && !newS.channelId) text = `left <#${oldS.channelId}>`;
-    else if (oldS.channelId !== newS.channelId) text = `moved <#${oldS.channelId}> → <#${newS.channelId}>`;
+    else if (oldS.channelId !== newS.channelId)
+      text = `moved <#${oldS.channelId}> → <#${newS.channelId}>`;
     if (!text) return;
-    const embed = new EmbedBuilder().setTitle('Voice').setColor(0x5865f2).setDescription(`<@${uid}> ${text}`);
+    const embed = new EmbedBuilder()
+      .setTitle('Voice')
+      .setColor(0x5865f2)
+      .setDescription(`<@${uid}> ${text}`);
     void sendLog(ctx, 'voice', embed);
   });
 

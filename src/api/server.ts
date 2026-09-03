@@ -435,8 +435,16 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
       if (Buffer.byteLength(serialized, 'utf8') > WEB_CONFIG_MAX_VALUE_BYTES) {
         return reply.code(413).send({ error: 'value_too_large' });
       }
-      setSetting(opts.db, opts.guildId, webConfigStorageKey(key as WebConfigKey), serialized, now());
-      console.log(`[api] web config ${key} updated by ${opts.allowedUserId} @ ${new Date().toISOString()}`);
+      setSetting(
+        opts.db,
+        opts.guildId,
+        webConfigStorageKey(key as WebConfigKey),
+        serialized,
+        now(),
+      );
+      console.log(
+        `[api] web config ${key} updated by ${opts.allowedUserId} @ ${new Date().toISOString()}`,
+      );
       return { ok: true, config: readWebConfig(opts.db, opts.guildId) };
     },
   );
@@ -473,24 +481,29 @@ export function buildServer(opts: ServerOptions): FastifyInstance {
       }
       const save = opts.db.transaction(() => {
         for (const [key, value] of entries) {
-          setSetting(opts.db, opts.guildId, webConfigStorageKey(key as WebConfigKey), JSON.stringify(value), now());
+          setSetting(
+            opts.db,
+            opts.guildId,
+            webConfigStorageKey(key as WebConfigKey),
+            JSON.stringify(value),
+            now(),
+          );
         }
       });
       save();
-      console.log(`[api] web config imported by ${opts.allowedUserId} @ ${new Date().toISOString()}`);
+      console.log(
+        `[api] web config imported by ${opts.allowedUserId} @ ${new Date().toISOString()}`,
+      );
       return { ok: true, config: readWebConfig(opts.db, opts.guildId) };
     },
   );
 
-  app.post(
-    '/api/web-config/delete',
-    { preHandler: guard },
-    async (_req: FastifyRequest) => {
-      for (const key of WEB_CONFIG_KEYS) deleteSetting(opts.db, opts.guildId, webConfigStorageKey(key));
-      console.log(`[api] web config deleted by ${opts.allowedUserId} @ ${new Date().toISOString()}`);
-      return { ok: true, config: readWebConfig(opts.db, opts.guildId) };
-    },
-  );
+  app.post('/api/web-config/delete', { preHandler: guard }, async (_req: FastifyRequest) => {
+    for (const key of WEB_CONFIG_KEYS)
+      deleteSetting(opts.db, opts.guildId, webConfigStorageKey(key));
+    console.log(`[api] web config deleted by ${opts.allowedUserId} @ ${new Date().toISOString()}`);
+    return { ok: true, config: readWebConfig(opts.db, opts.guildId) };
+  });
 
   return app;
 }

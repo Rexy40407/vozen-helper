@@ -2,7 +2,12 @@ import { describe, it, expect } from 'vitest';
 import { AuditLogEvent } from 'discord.js';
 import { snowflakeToTimestamp, accountAgeMs, DISCORD_EPOCH } from '../src/moderation/snowflake.js';
 import { pickLogChannel, shouldIgnore } from '../src/logging/router.js';
-import { truncate, diffRoles, describeAuditAction, LOGGED_AUDIT_ACTIONS } from '../src/logging/format.js';
+import {
+  truncate,
+  diffRoles,
+  describeAuditAction,
+  LOGGED_AUDIT_ACTIONS,
+} from '../src/logging/format.js';
 import type { LogConfig } from '../src/config.js';
 
 describe('snowflake', () => {

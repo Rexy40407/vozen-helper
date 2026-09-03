@@ -7,6 +7,7 @@
 > antes de editar; mismatch = STOP.
 
 ## Status
+
 - **Prioridade**: P1
 - **Esforço**: S
 - **Risco**: LOW
@@ -29,6 +30,7 @@ precisamente na emergência (um mod comprometido, muitas ações a competir) que
 ## Estado atual
 
 `src/moderation/quarantineService.ts`, função `unquarantineMember` (~linhas 47-67):
+
 ```ts
 export async function unquarantineMember(
   ctx: AppContext,
@@ -39,11 +41,12 @@ export async function unquarantineMember(
   if (!saved) return false;
   const valid = saved.roleIds.filter((r) => guild.roles.cache.has(r) && r !== guild.id);
   if (valid.length) await member.roles.add(valid, 'Fim da quarentena').catch(() => undefined);
-  clearQuarantine(ctx.db, guild.id, member.id);   // <-- corre mesmo que o add falhe
-  recordCase(ctx, { /* ... type: 'unquarantine' ... */ });
+  clearQuarantine(ctx.db, guild.id, member.id); // <-- corre mesmo que o add falhe
+  recordCase(ctx, {/* ... type: 'unquarantine' ... */});
   return true;
 }
 ```
+
 Store relevante (`src/store/quarantine.ts`): `getQuarantine`, `clearQuarantine`
 existem e são síncronas.
 
@@ -53,19 +56,21 @@ Padrão de logging do repo: `import { log } from '../log.js';` e `log.error('...
 
 ## Comandos que vais precisar
 
-| Objetivo | Comando | Esperado |
-|-----------|---------|----------|
-| Typecheck | `npm run typecheck` | exit 0 |
-| Build | `npm run build` | exit 0 |
-| Testes | `npx vitest run` | todos passam |
+| Objetivo  | Comando             | Esperado     |
+| --------- | ------------------- | ------------ |
+| Typecheck | `npm run typecheck` | exit 0       |
+| Build     | `npm run build`     | exit 0       |
+| Testes    | `npx vitest run`    | todos passam |
 
 ## Scope
 
 **In scope:**
+
 - `src/moderation/quarantineService.ts`
 - `tests/` — novo teste (ver Test plan)
 
 **Out of scope:**
+
 - `src/store/quarantine.ts` — o store está correto; não alterar.
 - O caminho de `quarantineMember` (aplicar quarentena) — só o restauro é o alvo.
 
@@ -79,6 +84,7 @@ Reescreve `unquarantineMember` para: tentar o `add` num try/catch REAL; se falha
 cargos válidos a repor) considera sucesso (limpa o registo e regista o caso).
 
 Forma alvo (mantém comentários em PT):
+
 ```ts
 const valid = saved.roleIds.filter((r) => guild.roles.cache.has(r) && r !== guild.id);
 if (valid.length) {
@@ -86,12 +92,16 @@ if (valid.length) {
     await member.roles.add(valid, 'Fim da quarentena');
   } catch (err) {
     log.error('Falha a repor cargos na unquarantine:', err);
-    await alertOwner(ctx, guild, `⚠️ Não consegui repor os cargos de <@${member.id}> — quarentena mantida.`);
+    await alertOwner(
+      ctx,
+      guild,
+      `⚠️ Não consegui repor os cargos de <@${member.id}> — quarentena mantida.`,
+    );
     return false;
   }
 }
 clearQuarantine(ctx.db, guild.id, member.id);
-recordCase(ctx, { /* inalterado */ });
+recordCase(ctx, {/* inalterado */});
 return true;
 ```
 
@@ -101,6 +111,7 @@ return true;
 
 `unquarantineMember` usa objetos do discord.js (`GuildMember`), por isso o teste usa um
 **stub mínimo**. Cria `tests/quarantine.test.ts` (DB `:memory:` via `initDb`) e:
+
 1. `saveQuarantine(db, g, u, ['r1','r2'], 'nuke', now)`.
 2. Chama `unquarantineMember` com um `ctx` mínimo (`{ db, env:{guildId}, modConfig, client }`
    com o `client` stubado o suficiente) e um `member` fake cujo `roles.add` **rejeita**

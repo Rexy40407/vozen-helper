@@ -7,15 +7,15 @@ if cited state has drifted.
 
 ## Execution order and status
 
-| Plan | Title | Priority | Effort | Depends on | Status |
-|---|---|---:|---:|---|---|
-| 001 | Harden OAuth, sessions and mutation access | P0 | M | — | DONE (Rust security gates pass) |
-| 002 | Make feature settings typed, atomic and runtime-backed | P0 | L | 001 | PARTIAL (runtime coverage is broad; parity audit remains) |
-| 003 | Close legacy API, import and moderation exposure gaps | P1 | M | 001 | PARTIAL (permissions/mentions fixed; import/legacy retirement remains) |
-| 004 | Restore reproducible verification across Node, Rust and panel | P1 | M | — | DONE (all local CI gates pass) |
-| 005 | Establish migration parity and reconcile operating docs | P1 | L | 004 | PARTIAL (runtime/docs reconciliation remains) |
-| 006 | Refresh the Node lockfile and restore a clean high-severity audit | P1 | S | 004 | DONE (npm audits report 0 vulnerabilities) |
-| 007 | Close provider readiness gates | P1 | L | 001, 004, 005 | BLOCKED BY EXTERNAL CREDENTIALS/APPROVAL |
+| Plan | Title                                                             | Priority | Effort | Depends on    | Status                                                                 |
+| ---- | ----------------------------------------------------------------- | -------: | -----: | ------------- | ---------------------------------------------------------------------- |
+| 001  | Harden OAuth, sessions and mutation access                        |       P0 |      M | —             | DONE (Rust security gates pass)                                        |
+| 002  | Make feature settings typed, atomic and runtime-backed            |       P0 |      L | 001           | PARTIAL (runtime coverage is broad; parity audit remains)              |
+| 003  | Close legacy API, import and moderation exposure gaps             |       P1 |      M | 001           | PARTIAL (permissions/mentions fixed; import/legacy retirement remains) |
+| 004  | Restore reproducible verification across Node, Rust and panel     |       P1 |      M | —             | DONE (all local CI gates pass)                                         |
+| 005  | Establish migration parity and reconcile operating docs           |       P1 |      L | 004           | PARTIAL (runtime/docs reconciliation remains)                          |
+| 006  | Refresh the Node lockfile and restore a clean high-severity audit |       P1 |      S | 004           | DONE (npm audits report 0 vulnerabilities)                             |
+| 007  | Close provider readiness gates                                    |       P1 |      L | 001, 004, 005 | BLOCKED BY EXTERNAL CREDENTIALS/APPROVAL                               |
 
 ## Dependency notes
 

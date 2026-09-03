@@ -5,12 +5,8 @@ describe('Rust release configuration', () => {
   it('preserves the private tracker identity from the active shared environment', () => {
     const script = readFileSync('deploy/prepare-rust-release.sh', 'utf8');
     const readExisting = script.indexOf('read_existing_env_value()');
-    const loadClient = script.indexOf(
-      'read_existing_env_value HELPER_PRIVATE_TRACKER_CLIENT_ID',
-    );
-    const loadOwner = script.indexOf(
-      'read_existing_env_value HELPER_PRIVATE_TRACKER_OWNER_ID',
-    );
+    const loadClient = script.indexOf('read_existing_env_value HELPER_PRIVATE_TRACKER_CLIENT_ID');
+    const loadOwner = script.indexOf('read_existing_env_value HELPER_PRIVATE_TRACKER_OWNER_ID');
     const replaceEnvironment = script.indexOf('cp "$node_root/.env" "$root/shared/.env"');
 
     expect(readExisting).toBeGreaterThan(-1);

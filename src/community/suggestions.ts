@@ -68,26 +68,43 @@ const suggest: Command = {
   data: new SlashCommandBuilder()
     .setName('suggest')
     .setDescription('Send a suggestion to the server.')
-    .addStringOption((o) => o.setName('text').setDescription('Your suggestion').setRequired(true)) as SlashCommandBuilder,
+    .addStringOption((o) =>
+      o.setName('text').setDescription('Your suggestion').setRequired(true),
+    ) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const cfg = ctx.modConfig.community.suggestions;
     const chanId = resolveChannelId(ctx.db, ctx.env.guildId, 'suggestions', cfg.channelId);
     if (!isFeatureEnabled(ctx.db, ctx.env.guildId, 'suggestions', cfg.enabled) || !chanId) {
-      return void interaction.reply({ content: 'Suggestions are not configured.', flags: MessageFlags.Ephemeral });
+      return void interaction.reply({
+        content: 'Suggestions are not configured.',
+        flags: MessageFlags.Ephemeral,
+      });
     }
     const channel = await interaction.guild.channels.fetch(chanId).catch(() => null);
     if (!channel || channel.type !== ChannelType.GuildText) {
-      return void interaction.reply({ content: 'Invalid suggestions channel.', flags: MessageFlags.Ephemeral });
+      return void interaction.reply({
+        content: 'Invalid suggestions channel.',
+        flags: MessageFlags.Ephemeral,
+      });
     }
     const content = interaction.options.getString('text', true);
-    const id = createSuggestion(ctx.db, interaction.guildId, interaction.user.id, content, Date.now());
+    const id = createSuggestion(
+      ctx.db,
+      interaction.guildId,
+      interaction.user.id,
+      content,
+      Date.now(),
+    );
     const msg = await channel.send({
       embeds: [buildEmbed(id, content, interaction.user.tag, 'pending', { up: 0, down: 0 })],
       components: [voteRow(id)],
     });
     setSuggestionMessage(ctx.db, id, msg.id);
-    await interaction.reply({ content: `Suggestion #${id} sent! ${channel}`, flags: MessageFlags.Ephemeral });
+    await interaction.reply({
+      content: `Suggestion #${id} sent! ${channel}`,
+      flags: MessageFlags.Ephemeral,
+    });
   },
 };
 
@@ -107,8 +124,12 @@ const suggestion: Command = {
           { name: 'Consider', value: 'considered' },
         ),
     )
-    .addIntegerOption((o) => o.setName('id').setDescription('Suggestion number').setRequired(true).setMinValue(1))
-    .addStringOption((o) => o.setName('reason').setDescription('Reason (optional)')) as SlashCommandBuilder,
+    .addIntegerOption((o) =>
+      o.setName('id').setDescription('Suggestion number').setRequired(true).setMinValue(1),
+    )
+    .addStringOption((o) =>
+      o.setName('reason').setDescription('Reason (optional)'),
+    ) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const id = interaction.options.getInteger('id', true);
@@ -116,7 +137,10 @@ const suggestion: Command = {
     const reason = interaction.options.getString('reason') ?? undefined;
     const sug = getSuggestion(ctx.db, id);
     if (!sug || sug.guildId !== interaction.guildId) {
-      return void interaction.reply({ content: `Suggestion #${id} not found.`, flags: MessageFlags.Ephemeral });
+      return void interaction.reply({
+        content: `Suggestion #${id} not found.`,
+        flags: MessageFlags.Ephemeral,
+      });
     }
     // As chamadas seguintes (fetch canal/msg/autor + edit + DM) podem passar a janela de 3s
     // do ack — defer primeiro para o token não expirar ("Unknown interaction").
@@ -132,13 +156,26 @@ const suggestion: Command = {
         if (msg) {
           await msg
             .edit({
-              embeds: [buildEmbed(id, sug.content, author?.tag ?? 'unknown', status, countSuggestionVotes(ctx.db, id), reason)],
+              embeds: [
+                buildEmbed(
+                  id,
+                  sug.content,
+                  author?.tag ?? 'unknown',
+                  status,
+                  countSuggestionVotes(ctx.db, id),
+                  reason,
+                ),
+              ],
               components: status === 'considered' ? [voteRow(id)] : [],
             })
             .catch(() => undefined);
         }
         // DM ao autor (falha silenciosa).
-        await author?.send(`Your suggestion #${id} was ${STATUS_META[status].label}.${reason ? `\nReason: ${reason}` : ''}`).catch(() => undefined);
+        await author
+          ?.send(
+            `Your suggestion #${id} was ${STATUS_META[status].label}.${reason ? `\nReason: ${reason}` : ''}`,
+          )
+          .catch(() => undefined);
       }
     }
     await interaction.editReply({ content: `Suggestion #${id} → ${STATUS_META[status].label}.` });
@@ -146,22 +183,33 @@ const suggestion: Command = {
 };
 
 /** Handler dos botões de voto (sug:up:<id> / sug:down:<id>). */
-export async function handleSuggestionVote(ctx: AppContext, interaction: ButtonInteraction): Promise<void> {
+export async function handleSuggestionVote(
+  ctx: AppContext,
+  interaction: ButtonInteraction,
+): Promise<void> {
   if (!interaction.inCachedGuild()) return;
   const [, dir, idStr] = interaction.customId.split(':');
   const id = Number(idStr);
   const sug = getSuggestion(ctx.db, id);
-  if (!sug) return void interaction.reply({ content: 'Suggestion not found.', flags: MessageFlags.Ephemeral });
+  if (!sug)
+    return void interaction.reply({
+      content: 'Suggestion not found.',
+      flags: MessageFlags.Ephemeral,
+    });
 
   voteSuggestion(ctx.db, id, interaction.user.id, dir === 'up' ? 1 : -1);
   const votes = countSuggestionVotes(ctx.db, id);
   const author = await interaction.client.users.fetch(sug.authorId).catch(() => null);
   // O motivo da staff não é persistido na BD — recupera-se do embed atual para não
   // desaparecer ao re-renderizar depois de um voto numa sugestão "em consideração".
-  const staffReason = interaction.message.embeds[0]?.fields?.find((f) => f.name === 'Staff response')?.value;
+  const staffReason = interaction.message.embeds[0]?.fields?.find(
+    (f) => f.name === 'Staff response',
+  )?.value;
   try {
     await interaction.update({
-      embeds: [buildEmbed(id, sug.content, author?.tag ?? 'unknown', sug.status, votes, staffReason)],
+      embeds: [
+        buildEmbed(id, sug.content, author?.tag ?? 'unknown', sug.status, votes, staffReason),
+      ],
     });
   } catch (err) {
     log.debug('Falha a atualizar voto:', (err as Error).message);

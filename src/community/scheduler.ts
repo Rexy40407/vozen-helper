@@ -17,7 +17,9 @@ export async function runCommunityScheduled(
   switch (action.type) {
     case 'reminder': {
       const { channelId, text } = safeJson(action.payload);
-      const channel = channelId ? await ctx.client.channels.fetch(channelId).catch(() => null) : null;
+      const channel = channelId
+        ? await ctx.client.channels.fetch(channelId).catch(() => null)
+        : null;
       // O texto vem do utilizador (/remind é público) — só se permite mencionar o
       // próprio autor do lembrete; qualquer @everyone/menção de cargo no texto NÃO
       // notifica (ver buildReminderSend).
@@ -32,19 +34,26 @@ export async function runCommunityScheduled(
     case 'birthday_role_remove': {
       const guild = await ctx.client.guilds.fetch(action.guildId).catch(() => null);
       const member = guild ? await guild.members.fetch(action.targetId).catch(() => null) : null;
-      if (member && action.payload) await member.roles.remove(action.payload, 'Birthday ended').catch(() => undefined);
+      if (member && action.payload)
+        await member.roles.remove(action.payload, 'Birthday ended').catch(() => undefined);
       break;
     }
     case 'bump_reminder': {
       const { channelId } = safeJson(action.payload);
-      const channel = channelId ? await ctx.client.channels.fetch(channelId).catch(() => null) : null;
+      const channel = channelId
+        ? await ctx.client.channels.fetch(channelId).catch(() => null)
+        : null;
       if (channel && channel.isTextBased() && !channel.isDMBased()) {
-        await channel.send('🔔 It has been 2 hours — you can `/bump` again to boost the server on DISBOARD!').catch(() => undefined);
+        await channel
+          .send('🔔 It has been 2 hours — you can `/bump` again to boost the server on DISBOARD!')
+          .catch(() => undefined);
       }
       break;
     }
     case 'giveaway_end': {
-      await endGiveaway(ctx, Number(action.payload)).catch((err) => log.error('Falha a terminar giveaway:', err));
+      await endGiveaway(ctx, Number(action.payload)).catch((err) =>
+        log.error('Falha a terminar giveaway:', err),
+      );
       break;
     }
     default:

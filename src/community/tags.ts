@@ -1,8 +1,4 @@
-import {
-  SlashCommandBuilder,
-  PermissionFlagsBits,
-  MessageFlags,
-} from 'discord.js';
+import { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } from 'discord.js';
 import type { Command } from '../commands/index.js';
 import { setTag, getTag, deleteTag, listTags } from './store.js';
 
@@ -14,13 +10,18 @@ const tag: Command = {
   data: new SlashCommandBuilder()
     .setName('tag')
     .setDescription('Show a saved tag.')
-    .addStringOption((o) => o.setName('name').setDescription('Tag name').setRequired(true)) as SlashCommandBuilder,
+    .addStringOption((o) =>
+      o.setName('name').setDescription('Tag name').setRequired(true),
+    ) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const name = interaction.options.getString('name', true);
     const content = getTag(ctx.db, interaction.guildId, name);
     if (!content) {
-      return void interaction.reply({ content: `The tag \`${name}\` doesn't exist.`, flags: MessageFlags.Ephemeral });
+      return void interaction.reply({
+        content: `The tag \`${name}\` doesn't exist.`,
+        flags: MessageFlags.Ephemeral,
+      });
     }
     const rendered = content
       .replaceAll('{user}', `<@${interaction.user.id}>`)
@@ -31,7 +32,9 @@ const tag: Command = {
 
 const tags: Command = {
   public: true,
-  data: new SlashCommandBuilder().setName('tags').setDescription('List available tags.') as SlashCommandBuilder,
+  data: new SlashCommandBuilder()
+    .setName('tags')
+    .setDescription('List available tags.') as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const names = listTags(ctx.db, interaction.guildId);
@@ -48,13 +51,18 @@ const tagSet: Command = {
     .setDescription('Create or update a tag (staff).')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .addStringOption((o) => o.setName('name').setDescription('Name').setRequired(true))
-    .addStringOption((o) => o.setName('content').setDescription('Response (accepts {user}/{server})').setRequired(true)) as SlashCommandBuilder,
+    .addStringOption((o) =>
+      o.setName('content').setDescription('Response (accepts {user}/{server})').setRequired(true),
+    ) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const name = interaction.options.getString('name', true);
     const content = interaction.options.getString('content', true);
     setTag(ctx.db, interaction.guildId, name, content, interaction.user.id, Date.now());
-    await interaction.reply({ content: `Tag \`${name.toLowerCase()}\` saved.`, flags: MessageFlags.Ephemeral });
+    await interaction.reply({
+      content: `Tag \`${name.toLowerCase()}\` saved.`,
+      flags: MessageFlags.Ephemeral,
+    });
   },
 };
 
@@ -63,12 +71,17 @@ const tagDelete: Command = {
     .setName('tag-delete')
     .setDescription('Delete a tag (staff).')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-    .addStringOption((o) => o.setName('name').setDescription('Name').setRequired(true)) as SlashCommandBuilder,
+    .addStringOption((o) =>
+      o.setName('name').setDescription('Name').setRequired(true),
+    ) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const name = interaction.options.getString('name', true);
     const ok = deleteTag(ctx.db, interaction.guildId, name);
-    await interaction.reply({ content: ok ? `Tag \`${name}\` deleted.` : `Tag \`${name}\` doesn't exist.`, flags: MessageFlags.Ephemeral });
+    await interaction.reply({
+      content: ok ? `Tag \`${name}\` deleted.` : `Tag \`${name}\` doesn't exist.`,
+      flags: MessageFlags.Ephemeral,
+    });
   },
 };
 

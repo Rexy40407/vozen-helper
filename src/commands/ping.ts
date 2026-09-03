@@ -1,8 +1,4 @@
-import {
-  SlashCommandBuilder,
-  MessageFlags,
-  type ChatInputCommandInteraction,
-} from 'discord.js';
+import { SlashCommandBuilder, MessageFlags, type ChatInputCommandInteraction } from 'discord.js';
 
 // Comando /ping: prova de vida. Responde efémero com a latência do gateway.
 // Serve de esqueleto para o padrão de comandos (data + execute) das fases seguintes.

@@ -30,10 +30,15 @@ describe('evaluateJoin', () => {
     expect(v.reason).toContain('too new');
   });
   it('apanha sem avatar', () => {
-    expect(evaluateJoin({ accountAgeMs: 30 * DAY, hasAvatar: false, username: 'x' }, gate).action).toBe('kick');
+    expect(
+      evaluateJoin({ accountAgeMs: 30 * DAY, hasAvatar: false, username: 'x' }, gate).action,
+    ).toBe('kick');
   });
   it('bane username com padrão bloqueado', () => {
-    const v = evaluateJoin({ accountAgeMs: 30 * DAY, hasAvatar: true, username: 'FREE NITRO here' }, gate);
+    const v = evaluateJoin(
+      { accountAgeMs: 30 * DAY, hasAvatar: true, username: 'FREE NITRO here' },
+      gate,
+    );
     expect(v.action).toBe('ban');
   });
 });

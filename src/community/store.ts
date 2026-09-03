@@ -24,7 +24,9 @@ export function createSuggestion(
   createdAt: number,
 ): number {
   const info = db
-    .prepare(`INSERT INTO suggestions (guild_id, author_id, content, created_at) VALUES (?, ?, ?, ?)`)
+    .prepare(
+      `INSERT INTO suggestions (guild_id, author_id, content, created_at) VALUES (?, ?, ?, ?)`,
+    )
     .run(guildId, authorId, content, createdAt);
   return Number(info.lastInsertRowid);
 }
@@ -35,8 +37,7 @@ export function setSuggestionMessage(db: Database.Database, id: number, messageI
 
 export function getSuggestion(db: Database.Database, id: number): Suggestion | null {
   const r = db.prepare(`SELECT * FROM suggestions WHERE id = ?`).get(id) as
-    | Record<string, unknown>
-    | undefined;
+    Record<string, unknown> | undefined;
   if (!r) return null;
   return {
     id: r.id as number,
@@ -110,7 +111,10 @@ export function getAfk(db: Database.Database, guildId: string, userId: string): 
 }
 
 export function clearAfk(db: Database.Database, guildId: string, userId: string): boolean {
-  return db.prepare(`DELETE FROM afk WHERE guild_id = ? AND user_id = ?`).run(guildId, userId).changes > 0;
+  return (
+    db.prepare(`DELETE FROM afk WHERE guild_id = ? AND user_id = ?`).run(guildId, userId).changes >
+    0
+  );
 }
 
 // ─── Tags ─────────────────────────────────────────────────────────────────────
@@ -136,8 +140,10 @@ export function getTag(db: Database.Database, guildId: string, name: string): st
 }
 
 export function deleteTag(db: Database.Database, guildId: string, name: string): boolean {
-  return db.prepare(`DELETE FROM tags WHERE guild_id = ? AND name = ?`).run(guildId, name.toLowerCase())
-    .changes > 0;
+  return (
+    db.prepare(`DELETE FROM tags WHERE guild_id = ? AND name = ?`).run(guildId, name.toLowerCase())
+      .changes > 0
+  );
 }
 
 export function listTags(db: Database.Database, guildId: string): string[] {
@@ -162,8 +168,10 @@ export function setBirthday(
 }
 
 export function clearBirthday(db: Database.Database, guildId: string, userId: string): boolean {
-  return db.prepare(`DELETE FROM birthdays WHERE guild_id = ? AND user_id = ?`).run(guildId, userId)
-    .changes > 0;
+  return (
+    db.prepare(`DELETE FROM birthdays WHERE guild_id = ? AND user_id = ?`).run(guildId, userId)
+      .changes > 0
+  );
 }
 
 export function getBirthdaysOn(
@@ -258,7 +266,16 @@ export function createGiveaway(
       `INSERT INTO giveaways (guild_id, channel_id, prize, winners, end_at, required_role_id, host_id, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(g.guildId, g.channelId, g.prize, g.winners, g.endAt, g.requiredRoleId, g.hostId, g.createdAt);
+    .run(
+      g.guildId,
+      g.channelId,
+      g.prize,
+      g.winners,
+      g.endAt,
+      g.requiredRoleId,
+      g.hostId,
+      g.createdAt,
+    );
   return Number(info.lastInsertRowid);
 }
 
@@ -268,8 +285,7 @@ export function setGiveawayMessage(db: Database.Database, id: number, messageId:
 
 export function getGiveaway(db: Database.Database, id: number): Giveaway | null {
   const r = db.prepare(`SELECT * FROM giveaways WHERE id = ?`).get(id) as
-    | Record<string, unknown>
-    | undefined;
+    Record<string, unknown> | undefined;
   return r ? rowToGiveaway(r) : null;
 }
 
@@ -284,15 +300,26 @@ export function listActiveGiveaways(db: Database.Database, guildId: string): Giv
     .map((r) => rowToGiveaway(r as Record<string, unknown>));
 }
 
-export function addGiveawayEntry(db: Database.Database, giveawayId: number, userId: string): boolean {
+export function addGiveawayEntry(
+  db: Database.Database,
+  giveawayId: number,
+  userId: string,
+): boolean {
   const info = db
     .prepare(`INSERT OR IGNORE INTO giveaway_entries (giveaway_id, user_id) VALUES (?, ?)`)
     .run(giveawayId, userId);
   return info.changes > 0;
 }
 
-export function removeGiveawayEntry(db: Database.Database, giveawayId: number, userId: string): void {
-  db.prepare(`DELETE FROM giveaway_entries WHERE giveaway_id = ? AND user_id = ?`).run(giveawayId, userId);
+export function removeGiveawayEntry(
+  db: Database.Database,
+  giveawayId: number,
+  userId: string,
+): void {
+  db.prepare(`DELETE FROM giveaway_entries WHERE giveaway_id = ? AND user_id = ?`).run(
+    giveawayId,
+    userId,
+  );
 }
 
 export function getGiveawayEntries(db: Database.Database, giveawayId: number): string[] {
@@ -303,7 +330,12 @@ export function getGiveawayEntries(db: Database.Database, giveawayId: number): s
 }
 
 // ─── Leveling ──────────────────────────────────────────────────────────────────
-export function addXp(db: Database.Database, guildId: string, userId: string, amount: number): number {
+export function addXp(
+  db: Database.Database,
+  guildId: string,
+  userId: string,
+  amount: number,
+): number {
   db.prepare(
     `INSERT INTO levels (guild_id, user_id, xp) VALUES (?, ?, ?)
      ON CONFLICT(guild_id, user_id) DO UPDATE SET xp = xp + excluded.xp`,
@@ -390,7 +422,9 @@ export function getOpenTicketForUser(
 
 export function getTicketByChannel(db: Database.Database, channelId: string): Ticket | null {
   const r = db
-    .prepare(`SELECT id, channel_id, opener_id, status, claimed_by FROM tickets WHERE channel_id = ?`)
+    .prepare(
+      `SELECT id, channel_id, opener_id, status, claimed_by FROM tickets WHERE channel_id = ?`,
+    )
     .get(channelId) as Record<string, unknown> | undefined;
   if (!r) return null;
   return {

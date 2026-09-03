@@ -56,7 +56,9 @@ function start() {
       console.log('[supervisor] Encerramento pedido. A sair.');
       process.exit(0);
     }
-    console.error(`[supervisor] Bot terminou (code=${code}, signal=${signal}). Reinício em ${backoff}ms.`);
+    console.error(
+      `[supervisor] Bot terminou (code=${code}, signal=${signal}). Reinício em ${backoff}ms.`,
+    );
     setTimeout(() => {
       backoff = Math.min(backoff * 2, MAX_BACKOFF);
       start();

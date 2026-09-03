@@ -4,6 +4,7 @@
 > README. **Drift check** (sem git): excertos vs código vivo antes de editar.
 
 ## Status
+
 - **Prioridade**: P2 · **Esforço**: S · **Risco**: LOW · **Depende de**: nenhum
 - **Categoria**: bug · **Planned at**: N/A (não é repo git), 2026-07-14
 
@@ -49,10 +50,10 @@ destrutivas) e limpa em `reset()` — não é problema.
 
 ## Comandos
 
-| Objetivo | Comando | Esperado |
-|-----------|---------|----------|
-| Typecheck/Build | `npm run typecheck` / `npm run build` | exit 0 |
-| Testes | `npx vitest run` | todos passam |
+| Objetivo        | Comando                               | Esperado     |
+| --------------- | ------------------------------------- | ------------ |
+| Typecheck/Build | `npm run typecheck` / `npm run build` | exit 0       |
+| Testes          | `npx vitest run`                      | todos passam |
 
 ## Scope
 
@@ -75,6 +76,7 @@ Em `src/community/levels.ts`, adiciona uma poda barata e determinística: ao ins
 `cooldowns`, se o Map exceder um teto (ex.: `> 10_000` entradas), remove as entradas
 cujo `last` é mais velho que `cfg.cooldownMs` (já não servem para nada — o cooldown já
 expirou). Extrai a poda para uma função **pura testável**:
+
 ```ts
 /** Remove entradas de cooldown já expiradas. Pura (recebe o Map e o now). */
 export function pruneCooldowns(map: Map<string, number>, now: number, cooldownMs: number): void {
@@ -82,6 +84,7 @@ export function pruneCooldowns(map: Map<string, number>, now: number, cooldownMs
   for (const [k, t] of map) if (now - t >= cooldownMs) map.delete(k);
 }
 ```
+
 E chama `pruneCooldowns(cooldowns, now, cfg.cooldownMs)` dentro de `handleXpMessage`
 antes/depois do `set`. Exporta `pruneCooldowns`.
 
@@ -93,6 +96,7 @@ estados ociosos — só se for barato; senão o Passo 1 já resolve o caso princ
 ### Passo 3: teste da poda
 
 Em `tests/` (podes juntar a `tests/spam.test.ts` ou `tests/community.test.ts`):
+
 - `pruneCooldowns`: com um Map abaixo do teto → não remove nada; acima do teto com
   entradas expiradas → remove as expiradas e mantém as recentes.
 

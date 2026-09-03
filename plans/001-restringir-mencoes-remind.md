@@ -8,6 +8,7 @@
 > confirma que os excertos batem com o código vivo; se não baterem, é STOP.
 
 ## Status
+
 - **Prioridade**: P1
 - **Esforço**: S
 - **Risco**: LOW
@@ -23,7 +24,7 @@ pelo bot com `channel.send(string)` — **sem** objeto `allowedMentions`. Sem es
 objeto, a API do Discord faz parse de todas as menções do conteúdo. Resultado: um
 membro sem privilégios agenda uma mensagem, atribuída ao bot e com atraso arbitrário,
 contendo menções a utilizadores/cargos mencionáveis (funcionam sempre) ou `@everyone`/
-`@here` (se o bot tiver *Mention Everyone*). É o único vetor não-privilegiado desta
+`@here` (se o bot tiver _Mention Everyone_). É o único vetor não-privilegiado desta
 classe no projeto — o resto usa comandos com permissões.
 
 ## Estado atual
@@ -69,20 +70,22 @@ classe no projeto — o resto usa comandos com permissões.
 
 ## Comandos que vais precisar
 
-| Objetivo | Comando | Esperado |
-|-----------|---------|----------|
+| Objetivo  | Comando             | Esperado          |
+| --------- | ------------------- | ----------------- |
 | Typecheck | `npm run typecheck` | exit 0, sem erros |
-| Build | `npm run build` | exit 0 |
-| Testes | `npx vitest run` | todos passam |
+| Build     | `npm run build`     | exit 0            |
+| Testes    | `npx vitest run`    | todos passam      |
 
 (Correr a partir de `C:\Users\diogo\Videos\second brain\bots-discord\Vozen-helper`.)
 
 ## Scope
 
 **In scope:**
+
 - `src/community/scheduler.ts` (único ficheiro a alterar)
 
 **Out of scope (NÃO tocar):**
+
 - `src/community/reminders.ts` — o comando em si está correto; a correção é no envio.
 - `src/community/tags.ts` — as tags exigem `ManageMessages` (staff), por isso NÃO é a
   mesma severidade; não alterar neste plano.
@@ -97,6 +100,7 @@ autor do lembrete). O `<@target>` no início continua a funcionar; qualquer `@ev
 menção de cargo/outro utilizador dentro de `text` deixa de notificar.
 
 Forma alvo:
+
 ```ts
 const opts = { content: msg, allowedMentions: { users: [action.targetId] } as const };
 if (channel && channel.isTextBased() && !channel.isDMBased()) {

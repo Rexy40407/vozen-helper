@@ -49,7 +49,9 @@ async function fetchInvites(
 }
 
 /** Converte a lista num Map para o cache. */
-function toCache(list: Array<{ code: string; uses: number; inviterId: string | null }>): Map<string, CachedInvite> {
+function toCache(
+  list: Array<{ code: string; uses: number; inviterId: string | null }>,
+): Map<string, CachedInvite> {
   return new Map(list.map((i) => [i.code, { uses: i.uses, inviterId: i.inviterId }]));
 }
 

@@ -28,7 +28,10 @@ export async function handleActivityJoin(ctx: AppContext, member: GuildMember): 
 }
 
 /** GuildMemberRemove → evento 'leave' com tempo de permanência + cargos. */
-export function handleActivityLeave(ctx: AppContext, member: GuildMember | PartialGuildMember): void {
+export function handleActivityLeave(
+  ctx: AppContext,
+  member: GuildMember | PartialGuildMember,
+): void {
   if (member.guild.id !== ctx.env.guildId) return;
   const joinedTs = member.joinedTimestamp ?? null;
   // Cargos que o membro tinha (exclui o @everyone). Pode estar indisponível se parcial.

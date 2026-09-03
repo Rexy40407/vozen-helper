@@ -41,27 +41,48 @@ const ticketPanel: Command = {
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
-    if (!isFeatureEnabled(ctx.db, ctx.env.guildId, 'tickets', ctx.modConfig.community.tickets.enabled)) {
-      return void interaction.reply({ content: 'Tickets are disabled.', flags: MessageFlags.Ephemeral });
+    if (
+      !isFeatureEnabled(ctx.db, ctx.env.guildId, 'tickets', ctx.modConfig.community.tickets.enabled)
+    ) {
+      return void interaction.reply({
+        content: 'Tickets are disabled.',
+        flags: MessageFlags.Ephemeral,
+      });
     }
     // Canal-alvo: a opção `channel` (permite postar noutro canal a partir do canal de
     // comandos) ou, por omissão, o canal onde o comando foi corrido.
     const target = interaction.options.getChannel('channel') ?? interaction.channel;
     if (!target || target.type !== ChannelType.GuildText) {
-      return void interaction.reply({ content: 'Pick a text channel.', flags: MessageFlags.Ephemeral });
+      return void interaction.reply({
+        content: 'Pick a text channel.',
+        flags: MessageFlags.Ephemeral,
+      });
     }
-    const embed = new EmbedBuilder().setTitle('Support').setDescription('Need help? Open a ticket.').setColor(0x5865f2);
+    const embed = new EmbedBuilder()
+      .setTitle('Support')
+      .setDescription('Need help? Open a ticket.')
+      .setColor(0x5865f2);
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId(TICKET_OPEN_ID).setLabel('Open ticket').setEmoji('🎫').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(TICKET_OPEN_ID)
+        .setLabel('Open ticket')
+        .setEmoji('🎫')
+        .setStyle(ButtonStyle.Primary),
     );
     await target.send({ embeds: [embed], components: [row] });
-    await interaction.reply({ content: `Panel published in <#${target.id}>.`, flags: MessageFlags.Ephemeral });
+    await interaction.reply({
+      content: `Panel published in <#${target.id}>.`,
+      flags: MessageFlags.Ephemeral,
+    });
   },
 };
 
 function controlRow(): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId('ticket:claim').setLabel('Claim').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('ticket:claim')
+      .setLabel('Claim')
+      .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('ticket:close').setLabel('Close').setStyle(ButtonStyle.Danger),
   );
 }
@@ -74,16 +95,25 @@ async function openTicket(ctx: AppContext, interaction: ButtonInteraction): Prom
   if (!interaction.inCachedGuild()) return;
   const lockKey = `${interaction.guildId}:${interaction.user.id}`;
   if (!ticketOpenLock.tryAcquire(lockKey)) {
-    return void interaction.reply({ content: "Hold on a moment — I'm already creating your ticket.", flags: MessageFlags.Ephemeral });
+    return void interaction.reply({
+      content: "Hold on a moment — I'm already creating your ticket.",
+      flags: MessageFlags.Ephemeral,
+    });
   }
   try {
     const existing = getOpenTicketForUser(ctx.db, interaction.guildId, interaction.user.id);
     if (existing) {
-      return void interaction.reply({ content: `You already have an open ticket: <#${existing.channelId}>`, flags: MessageFlags.Ephemeral });
+      return void interaction.reply({
+        content: `You already have an open ticket: <#${existing.channelId}>`,
+        flags: MessageFlags.Ephemeral,
+      });
     }
     const parent = interaction.channel;
     if (!parent || parent.type !== ChannelType.GuildText) {
-      return void interaction.reply({ content: "I can't create the ticket here.", flags: MessageFlags.Ephemeral });
+      return void interaction.reply({
+        content: "I can't create the ticket here.",
+        flags: MessageFlags.Ephemeral,
+      });
     }
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     try {
@@ -94,7 +124,9 @@ async function openTicket(ctx: AppContext, interaction: ButtonInteraction): Prom
       });
       await thread.members.add(interaction.user.id).catch(() => undefined);
       createTicket(ctx.db, interaction.guildId, thread.id, interaction.user.id, Date.now());
-      const staffMention = ctx.modConfig.community.tickets.staffRoleId ? `<@&${ctx.modConfig.community.tickets.staffRoleId}> ` : '';
+      const staffMention = ctx.modConfig.community.tickets.staffRoleId
+        ? `<@&${ctx.modConfig.community.tickets.staffRoleId}> `
+        : '';
       await thread.send({
         content: `${staffMention}Ticket from <@${interaction.user.id}>. Staff will be with you shortly.`,
         components: [controlRow()],
@@ -124,10 +156,17 @@ async function buildTranscript(interaction: ButtonInteraction): Promise<Attachme
 async function closeTicket(ctx: AppContext, interaction: ButtonInteraction): Promise<void> {
   if (!interaction.inCachedGuild()) return;
   const ticket = getTicketByChannel(ctx.db, interaction.channelId);
-  if (!ticket) return void interaction.reply({ content: 'This is not a ticket.', flags: MessageFlags.Ephemeral });
+  if (!ticket)
+    return void interaction.reply({
+      content: 'This is not a ticket.',
+      flags: MessageFlags.Ephemeral,
+    });
   // Idempotente: um 2º clique em "Fechar" não deve repostar o transcript nem re-arquivar.
   if (ticket.status === 'closed') {
-    return void interaction.reply({ content: 'This ticket is already closed.', flags: MessageFlags.Ephemeral });
+    return void interaction.reply({
+      content: 'This ticket is already closed.',
+      flags: MessageFlags.Ephemeral,
+    });
   }
   await interaction.reply({ content: 'Closing the ticket...' });
   setTicketStatus(ctx.db, ticket.id, 'closed');
@@ -137,7 +176,12 @@ async function closeTicket(ctx: AppContext, interaction: ButtonInteraction): Pro
   if (transcript && transcriptChannelId) {
     const ch = await interaction.guild.channels.fetch(transcriptChannelId).catch(() => null);
     if (ch && ch.type === ChannelType.GuildText) {
-      await ch.send({ content: `Ticket transcript from <@${ticket.openerId}> (closed by <@${interaction.user.id}>)`, files: [transcript] }).catch(() => undefined);
+      await ch
+        .send({
+          content: `Ticket transcript from <@${ticket.openerId}> (closed by <@${interaction.user.id}>)`,
+          files: [transcript],
+        })
+        .catch(() => undefined);
     }
   }
   if (interaction.channel?.isThread()) {
@@ -149,13 +193,20 @@ async function closeTicket(ctx: AppContext, interaction: ButtonInteraction): Pro
 async function claimTicketHandler(ctx: AppContext, interaction: ButtonInteraction): Promise<void> {
   if (!interaction.inCachedGuild()) return;
   const ticket = getTicketByChannel(ctx.db, interaction.channelId);
-  if (!ticket) return void interaction.reply({ content: 'This is not a ticket.', flags: MessageFlags.Ephemeral });
+  if (!ticket)
+    return void interaction.reply({
+      content: 'This is not a ticket.',
+      flags: MessageFlags.Ephemeral,
+    });
   claimTicket(ctx.db, ticket.id, interaction.user.id);
   await interaction.reply({ content: `🙋 <@${interaction.user.id}> has claimed this ticket.` });
 }
 
 /** Router dos botões de ticket. */
-export async function handleTicketButton(ctx: AppContext, interaction: ButtonInteraction): Promise<void> {
+export async function handleTicketButton(
+  ctx: AppContext,
+  interaction: ButtonInteraction,
+): Promise<void> {
   if (interaction.customId === TICKET_OPEN_ID) return openTicket(ctx, interaction);
   if (interaction.customId === 'ticket:close') return closeTicket(ctx, interaction);
   if (interaction.customId === 'ticket:claim') return claimTicketHandler(ctx, interaction);

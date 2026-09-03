@@ -24,10 +24,7 @@ import { privacyCommands } from '../community/privacy.js';
 // O `execute` recebe o contexto partilhado (db/config/client) — o /ping ignora-o.
 
 export interface Command {
-  data:
-    | SlashCommandBuilder
-    | SlashCommandOptionsOnlyBuilder
-    | SlashCommandSubcommandsOnlyBuilder;
+  data: SlashCommandBuilder | SlashCommandOptionsOnlyBuilder | SlashCommandSubcommandsOnlyBuilder;
   execute: (interaction: ChatInputCommandInteraction, ctx: AppContext) => Promise<void>;
   /** Se true, o comando pode ser usado em QUALQUER canal (ignora commandChannelIds). */
   public?: boolean;

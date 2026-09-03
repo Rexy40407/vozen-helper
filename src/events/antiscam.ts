@@ -1,7 +1,12 @@
 import type { Message, GuildMember, PartialGuildMember } from 'discord.js';
 import type { AppContext } from '../context.js';
 import { scanForScam } from '../moderation/phishing.js';
-import { needsDehoist, sanitizeName, isUnreadable, isImpersonating } from '../moderation/nickname.js';
+import {
+  needsDehoist,
+  sanitizeName,
+  isUnreadable,
+  isImpersonating,
+} from '../moderation/nickname.js';
 import { isExemptMember, isExemptChannel } from '../moderation/exempt.js';
 import { escalateMember } from '../moderation/enforce.js';
 import { recordCase } from '../moderation/service.js';
@@ -33,9 +38,11 @@ export async function handleMessageScam(ctx: AppContext, message: Message): Prom
     return;
   }
 
-  if (!isFeatureEnabled(ctx.db, ctx.env.guildId, 'antiscam', ctx.modConfig.antiScam.enabled)) return;
+  if (!isFeatureEnabled(ctx.db, ctx.env.guildId, 'antiscam', ctx.modConfig.antiScam.enabled))
+    return;
   if (isExemptChannel(message.channelId, ctx.modConfig.automodExemptChannelIds)) return;
-  const member = message.member ?? (await message.guild.members.fetch(message.author.id).catch(() => null));
+  const member =
+    message.member ?? (await message.guild.members.fetch(message.author.id).catch(() => null));
   const roleIds = member ? [...member.roles.cache.keys()] : [];
   if (isExemptMember(message.author.id, roleIds, ctx.modConfig)) return;
 
@@ -49,7 +56,9 @@ export async function handleMessageScam(ctx: AppContext, message: Message): Prom
   await message.delete().catch(() => undefined);
   if (member) {
     const summary = await escalateMember(ctx, message.guild, member, 'scam');
-    log.info(`Anti-scam: ${message.author.tag} — ${result.kind} ${result.domain}${summary ? ` ${summary}` : ''}`);
+    log.info(
+      `Anti-scam: ${message.author.tag} — ${result.kind} ${result.domain}${summary ? ` ${summary}` : ''}`,
+    );
   }
 }
 
@@ -71,6 +80,10 @@ export async function handleNickname(
   }
 
   if (cfg.protectedNames.length && isImpersonating(display, cfg.protectedNames)) {
-    await alertOwner(ctx, member.guild, `⚠️ Possível impersonation de staff: <@${member.id}> ("${display}").`);
+    await alertOwner(
+      ctx,
+      member.guild,
+      `⚠️ Possível impersonation de staff: <@${member.id}> ("${display}").`,
+    );
   }
 }

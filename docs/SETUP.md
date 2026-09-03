@@ -23,6 +23,7 @@ Vozen: **sem** ffmpeg, Piper, modelos, Caddy ou API web.
 O código é **privado** (não open source). Duas formas de o levar ao VPS:
 
 ### Opção 1 — Repositório Git privado (recomendado, permite auto-deploy)
+
 1. Cria um repositório **privado** no GitHub (ex.: `vozen-helper`) e faz push da pasta `bots-discord/Vozen-helper/`.
 2. No VPS, gera uma deploy key e adiciona-a como **Deploy Key** (read-only) do repo no GitHub:
    ```bash
@@ -36,10 +37,13 @@ O código é **privado** (não open source). Duas formas de o levar ao VPS:
    ```
 
 ### Opção 2 — Copiar direto do PC (mais rápido, sem auto-deploy)
+
 Do PC (Git Bash), copia a pasta para o VPS (substitui o IP):
+
 ```bash
 scp -r "C:/Users/diogo/Videos/second brain/bots-discord/Vozen-helper" vozen@91.98.128.192:~/vozen-helper
 ```
+
 > Antes de copiar, apaga `node_modules/` e `dist/` locais para ir leve — reconstroem-se no VPS.
 
 ---
@@ -55,11 +59,14 @@ npm run build
 ```
 
 **`.env` de produção** (nunca commitar):
+
 ```bash
 cp .env.example .env
 nano .env
 ```
+
 Preenche só três linhas:
+
 ```dotenv
 DISCORD_TOKEN=<o token do bot>
 CLIENT_ID=<o Application ID>
@@ -67,11 +74,13 @@ GUILD_ID=<o ID do teu servidor>
 ```
 
 **Registar os slash commands** (uma vez, e sempre que mudar a lista de comandos):
+
 ```bash
 npm run register
 ```
 
 **Serviço systemd** (mantém ligado 24/7, reinicia sozinho):
+
 ```bash
 sudo cp deploy/vozen-helper.service /etc/systemd/system/vozen-helper.service
 sudo systemctl daemon-reload

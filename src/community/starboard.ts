@@ -35,7 +35,9 @@ export async function handleStarReaction(
     if (!full) return;
     reaction = full;
   }
-  const message = reaction.message.partial ? await reaction.message.fetch().catch(() => null) : reaction.message;
+  const message = reaction.message.partial
+    ? await reaction.message.fetch().catch(() => null)
+    : reaction.message;
   if (!message || !message.guild || message.guildId !== ctx.env.guildId) return;
   if (message.channelId === boardId) return; // não fazer starboard do próprio starboard
 
@@ -69,7 +71,10 @@ export async function handleStarReaction(
 
     const embed = new EmbedBuilder()
       .setColor(0xffac33)
-      .setAuthor({ name: message.author?.tag ?? 'unknown', iconURL: message.author?.displayAvatarURL() })
+      .setAuthor({
+        name: message.author?.tag ?? 'unknown',
+        iconURL: message.author?.displayAvatarURL(),
+      })
       .setDescription(message.content || '*(no text)*')
       .addFields({ name: 'Original', value: `[jump to message](${message.url})` })
       .setFooter({ text: `⭐ ${count}` });
@@ -79,10 +84,14 @@ export async function handleStarReaction(
     try {
       if (existing) {
         const msg = await board.messages.fetch(existing.starboardMessageId).catch(() => null);
-        if (msg) await msg.edit({ content: `⭐ **${count}** <#${message.channelId}>`, embeds: [embed] });
+        if (msg)
+          await msg.edit({ content: `⭐ **${count}** <#${message.channelId}>`, embeds: [embed] });
         upsertStarEntry(ctx.db, guild.id, message.id, existing.starboardMessageId, count);
       } else {
-        const posted = await board.send({ content: `⭐ **${count}** <#${message.channelId}>`, embeds: [embed] });
+        const posted = await board.send({
+          content: `⭐ **${count}** <#${message.channelId}>`,
+          embeds: [embed],
+        });
         upsertStarEntry(ctx.db, guild.id, message.id, posted.id, count);
       }
     } catch (err) {

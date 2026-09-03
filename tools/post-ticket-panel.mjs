@@ -31,9 +31,16 @@ client.once(Events.ClientReady, async (c) => {
     if (already) {
       console.log('painel de tickets já existe — não dupliquei.');
     } else {
-      const embed = new EmbedBuilder().setTitle('Suporte').setDescription('Precisas de ajuda? Abre um ticket.').setColor(0x5865f2);
+      const embed = new EmbedBuilder()
+        .setTitle('Suporte')
+        .setDescription('Precisas de ajuda? Abre um ticket.')
+        .setColor(0x5865f2);
       const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('ticket:open').setLabel('Abrir ticket').setEmoji('🎫').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+          .setCustomId('ticket:open')
+          .setLabel('Abrir ticket')
+          .setEmoji('🎫')
+          .setStyle(ButtonStyle.Primary),
       );
       await ch.send({ embeds: [embed], components: [row] });
       console.log('painel de tickets publicado.');

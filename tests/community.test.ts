@@ -71,7 +71,13 @@ describe('rolesForLevel', () => {
 
 describe('text helpers', () => {
   it('renderWelcome substitui variáveis', () => {
-    expect(renderWelcome('Olá {user} em {server} (#{membercount})', { userMention: '<@1>', serverName: 'S', memberCount: 42 })).toBe('Olá <@1> em S (#42)');
+    expect(
+      renderWelcome('Olá {user} em {server} (#{membercount})', {
+        userMention: '<@1>',
+        serverName: 'S',
+        memberCount: 42,
+      }),
+    ).toBe('Olá <@1> em S (#42)');
   });
   it('renderCounter', () => {
     expect(renderCounter('Membros: {count}', 100)).toBe('Membros: 100');

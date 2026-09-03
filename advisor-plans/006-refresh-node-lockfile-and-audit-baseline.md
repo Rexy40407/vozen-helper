@@ -47,21 +47,21 @@ lockfile repair, not permission for a broad `npm audit fix` upgrade.
   ```
 
 - `.github/workflows/ci.yml:26-31` runs `npm ci`, `npm audit
-  --audit-level=high`, lint, typecheck, build, and Vitest. Keep this gate; do
+--audit-level=high`, lint, typecheck, build, and Vitest. Keep this gate; do
   not lower its severity threshold.
 - `package.json:34-43` already documents that `npm audit fix --force` is not
   acceptable because it may downgrade Discord.js. Preserve that policy.
 
 ## Commands you will need
 
-| Purpose | Command | Expected on success |
-|---|---|---|
-| Clean install | `npm ci` | exit 0 |
+| Purpose          | Command                        | Expected on success               |
+| ---------------- | ------------------------------ | --------------------------------- |
+| Clean install    | `npm ci`                       | exit 0                            |
 | Dependency audit | `npm audit --audit-level=high` | exit 0, no high/critical findings |
-| Lint | `npm run lint` | exit 0 |
-| Typecheck | `npm run typecheck` | exit 0 |
-| Build | `npm run build` | exit 0 |
-| Tests | `npm test` | all pass |
+| Lint             | `npm run lint`                 | exit 0                            |
+| Typecheck        | `npm run typecheck`            | exit 0                            |
+| Build            | `npm run build`                | exit 0                            |
+| Tests            | `npm test`                     | all pass                          |
 
 ## Scope
 

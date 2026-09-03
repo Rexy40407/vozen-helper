@@ -59,7 +59,10 @@ const rolepanel: Command = {
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     if (!interaction.channel || interaction.channel.type !== ChannelType.GuildText) {
-      return void interaction.reply({ content: 'Run this in a text channel.', flags: MessageFlags.Ephemeral });
+      return void interaction.reply({
+        content: 'Run this in a text channel.',
+        flags: MessageFlags.Ephemeral,
+      });
     }
     const mode = (interaction.options.getString('mode') ?? 'normal') as SelfRoleMode;
     const roles: Role[] = [];
@@ -72,11 +75,19 @@ const rolepanel: Command = {
     const modTop = interaction.member.roles.highest.position;
     const usable = pickOfferableRoles(roles, botTop, modTop, isOwner);
     if (!usable.length) {
-      return void interaction.reply({ content: 'No role can be offered — they must be below your role and mine.', flags: MessageFlags.Ephemeral });
+      return void interaction.reply({
+        content: 'No role can be offered — they must be below your role and mine.',
+        flags: MessageFlags.Ephemeral,
+      });
     }
 
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      usable.map((r) => new ButtonBuilder().setCustomId(`role:${r.id}`).setLabel(r.name).setStyle(ButtonStyle.Secondary)),
+      usable.map((r) =>
+        new ButtonBuilder()
+          .setCustomId(`role:${r.id}`)
+          .setLabel(r.name)
+          .setStyle(ButtonStyle.Secondary),
+      ),
     );
     const embed = new EmbedBuilder()
       .setTitle(interaction.options.getString('title', true))
@@ -89,18 +100,32 @@ const rolepanel: Command = {
 };
 
 /** Handler dos botões de self-role (role:<roleId>). */
-export async function handleSelfRoleButton(ctx: AppContext, interaction: ButtonInteraction): Promise<void> {
+export async function handleSelfRoleButton(
+  ctx: AppContext,
+  interaction: ButtonInteraction,
+): Promise<void> {
   if (!interaction.inCachedGuild()) return;
   const entry = getSelfRole(ctx.db, interaction.message.id, interaction.customId);
-  if (!entry) return void interaction.reply({ content: 'This button is no longer valid.', flags: MessageFlags.Ephemeral });
+  if (!entry)
+    return void interaction.reply({
+      content: 'This button is no longer valid.',
+      flags: MessageFlags.Ephemeral,
+    });
 
   const member = interaction.member;
   const has = member.roles.cache.has(entry.roleId);
   try {
     if (entry.mode === 'verify') {
-      if (has) return void interaction.reply({ content: 'You already have that role. ✅', flags: MessageFlags.Ephemeral });
+      if (has)
+        return void interaction.reply({
+          content: 'You already have that role. ✅',
+          flags: MessageFlags.Ephemeral,
+        });
       await member.roles.add(entry.roleId, 'Self-role (verify)');
-      return void interaction.reply({ content: 'Role assigned. ✅', flags: MessageFlags.Ephemeral });
+      return void interaction.reply({
+        content: 'Role assigned. ✅',
+        flags: MessageFlags.Ephemeral,
+      });
     }
     if (entry.mode === 'unique') {
       // Remover as outras roles do mesmo painel, depois dar esta.
@@ -112,7 +137,10 @@ export async function handleSelfRoleButton(ctx: AppContext, interaction: ButtonI
         return void interaction.reply({ content: 'Role removed.', flags: MessageFlags.Ephemeral });
       }
       await member.roles.add(entry.roleId, 'Self-role (unique)');
-      return void interaction.reply({ content: 'Role switched. ✅', flags: MessageFlags.Ephemeral });
+      return void interaction.reply({
+        content: 'Role switched. ✅',
+        flags: MessageFlags.Ephemeral,
+      });
     }
     // normal: alterna
     if (has) {
@@ -124,7 +152,10 @@ export async function handleSelfRoleButton(ctx: AppContext, interaction: ButtonI
     }
   } catch (err) {
     log.error('Falha no self-role:', err);
-    await interaction.reply({ content: "I couldn't change the role (permissions/hierarchy?).", flags: MessageFlags.Ephemeral });
+    await interaction.reply({
+      content: "I couldn't change the role (permissions/hierarchy?).",
+      flags: MessageFlags.Ephemeral,
+    });
   }
 }
 

@@ -68,9 +68,7 @@ type Route = {
   key?: string;
 };
 type ProviderSubscriptionHealth =
-  | RssSubscriptionHealth
-  | TwitchSubscriptionHealth
-  | YouTubeSubscriptionHealth;
+  RssSubscriptionHealth | TwitchSubscriptionHealth | YouTubeSubscriptionHealth;
 type FieldSpec = {
   key: string;
   label: string;
@@ -705,7 +703,8 @@ const defaults: Record<string, FeatureConfig> = {
   },
   'support.welcome_channel': {
     channelId: '',
-    message: 'Welcome {member}! Start with the rules, introduce yourself and check the server channels.',
+    message:
+      'Welcome {member}! Start with the rules, introduce yourself and check the server channels.',
     templateId: '',
   },
   'management.nickname': { nickname: '' },
@@ -851,7 +850,12 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       description: 'Escolhe onde novos membros encontram as informações essenciais.',
       fields: [
         { key: 'channelId', label: 'Canal de entrada', kind: 'channel' },
-        { key: 'message', label: 'Mensagem de primeiros passos', kind: 'textarea', maxLength: 2000 },
+        {
+          key: 'message',
+          label: 'Mensagem de primeiros passos',
+          kind: 'textarea',
+          maxLength: 2000,
+        },
         { key: 'templateId', label: 'Modelo reutilizável', kind: 'select', advanced: true },
       ],
     },
@@ -916,10 +920,26 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       description: 'Escolhe o que a equipa deve conseguir rever.',
       fields: [
         { key: 'threshold', label: 'Actions before containment', kind: 'number', min: 2, max: 25 },
-        { key: 'windowSeconds', label: 'Detection window (seconds)', kind: 'number', min: 3, max: 60 },
+        {
+          key: 'windowSeconds',
+          label: 'Detection window (seconds)',
+          kind: 'number',
+          min: 3,
+          max: 60,
+        },
         { key: 'shadowMode', label: 'Shadow mode', kind: 'toggle' },
-        { key: 'logChannel', label: 'Audit log channel (optional)', kind: 'channel', advanced: true },
-        { key: 'includeContent', label: 'Include cached message content', kind: 'toggle', advanced: true },
+        {
+          key: 'logChannel',
+          label: 'Audit log channel (optional)',
+          kind: 'channel',
+          advanced: true,
+        },
+        {
+          key: 'includeContent',
+          label: 'Include cached message content',
+          kind: 'toggle',
+          advanced: true,
+        },
       ],
     },
   ],
@@ -929,15 +949,19 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       description: 'Define quanto tempo os dados opcionais ficam guardados.',
       fields: [
         { key: 'allowMemberErase', label: 'Allow member erasure', kind: 'toggle' },
-        { key: 'maxExportBytes', label: 'Maximum export size', kind: 'number', min: 65536, max: 10000000 },
+        {
+          key: 'maxExportBytes',
+          label: 'Maximum export size',
+          kind: 'number',
+          min: 65536,
+          max: 10000000,
+        },
       ],
     },
     {
       title: 'Pedidos de dados',
       description: 'Mantém os pedidos de privacidade claros.',
-      fields: [
-        { key: 'allowMemberExport', label: 'Allow member exports', kind: 'toggle' },
-      ],
+      fields: [{ key: 'allowMemberExport', label: 'Allow member exports', kind: 'toggle' }],
     },
   ],
   'social.tiktok': [
@@ -955,7 +979,14 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       fields: [
         { key: 'messageTemplate', label: 'Mensagem', kind: 'textarea', maxLength: 1800 },
         { key: 'mention', label: 'Menção opcional', kind: 'text', advanced: true },
-        { key: 'intervalSeconds', label: 'Intervalo (segundos)', kind: 'number', min: 900, max: 86400, advanced: true },
+        {
+          key: 'intervalSeconds',
+          label: 'Intervalo (segundos)',
+          kind: 'number',
+          min: 900,
+          max: 86400,
+          advanced: true,
+        },
       ],
     },
   ],
@@ -974,7 +1005,14 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       fields: [
         { key: 'messageTemplate', label: 'Mensagem', kind: 'textarea', maxLength: 1800 },
         { key: 'mention', label: 'Menção opcional', kind: 'text', advanced: true },
-        { key: 'intervalSeconds', label: 'Intervalo (segundos)', kind: 'number', min: 900, max: 86400, advanced: true },
+        {
+          key: 'intervalSeconds',
+          label: 'Intervalo (segundos)',
+          kind: 'number',
+          min: 900,
+          max: 86400,
+          advanced: true,
+        },
       ],
     },
   ],
@@ -983,7 +1021,12 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       title: 'Canal acompanhado',
       description: 'Acompanha transmissões através da API oficial da Kick, quando disponível.',
       fields: [
-        { key: 'sourceHandle', label: 'Handle da Kick', kind: 'text', help: 'Exemplo: vozen (sem @).' },
+        {
+          key: 'sourceHandle',
+          label: 'Handle da Kick',
+          kind: 'text',
+          help: 'Exemplo: vozen (sem @).',
+        },
         { key: 'targetChannelId', label: 'Canal Discord', kind: 'channel' },
       ],
     },
@@ -993,35 +1036,99 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       fields: [
         { key: 'messageTemplate', label: 'Mensagem', kind: 'textarea', maxLength: 1800 },
         { key: 'mention', label: 'Menção opcional', kind: 'text', advanced: true },
-        { key: 'intervalSeconds', label: 'Intervalo (segundos)', kind: 'number', min: 300, max: 86400, advanced: true },
+        {
+          key: 'intervalSeconds',
+          label: 'Intervalo (segundos)',
+          kind: 'number',
+          min: 300,
+          max: 86400,
+          advanced: true,
+        },
       ],
     },
   ],
   'growth.monetization': [
     {
       title: 'Benefício do servidor',
-      description: 'Define um produto de apoio; pagamentos a servidores só ficam disponíveis após a configuração legal do Stripe Connect.',
+      description:
+        'Define um produto de apoio; pagamentos a servidores só ficam disponíveis após a configuração legal do Stripe Connect.',
       fields: [
         { key: 'productName', label: 'Nome do produto', kind: 'text' },
         { key: 'targetRoleId', label: 'Cargo atribuído', kind: 'role' },
-        { key: 'priceCents', label: 'Preço (cêntimos)', kind: 'number', min: 50, max: 100000, advanced: true },
-        { key: 'currency', label: 'Moeda', kind: 'select', options: [['eur', 'EUR'], ['usd', 'USD']], advanced: true },
-        { key: 'trialDays', label: 'Período experimental (dias)', kind: 'number', min: 0, max: 90, advanced: true },
+        {
+          key: 'priceCents',
+          label: 'Preço (cêntimos)',
+          kind: 'number',
+          min: 50,
+          max: 100000,
+          advanced: true,
+        },
+        {
+          key: 'currency',
+          label: 'Moeda',
+          kind: 'select',
+          options: [
+            ['eur', 'EUR'],
+            ['usd', 'USD'],
+          ],
+          advanced: true,
+        },
+        {
+          key: 'trialDays',
+          label: 'Período experimental (dias)',
+          kind: 'number',
+          min: 0,
+          max: 90,
+          advanced: true,
+        },
       ],
     },
   ],
   'web3.gating': [
     {
       title: 'Regra de acesso',
-      description: 'Configura uma verificação read-only; nunca introduzas uma seed phrase ou chave privada.',
+      description:
+        'Configura uma verificação read-only; nunca introduzas uma seed phrase ou chave privada.',
       fields: [
-        { key: 'chain', label: 'Rede', kind: 'select', options: [['ethereum', 'Ethereum'], ['polygon', 'Polygon'], ['base', 'Base']] },
+        {
+          key: 'chain',
+          label: 'Rede',
+          kind: 'select',
+          options: [
+            ['ethereum', 'Ethereum'],
+            ['polygon', 'Polygon'],
+            ['base', 'Base'],
+          ],
+        },
         { key: 'contractAddress', label: 'Endereço do contrato', kind: 'text' },
-        { key: 'assetType', label: 'Tipo de ativo', kind: 'select', options: [['erc20', 'ERC-20'], ['erc721', 'ERC-721'], ['erc1155', 'ERC-1155']] },
+        {
+          key: 'assetType',
+          label: 'Tipo de ativo',
+          kind: 'select',
+          options: [
+            ['erc20', 'ERC-20'],
+            ['erc721', 'ERC-721'],
+            ['erc1155', 'ERC-1155'],
+          ],
+        },
         { key: 'tokenId', label: 'Token ID', kind: 'text', advanced: true },
         { key: 'targetRoleId', label: 'Cargo atribuído', kind: 'role' },
-        { key: 'minimumBalance', label: 'Saldo mínimo', kind: 'number', min: 0, max: 1000000000, advanced: true },
-        { key: 'intervalSeconds', label: 'Intervalo de verificação (segundos)', kind: 'number', min: 300, max: 86400, advanced: true },
+        {
+          key: 'minimumBalance',
+          label: 'Saldo mínimo',
+          kind: 'number',
+          min: 0,
+          max: 1000000000,
+          advanced: true,
+        },
+        {
+          key: 'intervalSeconds',
+          label: 'Intervalo de verificação (segundos)',
+          kind: 'number',
+          min: 300,
+          max: 86400,
+          advanced: true,
+        },
       ],
     },
   ],
@@ -1040,8 +1147,16 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       title: 'Limites',
       description: 'Evita escolhas excessivas.',
       fields: [
-          { key: 'maxRoles', label: 'Máximo de cargos por membro', kind: 'number', min: 1, max: 5 },
-        { key: 'selectionMode', label: 'Selection mode', kind: 'select', options: [['multiple', 'Several roles'], ['unique', 'One role']] },
+        { key: 'maxRoles', label: 'Máximo de cargos por membro', kind: 'number', min: 1, max: 5 },
+        {
+          key: 'selectionMode',
+          label: 'Selection mode',
+          kind: 'select',
+          options: [
+            ['multiple', 'Several roles'],
+            ['unique', 'One role'],
+          ],
+        },
         { key: 'removeOnUnselect', label: 'Remover cargo ao desselecionar', kind: 'toggle' },
       ],
     },
@@ -1073,7 +1188,14 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
       description: 'Ajuda os membros a não perderem o início.',
       fields: [
         { key: 'reminders', label: 'Enviar lembretes', kind: 'toggle' },
-        { key: 'reminderHours', label: 'Horas antes do evento', kind: 'number', min: 1, max: 168, advanced: true },
+        {
+          key: 'reminderHours',
+          label: 'Horas antes do evento',
+          kind: 'number',
+          min: 1,
+          max: 168,
+          advanced: true,
+        },
       ],
     },
   ],
@@ -1099,12 +1221,25 @@ const additionalSpecs: Record<string, SectionSpec[]> = {
           min: 1,
           max: 8760,
         },
-        { key: 'maxTextLength', label: 'Maximum message length', kind: 'number', min: 50, max: 500 },
+        {
+          key: 'maxTextLength',
+          label: 'Maximum message length',
+          kind: 'number',
+          min: 50,
+          max: 500,
+        },
         {
           key: 'timezone',
           label: 'Reminder timezone',
           kind: 'select',
-          options: [['UTC', 'UTC'], ['UTC-05:00', 'UTC-05:00'], ['UTC+01:00', 'UTC+01:00'], ['UTC+02:00', 'UTC+02:00'], ['UTC+05:30', 'UTC+05:30'], ['UTC+08:00', 'UTC+08:00']],
+          options: [
+            ['UTC', 'UTC'],
+            ['UTC-05:00', 'UTC-05:00'],
+            ['UTC+01:00', 'UTC+01:00'],
+            ['UTC+02:00', 'UTC+02:00'],
+            ['UTC+05:30', 'UTC+05:30'],
+            ['UTC+08:00', 'UTC+08:00'],
+          ],
         },
         { key: 'notifyUser', label: 'Mention the member when it fires', kind: 'toggle' },
         { key: 'allowRecurring', label: 'Allow recurring reminders', kind: 'toggle' },
@@ -1164,10 +1299,21 @@ const spec = (key: string): SectionSpec[] => {
         title: 'Deteção de fraude',
         description: 'Controla como o Helper reage a convites, domínios e frases suspeitas.',
         fields: [
-          { key: 'blockInvites', label: 'Bloquear convites Discord não solicitados', kind: 'toggle' },
+          {
+            key: 'blockInvites',
+            label: 'Bloquear convites Discord não solicitados',
+            kind: 'toggle',
+          },
           { key: 'blockedDomains', label: 'Domínios bloqueados', kind: 'tags', advanced: true },
           { key: 'blockedKeywords', label: 'Frases bloqueadas', kind: 'tags', advanced: true },
-          { key: 'timeoutSeconds', label: 'Timeout (segundos)', kind: 'number', min: 0, max: 86400, advanced: true },
+          {
+            key: 'timeoutSeconds',
+            label: 'Timeout (segundos)',
+            kind: 'number',
+            min: 0,
+            max: 86400,
+            advanced: true,
+          },
           { key: 'alertOnly', label: 'Apenas monitorizar', kind: 'toggle', advanced: true },
         ],
       },
@@ -1283,7 +1429,12 @@ const spec = (key: string): SectionSpec[] => {
             min: 0,
             max: 3600,
           },
-          { key: 'voiceXpEnabled', label: 'Dar XP em canais de voz', kind: 'toggle', advanced: true },
+          {
+            key: 'voiceXpEnabled',
+            label: 'Dar XP em canais de voz',
+            kind: 'toggle',
+            advanced: true,
+          },
           {
             key: 'voiceXpPerMinute',
             label: 'XP por minuto em voz',
@@ -1453,7 +1604,12 @@ const spec = (key: string): SectionSpec[] => {
         description: 'Escolhe onde despedidas são publicadas e reutiliza um modelo aprovado.',
         fields: [
           { key: 'farewellChannel', label: 'Canal de despedidas', kind: 'channel', advanced: true },
-          { key: 'farewellMessage', label: 'Mensagem de despedida', kind: 'textarea', advanced: true },
+          {
+            key: 'farewellMessage',
+            label: 'Mensagem de despedida',
+            kind: 'textarea',
+            advanced: true,
+          },
           { key: 'templateId', label: 'Modelo reutilizável', kind: 'select', advanced: true },
         ],
       },
@@ -1515,7 +1671,8 @@ const spec = (key: string): SectionSpec[] => {
     'insights.stats': [
       {
         title: 'Server statistics',
-        description: 'Control the period, visibility and optional live counter channel for server statistics.',
+        description:
+          'Control the period, visibility and optional live counter channel for server statistics.',
         fields: [
           { key: 'windowDays', label: 'Reporting window (days)', kind: 'number', min: 1, max: 30 },
           { key: 'public', label: 'Show publicly', kind: 'toggle' },
@@ -1535,7 +1692,8 @@ const spec = (key: string): SectionSpec[] => {
     'utility.emojis': [
       {
         title: 'Emoji inventory',
-        description: 'List custom emojis safely, with optional staff-only rename and delete controls.',
+        description:
+          'List custom emojis safely, with optional staff-only rename and delete controls.',
         fields: [
           { key: 'maxEntries', label: 'Emojis shown', kind: 'number', min: 1, max: 100 },
           { key: 'animatedOnly', label: 'Only animated emojis', kind: 'toggle' },
@@ -1553,7 +1711,13 @@ const spec = (key: string): SectionSpec[] => {
         title: 'Safe embed publishing',
         description: 'Publish bounded embeds with mentions disabled by default.',
         fields: [
-          { key: 'maxDescription', label: 'Maximum description length', kind: 'number', min: 1, max: 4000 },
+          {
+            key: 'maxDescription',
+            label: 'Maximum description length',
+            kind: 'number',
+            min: 1,
+            max: 4000,
+          },
           { key: 'defaultColor', label: 'Default colour (hex)', kind: 'text', maxLength: 7 },
           { key: 'defaultFooter', label: 'Default footer', kind: 'text', maxLength: 2048 },
         ],
@@ -1689,7 +1853,14 @@ const spec = (key: string): SectionSpec[] => {
           { key: 'windowDays', label: 'Reporting window (days)', kind: 'number', min: 1, max: 30 },
           { key: 'public', label: 'Show publicly', kind: 'toggle' },
           { key: 'channelId', label: 'Live counter channel', kind: 'text' },
-          { key: 'intervalMinutes', label: 'Counter refresh (minutes)', kind: 'number', min: 5, max: 1440, advanced: true },
+          {
+            key: 'intervalMinutes',
+            label: 'Counter refresh (minutes)',
+            kind: 'number',
+            min: 5,
+            max: 1440,
+            advanced: true,
+          },
           { key: 'nameTemplate', label: 'Channel name template', kind: 'text', maxLength: 100 },
         ] as FieldSpec[],
       },
@@ -1701,9 +1872,25 @@ const spec = (key: string): SectionSpec[] => {
         title: 'Gas tracker',
         description: 'Publish read-only gas prices from an approved HTTPS RPC.',
         fields: [
-          { key: 'network', label: 'Network', kind: 'select', options: [['ethereum', 'Ethereum'], ['polygon', 'Polygon'], ['arbitrum', 'Arbitrum'], ['base', 'Base']] },
+          {
+            key: 'network',
+            label: 'Network',
+            kind: 'select',
+            options: [
+              ['ethereum', 'Ethereum'],
+              ['polygon', 'Polygon'],
+              ['arbitrum', 'Arbitrum'],
+              ['base', 'Base'],
+            ],
+          },
           { key: 'targetChannelId', label: 'Discord channel', kind: 'text' },
-          { key: 'intervalSeconds', label: 'Update interval (seconds)', kind: 'number', min: 300, max: 86400 },
+          {
+            key: 'intervalSeconds',
+            label: 'Update interval (seconds)',
+            kind: 'number',
+            min: 300,
+            max: 86400,
+          },
           { key: 'messageTemplate', label: 'Statistics message', kind: 'textarea', advanced: true },
         ] as FieldSpec[],
       },
@@ -1719,8 +1906,32 @@ const spec = (key: string): SectionSpec[] => {
           { key: 'coinIds', label: 'CoinGecko IDs', kind: 'text' },
           { key: 'currency', label: 'Currency', kind: 'text' },
           ...(stats
-            ? [{ key: 'targetChannelId', label: 'Discord channel', kind: 'text' }, { key: 'intervalSeconds', label: 'Update interval (seconds)', kind: 'number', min: 300, max: 86400 }, { key: 'messageTemplate', label: 'Statistics message', kind: 'textarea', advanced: true }]
-            : [{ key: 'maxResults', label: 'Maximum results', kind: 'number', min: 1, max: 10, advanced: true }]),
+            ? [
+                { key: 'targetChannelId', label: 'Discord channel', kind: 'text' },
+                {
+                  key: 'intervalSeconds',
+                  label: 'Update interval (seconds)',
+                  kind: 'number',
+                  min: 300,
+                  max: 86400,
+                },
+                {
+                  key: 'messageTemplate',
+                  label: 'Statistics message',
+                  kind: 'textarea',
+                  advanced: true,
+                },
+              ]
+            : [
+                {
+                  key: 'maxResults',
+                  label: 'Maximum results',
+                  kind: 'number',
+                  min: 1,
+                  max: 10,
+                  advanced: true,
+                },
+              ]),
         ] as FieldSpec[],
       },
     ];
@@ -1733,7 +1944,13 @@ const spec = (key: string): SectionSpec[] => {
         fields: [
           { key: 'sourceHandle', label: 'Bluesky handle', kind: 'text' },
           { key: 'targetChannelId', label: 'Discord channel', kind: 'text' },
-          { key: 'intervalSeconds', label: 'Polling interval (seconds)', kind: 'number', min: 300, max: 86400 },
+          {
+            key: 'intervalSeconds',
+            label: 'Polling interval (seconds)',
+            kind: 'number',
+            min: 300,
+            max: 86400,
+          },
           { key: 'messageTemplate', label: 'Alert message', kind: 'textarea', advanced: true },
           { key: 'mention', label: 'Optional mention', kind: 'text', advanced: true },
         ] as FieldSpec[],
@@ -1813,10 +2030,15 @@ function quickSetupDraft(
   // In the deployed panel the adapter response is authoritative.  The old
   // catalogue remains available only for the explicit local preview so a
   // disconnected designer preview does not pretend to be a server schema.
-  const legacy = (key: string) => (useLocalCompatibilityDefaults ? defaults[key] ?? {} : {});
+  const legacy = (key: string) => (useLocalCompatibilityDefaults ? (defaults[key] ?? {}) : {});
   const api = (key: keyof QuickSetupFeatureDefaults) => featureDefaults[key] ?? {};
   return {
-    welcome: { ...legacy('support.welcome'), ...api('welcome'), mode: 'recommended', createChannel: true },
+    welcome: {
+      ...legacy('support.welcome'),
+      ...api('welcome'),
+      mode: 'recommended',
+      createChannel: true,
+    },
     roles: {
       ...legacy('community.role_panels'),
       ...api('roles'),
@@ -2052,7 +2274,10 @@ function App() {
         void api
           .externalSubscriptions(provider)
           .then((result) =>
-            setExternalSubscriptions((current) => ({ ...current, [provider]: result.subscriptions })),
+            setExternalSubscriptions((current) => ({
+              ...current,
+              [provider]: result.subscriptions,
+            })),
           )
           .catch(() => undefined);
       });
@@ -2065,7 +2290,7 @@ function App() {
     // client-side form.  Local defaults remain useful for the explicit
     // preview mode, but the Rust adapter is the only source of truth for the
     // deployed panel.
-    const fallback = localPreviewMode ? defaults[route.key] ?? {} : {};
+    const fallback = localPreviewMode ? (defaults[route.key] ?? {}) : {};
     if (localPreviewMode) {
       setDetailSchema(null);
       setDetailConfig({ ...fallback });
@@ -2108,7 +2333,8 @@ function App() {
       !route.key ||
       !['management.templates', 'support.welcome', 'support.welcome_channel'].includes(route.key) ||
       localPreviewMode
-    ) return;
+    )
+      return;
     void api
       .studioTemplates()
       .then((result) => setStudioTemplates(result.templates))
@@ -2292,7 +2518,8 @@ function App() {
           title: String(detailConfig.panelTitle ?? 'Choose your roles'),
           description: String(detailConfig.panelDescription ?? ''),
           roleIds: detailConfig.roleIds.map(String),
-          selectionMode: detailConfig.selectionMode === 'unique' ? ('unique' as const) : ('multiple' as const),
+          selectionMode:
+            detailConfig.selectionMode === 'unique' ? ('unique' as const) : ('multiple' as const),
           removeOnUnselect: detailConfig.removeOnUnselect !== false,
         };
         if (existingPanels.panels[0]) {
@@ -2362,13 +2589,9 @@ function App() {
         const result = await api.testYoutubeDelivery(subscription.id, {
           sourceChannelId,
           targetChannelId: String(detailConfig.targetChannelId ?? subscription.targetChannelId),
-          messageTemplate: String(
-            detailConfig.messageTemplate ?? subscription.messageTemplate,
-          ),
+          messageTemplate: String(detailConfig.messageTemplate ?? subscription.messageTemplate),
           mention: String(detailConfig.mention ?? subscription.mention),
-          intervalSeconds: Number(
-            detailConfig.intervalSeconds ?? subscription.intervalSeconds,
-          ),
+          intervalSeconds: Number(detailConfig.intervalSeconds ?? subscription.intervalSeconds),
           enabled: Boolean(detailEnabled),
         });
         setMessage(
@@ -2396,13 +2619,9 @@ function App() {
         const result = await api.testRssDelivery(subscription.id, {
           feedUrl,
           targetChannelId: String(detailConfig.targetChannelId ?? subscription.targetChannelId),
-          messageTemplate: String(
-            detailConfig.messageTemplate ?? subscription.messageTemplate,
-          ),
+          messageTemplate: String(detailConfig.messageTemplate ?? subscription.messageTemplate),
           mention: String(detailConfig.mention ?? subscription.mention),
-          intervalSeconds: Number(
-            detailConfig.intervalSeconds ?? subscription.intervalSeconds,
-          ),
+          intervalSeconds: Number(detailConfig.intervalSeconds ?? subscription.intervalSeconds),
           enabled: Boolean(detailEnabled),
         });
         setMessage(
@@ -2430,9 +2649,7 @@ function App() {
         const result = await api.testTwitchDelivery(subscription.id, {
           sourceLogin: login,
           targetChannelId: String(detailConfig.targetChannelId ?? subscription.targetChannelId),
-          messageTemplate: String(
-            detailConfig.messageTemplate ?? subscription.messageTemplate,
-          ),
+          messageTemplate: String(detailConfig.messageTemplate ?? subscription.messageTemplate),
           mention: String(detailConfig.mention ?? subscription.mention),
           enabled: Boolean(detailEnabled),
         });
@@ -2444,9 +2661,7 @@ function App() {
         return;
       }
       if (route.key === 'social.tiktok') {
-        const username = String(
-          detailConfig.username ?? detailConfig.sourceLabel ?? '',
-        ).trim();
+        const username = String(detailConfig.username ?? detailConfig.sourceLabel ?? '').trim();
         if (!username) {
           setMessage('Indica primeiro o nome da conta TikTok.');
           return;
@@ -2462,16 +2677,10 @@ function App() {
         }
         const result = await api.testTikTokDelivery(subscription.id, {
           username,
-          targetChannelId: String(
-            detailConfig.targetChannelId ?? subscription.targetChannelId,
-          ),
-          messageTemplate: String(
-            detailConfig.messageTemplate ?? subscription.messageTemplate,
-          ),
+          targetChannelId: String(detailConfig.targetChannelId ?? subscription.targetChannelId),
+          messageTemplate: String(detailConfig.messageTemplate ?? subscription.messageTemplate),
           mention: String(detailConfig.mention ?? subscription.mention),
-          intervalSeconds: Number(
-            detailConfig.intervalSeconds ?? subscription.intervalSeconds,
-          ),
+          intervalSeconds: Number(detailConfig.intervalSeconds ?? subscription.intervalSeconds),
           enabled: Boolean(detailEnabled),
         });
         setMessage(
@@ -2813,7 +3022,9 @@ function App() {
         <header className="panel-header">
           <div>
             <small className="eyebrow">{currentGuild?.name ?? 'WORKSPACE'} · HELPER</small>
-            <h1 id="route-heading" data-route-heading tabIndex={-1}>{title}</h1>
+            <h1 id="route-heading" data-route-heading tabIndex={-1}>
+              {title}
+            </h1>
             <p className="subtitle">{subtitle}</p>
           </div>
           <div className="header-state">
@@ -2838,7 +3049,8 @@ function App() {
             O contexto do Discord precisa de ser atualizado antes de publicar alterações.{' '}
             {guildContext.bot?.reason === 'discord_bot_member_unavailable'
               ? 'Não foi possível confirmar o cargo e as permissões do Helper.'
-              : guildContext.message ?? 'Os seletores continuam disponíveis, mas o preflight está bloqueado.'}
+              : (guildContext.message ??
+                'Os seletores continuam disponíveis, mas o preflight está bloqueado.')}
           </div>
         )}
         {route.page === 'overview' && (
@@ -3091,7 +3303,7 @@ function QuickSetup({
           <h2>Configura o essencial do servidor.</h2>
           <p>Aplicamos uma etapa de cada vez. Voltar não desfaz alterações já publicadas.</p>
         </div>
-          <button type="button" className="link-button" onClick={onDismiss}>
+        <button type="button" className="link-button" onClick={onDismiss}>
           Sair por agora
         </button>
       </div>
@@ -3352,10 +3564,20 @@ function QuickSetup({
             <small className="muted-note">{roles.length} cargos disponíveis para reutilizar.</small>
           )}
           <div className="sticky-actions">
-            <button type="button" className="secondary" onClick={() => void skip()} disabled={applying}>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => void skip()}
+              disabled={applying}
+            >
               Saltar
             </button>
-            <button type="button" className="primary" onClick={() => void apply()} disabled={applying}>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => void apply()}
+              disabled={applying}
+            >
               {applying ? 'A aplicar…' : 'Confirmar e aplicar'}
             </button>
           </div>
@@ -3753,16 +3975,16 @@ function FeatureCatalogue({
                 : healthStatus === 'dependency_down'
                   ? 'Dependência em falta'
                   : maturity === 'operational'
-              ? feature.enabled
-                ? 'Ativa'
-                : 'Disponível'
-              : maturity === 'beta'
-                ? 'Beta'
-                : maturity === 'blocked'
-                  ? 'Bloqueada'
-                  : maturity === 'degraded'
-                    ? 'Com problemas'
-                    : 'Planeada';
+                    ? feature.enabled
+                      ? 'Ativa'
+                      : 'Disponível'
+                    : maturity === 'beta'
+                      ? 'Beta'
+                      : maturity === 'blocked'
+                        ? 'Bloqueada'
+                        : maturity === 'degraded'
+                          ? 'Com problemas'
+                          : 'Planeada';
           return (
             <article className="feature card" key={feature.key}>
               <div className="feature-top">
@@ -3812,10 +4034,15 @@ function FeatureCatalogue({
                     ? 'Configurar'
                     : maturity === 'blocked'
                       ? 'Ver requisitos'
-                    : 'Ver plano'}
+                      : 'Ver plano'}
               </button>
               {docsUrl && (
-                <a className="link-button feature-doc-link" href={docsUrl} target="_blank" rel="noopener noreferrer">
+                <a
+                  className="link-button feature-doc-link"
+                  href={docsUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
                   Learn how this works
                 </a>
               )}
@@ -3869,16 +4096,19 @@ function FeatureDetail({
 }) {
   const templateOptions: [string, string][] = [
     ['', 'No template'],
-    ...templates.map((template) => [template.id, `${template.name} (v${template.version})`] as [string, string]),
+    ...templates.map(
+      (template) => [template.id, `${template.name} (v${template.version})`] as [string, string],
+    ),
   ];
-  const sections: SectionSpec[] = schema?.sections.map((section) => ({
-    ...section,
-    fields: section.fields.map((field) => ({
-      ...field,
-      kind: field.kind as FieldSpec['kind'],
-      options: field.key === 'templateId' ? templateOptions : field.options,
-    })),
-  })) ?? (localPreviewMode ? spec(feature?.key ?? '') : []);
+  const sections: SectionSpec[] =
+    schema?.sections.map((section) => ({
+      ...section,
+      fields: section.fields.map((field) => ({
+        ...field,
+        kind: field.kind as FieldSpec['kind'],
+        options: field.key === 'templateId' ? templateOptions : field.options,
+      })),
+    })) ?? (localPreviewMode ? spec(feature?.key ?? '') : []);
   // Keep blocked providers discoverable, but do not expose a save/enable
   // form that can only fail at publication time. Their detail page is a
   // requirements view until the backend reports a non-blocked maturity.
@@ -3892,7 +4122,9 @@ function FeatureDetail({
         </button>
         <div className="detail-intro card">
           <div>
-            <small className="eyebrow">{feature?.maturity === 'blocked' ? 'REQUISITOS EXTERNOS' : 'ROADMAP'}</small>
+            <small className="eyebrow">
+              {feature?.maturity === 'blocked' ? 'REQUISITOS EXTERNOS' : 'ROADMAP'}
+            </small>
             <h2>{feature?.label ?? 'Funcionalidade'}</h2>
             <p>{feature?.description ?? 'Esta área está no plano do Vozen Helper.'}</p>
             <p className="tip">
@@ -4040,10 +4272,20 @@ function FeatureDetail({
             )}
           <div className="tip">
             <b>Precisas de ajuda?</b>
-            <a className="link-button" href={docsTroubleshootingUrl('missing-permissions')} target="_blank" rel="noopener noreferrer">
+            <a
+              className="link-button"
+              href={docsTroubleshootingUrl('missing-permissions')}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
               Why is this permission needed?
             </a>
-            <a className="link-button" href={docsTroubleshootingUrl('restore-configuration')} target="_blank" rel="noopener noreferrer">
+            <a
+              className="link-button"
+              href={docsTroubleshootingUrl('restore-configuration')}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
               Rollback instructions
             </a>
             <span>Os campos avançados estão fechados para manter o primeiro passo simples.</span>
@@ -4063,16 +4305,25 @@ function FeatureDetail({
 }
 
 function TikTokConnection() {
-  const [status, setStatus] = useState<Awaited<ReturnType<typeof api.tiktokOAuthStatus>> | null>(null);
+  const [status, setStatus] = useState<Awaited<ReturnType<typeof api.tiktokOAuthStatus>> | null>(
+    null,
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
-    api.tiktokOAuthStatus()
-      .then((value) => { if (!cancelled) setStatus(value); })
-      .catch(() => { if (!cancelled) setError('Não foi possível verificar a ligação ao TikTok.'); });
-    return () => { cancelled = true; };
+    api
+      .tiktokOAuthStatus()
+      .then((value) => {
+        if (!cancelled) setStatus(value);
+      })
+      .catch(() => {
+        if (!cancelled) setError('Não foi possível verificar a ligação ao TikTok.');
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const connect = async () => {
@@ -4105,7 +4356,8 @@ function TikTokConnection() {
       <small className="eyebrow">CONTA TIKTOK</small>
       {status?.sandbox && (
         <p className="tip feature-requirement">
-          Sandbox de revisão ativo — esta ligação usa uma conta de teste autorizada no TikTok Developer Portal.
+          Sandbox de revisão ativo — esta ligação usa uma conta de teste autorizada no TikTok
+          Developer Portal.
         </p>
       )}
       <h3>{status?.connected ? 'TikTok ligado' : 'Liga a conta que publica os vídeos'}</h3>
@@ -4120,7 +4372,12 @@ function TikTokConnection() {
           {busy ? 'A desligar…' : 'Desligar TikTok'}
         </button>
       ) : (
-        <button type="button" className="primary" onClick={connect} disabled={busy || status === null}>
+        <button
+          type="button"
+          className="primary"
+          onClick={connect}
+          disabled={busy || status === null}
+        >
           {busy ? 'A abrir TikTok…' : 'Ligar TikTok'}
         </button>
       )}
@@ -4134,7 +4391,8 @@ function ProviderHealthPanel({ health }: { health: ProviderSubscriptionHealth })
     degraded: 'Degradado',
     dependency_down: 'Dependencia indisponivel',
   };
-  const provider = health.provider === 'rss' ? 'RSS' : health.provider === 'youtube' ? 'YouTube' : 'Twitch';
+  const provider =
+    health.provider === 'rss' ? 'RSS' : health.provider === 'youtube' ? 'YouTube' : 'Twitch';
   const source =
     health.provider === 'youtube'
       ? health.latestVideo?.title
@@ -4155,8 +4413,15 @@ function ProviderHealthPanel({ health }: { health: ProviderSubscriptionHealth })
       </p>
       {source && <small>Ultima fonte: {source}</small>}
       {health.failureCount > 0 && <small>Falhas consecutivas: {health.failureCount}</small>}
-      {health.lastError && <small className="provider-health-error">Ultimo erro: {health.lastError}</small>}
-      <a className="link-button" href={docsProviderStatusUrl()} target="_blank" rel="noopener noreferrer">
+      {health.lastError && (
+        <small className="provider-health-error">Ultimo erro: {health.lastError}</small>
+      )}
+      <a
+        className="link-button"
+        href={docsProviderStatusUrl()}
+        target="_blank"
+        rel="noopener noreferrer"
+      >
         Provider status
       </a>
     </div>
@@ -4237,26 +4502,55 @@ function TemplateManager({
       </div>
       <div className="field-grid">
         <label className="field">
-          <span><b>Template name</b><small>Use a clear name your team will recognise.</small></span>
+          <span>
+            <b>Template name</b>
+            <small>Use a clear name your team will recognise.</small>
+          </span>
           <input value={name} maxLength={80} onChange={(event) => setName(event.target.value)} />
         </label>
         <label className="field">
-          <span><b>Description</b><small>Optional context for the next administrator.</small></span>
-          <input value={description} maxLength={500} onChange={(event) => setDescription(event.target.value)} />
+          <span>
+            <b>Description</b>
+            <small>Optional context for the next administrator.</small>
+          </span>
+          <input
+            value={description}
+            maxLength={500}
+            onChange={(event) => setDescription(event.target.value)}
+          />
         </label>
         <label className="field">
-          <span><b>Default message</b><small>Optional content used by welcome, goodbye and guided-channel templates. Supports {'{member}'} and {'{server}'}.</small></span>
-          <textarea value={content} maxLength={2000} rows={3} onChange={(event) => setContent(event.target.value)} />
+          <span>
+            <b>Default message</b>
+            <small>
+              Optional content used by welcome, goodbye and guided-channel templates. Supports{' '}
+              {'{member}'} and {'{server}'}.
+            </small>
+          </span>
+          <textarea
+            value={content}
+            maxLength={2000}
+            rows={3}
+            onChange={(event) => setContent(event.target.value)}
+          />
         </label>
       </div>
       <div className="template-module-grid" aria-label="Template modules">
         {moduleOptions.map(([value, label]) => (
           <label className="toggle-field" key={value}>
-            <span><b>{label}</b></span>
+            <span>
+              <b>{label}</b>
+            </span>
             <input
               type="checkbox"
               checked={modules.includes(value)}
-              onChange={(event) => setModules((current) => event.target.checked ? [...new Set([...current, value])] : current.filter((item) => item !== value))}
+              onChange={(event) =>
+                setModules((current) =>
+                  event.target.checked
+                    ? [...new Set([...current, value])]
+                    : current.filter((item) => item !== value),
+                )
+              }
             />
           </label>
         ))}
@@ -4269,12 +4563,21 @@ function TemplateManager({
       >
         {busy ? 'Saving…' : 'Save template'}
       </button>
-      {error && <p className="tip" role="alert">{error}</p>}
+      {error && (
+        <p className="tip" role="alert">
+          {error}
+        </p>
+      )}
       {templates.length > 0 && (
         <div className="template-list">
           {templates.map((template) => (
             <div className="template-row" key={template.id}>
-              <div><b>{template.name}</b><small>{template.description || 'No description'} · v{template.version}</small></div>
+              <div>
+                <b>{template.name}</b>
+                <small>
+                  {template.description || 'No description'} · v{template.version}
+                </small>
+              </div>
               <button
                 type="button"
                 className="ghost"
@@ -4306,7 +4609,8 @@ function CustomCommandManager({ localPreviewMode }: { localPreviewMode: boolean 
   useEffect(() => {
     if (localPreviewMode) return;
     let cancelled = false;
-    void api.customCommands()
+    void api
+      .customCommands()
       .then((result) => {
         if (cancelled) return;
         setCommands(result.commands);
@@ -4315,12 +4619,15 @@ function CustomCommandManager({ localPreviewMode }: { localPreviewMode: boolean 
         setEnabled(result.enabled);
       })
       .catch((cause) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Could not load custom commands.');
+        if (!cancelled)
+          setError(cause instanceof Error ? cause.message : 'Could not load custom commands.');
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [localPreviewMode]);
 
   function resetForm() {
@@ -4345,9 +4652,11 @@ function CustomCommandManager({ localPreviewMode }: { localPreviewMode: boolean 
       const result = editingName
         ? await api.updateCustomCommand(editingName, content.trim())
         : await api.createCustomCommand(normalizedName, content.trim());
-      setCommands((current) => editingName
-        ? current.map((command) => command.name === editingName ? result.command : command)
-        : [...current, result.command].sort((a, b) => a.name.localeCompare(b.name)));
+      setCommands((current) =>
+        editingName
+          ? current.map((command) => (command.name === editingName ? result.command : command))
+          : [...current, result.command].sort((a, b) => a.name.localeCompare(b.name)),
+      );
       resetForm();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not save the custom command.');
@@ -4378,22 +4687,34 @@ function CustomCommandManager({ localPreviewMode }: { localPreviewMode: boolean 
           <small className="eyebrow">RESPOSTAS DO SERVIDOR</small>
           <h3>Comandos personalizados</h3>
           <p>
-            Cria respostas simples para o teu servidor. O prefixo e os limites ficam nas opções acima;
-            aqui geres o conteúdo que o Helper publica de verdade.
+            Cria respostas simples para o teu servidor. O prefixo e os limites ficam nas opções
+            acima; aqui geres o conteúdo que o Helper publica de verdade.
           </p>
         </div>
       </div>
       <div className="tip">
         <b>Variáveis disponíveis</b>
-        <span>{'{user}'}, {'{channel}'}, {'{server}'} e {'{args}'}. Menções globais são neutralizadas pelo Helper.</span>
+        <span>
+          {'{user}'}, {'{channel}'}, {'{server}'} e {'{args}'}. Menções globais são neutralizadas
+          pelo Helper.
+        </span>
       </div>
       {!localPreviewMode && !loading && !enabled && (
-        <p className="tip" role="status">Ativa esta funcionalidade e guarda as alterações acima para gerir comandos.</p>
+        <p className="tip" role="status">
+          Ativa esta funcionalidade e guarda as alterações acima para gerir comandos.
+        </p>
       )}
-      {loading && <p className="tip" role="status">A carregar comandos deste servidor…</p>}
+      {loading && (
+        <p className="tip" role="status">
+          A carregar comandos deste servidor…
+        </p>
+      )}
       <div className="field-grid">
         <label className="field">
-          <span><b>{editingName ? 'Nome do comando' : 'Novo comando'}</b><small>Usa apenas letras, números, hífen ou underscore. Máximo 32 caracteres.</small></span>
+          <span>
+            <b>{editingName ? 'Nome do comando' : 'Novo comando'}</b>
+            <small>Usa apenas letras, números, hífen ou underscore. Máximo 32 caracteres.</small>
+          </span>
           <input
             value={name}
             maxLength={32}
@@ -4403,7 +4724,12 @@ function CustomCommandManager({ localPreviewMode }: { localPreviewMode: boolean 
           />
         </label>
         <label className="field">
-          <span><b>Resposta</b><small>Até {maxResponseLength} caracteres. O prefixo configurado será usado no Discord.</small></span>
+          <span>
+            <b>Resposta</b>
+            <small>
+              Até {maxResponseLength} caracteres. O prefixo configurado será usado no Discord.
+            </small>
+          </span>
           <textarea
             value={content}
             maxLength={maxResponseLength}
@@ -4415,22 +4741,56 @@ function CustomCommandManager({ localPreviewMode }: { localPreviewMode: boolean 
         </label>
       </div>
       <div className="inline-actions">
-        <button type="button" className="secondary" onClick={() => void saveCommand()} disabled={localPreviewMode || busy || !enabled || !name.trim() || !content.trim()}>
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => void saveCommand()}
+          disabled={localPreviewMode || busy || !enabled || !name.trim() || !content.trim()}
+        >
           {busy ? 'A guardar…' : editingName ? 'Guardar comando' : 'Adicionar comando'}
         </button>
-        {editingName && <button type="button" className="ghost" onClick={resetForm} disabled={busy}>Cancelar edição</button>}
-        <small>{commands.length}/{limit} comandos usados</small>
+        {editingName && (
+          <button type="button" className="ghost" onClick={resetForm} disabled={busy}>
+            Cancelar edição
+          </button>
+        )}
+        <small>
+          {commands.length}/{limit} comandos usados
+        </small>
       </div>
-      {error && <p className="tip" role="alert">{error}</p>}
-      {!localPreviewMode && !loading && commands.length === 0 && <p className="tip">Ainda não existem comandos. Adiciona o primeiro acima.</p>}
+      {error && (
+        <p className="tip" role="alert">
+          {error}
+        </p>
+      )}
+      {!localPreviewMode && !loading && commands.length === 0 && (
+        <p className="tip">Ainda não existem comandos. Adiciona o primeiro acima.</p>
+      )}
       {commands.length > 0 && (
         <div className="template-list" aria-label="Comandos personalizados">
           {commands.map((command) => (
             <div className="template-row" key={command.name}>
-              <div><b>{command.name}</b><small>{command.content}</small></div>
+              <div>
+                <b>{command.name}</b>
+                <small>{command.content}</small>
+              </div>
               <div className="inline-actions">
-                <button type="button" className="ghost" onClick={() => beginEdit(command)} disabled={busy}>Editar</button>
-                <button type="button" className="ghost" onClick={() => void removeCommand(command.name)} disabled={busy}>Apagar</button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => beginEdit(command)}
+                  disabled={busy}
+                >
+                  Editar
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void removeCommand(command.name)}
+                  disabled={busy}
+                >
+                  Apagar
+                </button>
               </div>
             </div>
           ))}
@@ -4456,7 +4816,8 @@ function LeaderboardPreview({
   useEffect(() => {
     if (localPreviewMode) return;
     let cancelled = false;
-    void api.leaderboard()
+    void api
+      .leaderboard()
       .then((result) => {
         if (cancelled) return;
         setEntries(result.entries);
@@ -4464,12 +4825,15 @@ function LeaderboardPreview({
         setIsPublic(result.public);
       })
       .catch((cause) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Could not load the leaderboard.');
+        if (!cancelled)
+          setError(cause instanceof Error ? cause.message : 'Could not load the leaderboard.');
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [localPreviewMode]);
 
   return (
@@ -4478,27 +4842,46 @@ function LeaderboardPreview({
         <div>
           <small className="eyebrow">XP COMMUNITY</small>
           <h3>Leaderboard preview</h3>
-          <p>Preview the same opt-out-aware ranking that the Helper publishes with <code>/leaderboard</code>.</p>
+          <p>
+            Preview the same opt-out-aware ranking that the Helper publishes with{' '}
+            <code>/leaderboard</code>.
+          </p>
         </div>
         <span className="status-pill">{isPublic ? 'Public' : 'Private'}</span>
       </div>
       {!localPreviewMode && !enabled && (
-        <p className="tip" role="status">Enable the XP leaderboard and save the settings to publish it in Discord.</p>
+        <p className="tip" role="status">
+          Enable the XP leaderboard and save the settings to publish it in Discord.
+        </p>
       )}
-      {loading && <p className="tip" role="status">Loading the latest XP ranking…</p>}
-      {error && <p className="tip" role="alert">{error}</p>}
+      {loading && (
+        <p className="tip" role="status">
+          Loading the latest XP ranking…
+        </p>
+      )}
+      {error && (
+        <p className="tip" role="alert">
+          {error}
+        </p>
+      )}
       {!loading && enabled && entries.length === 0 && (
-        <p className="tip">No eligible XP data yet. Members can opt out with <code>/leaderboard-privacy</code>.</p>
+        <p className="tip">
+          No eligible XP data yet. Members can opt out with <code>/leaderboard-privacy</code>.
+        </p>
       )}
       {entries.length > 0 && (
         <div className="template-list" aria-label="XP leaderboard preview">
           {entries.map((entry) => (
             <div className="template-row" key={`${entry.userId}-${entry.rank}`}>
               <div>
-                <b>#{entry.rank} · {entry.userId}</b>
+                <b>
+                  #{entry.rank} · {entry.userId}
+                </b>
                 <small>{entry.xp.toLocaleString()} XP</small>
               </div>
-              <span className="status-pill">{entry.rank <= maxEntries ? 'Included' : 'Hidden'}</span>
+              <span className="status-pill">
+                {entry.rank <= maxEntries ? 'Included' : 'Hidden'}
+              </span>
             </div>
           ))}
         </div>
@@ -4522,7 +4905,8 @@ function RemindersManager({
   useEffect(() => {
     if (localPreviewMode) return;
     let cancelled = false;
-    void api.reminders()
+    void api
+      .reminders()
       .then((result) => {
         if (cancelled) return;
         setReminders(result.reminders);
@@ -4535,7 +4919,9 @@ function RemindersManager({
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [localPreviewMode]);
 
   async function cancel(id: number) {
@@ -4558,11 +4944,20 @@ function RemindersManager({
     setError('');
     try {
       await api.retryReminder(id);
-      setReminders((current) => current.map((reminder) => (
-        reminder.id === id
-          ? { ...reminder, status: 'pending', attempts: 0, lastError: null, leaseUntil: null, executeAt: Date.now() }
-          : reminder
-      )));
+      setReminders((current) =>
+        current.map((reminder) =>
+          reminder.id === id
+            ? {
+                ...reminder,
+                status: 'pending',
+                attempts: 0,
+                lastError: null,
+                leaseUntil: null,
+                executeAt: Date.now(),
+              }
+            : reminder,
+        ),
+      );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not retry the reminder.');
     } finally {
@@ -4581,7 +4976,9 @@ function RemindersManager({
         <div>
           <small className="eyebrow">SCHEDULED ACTIONS</small>
           <h3>Pending reminders</h3>
-          <p>See reminders created with <code>/remind</code> and cancel them before they are sent.</p>
+          <p>
+            See reminders created with <code>/remind</code> and cancel them before they are sent.
+          </p>
         </div>
         <span className="status-pill">
           {reminders.length} scheduled
@@ -4589,27 +4986,45 @@ function RemindersManager({
         </span>
       </div>
       {!localPreviewMode && !enabled && (
-        <p className="tip" role="status">Enable reminders and save the policy before scheduling new messages.</p>
+        <p className="tip" role="status">
+          Enable reminders and save the policy before scheduling new messages.
+        </p>
       )}
-      {loading && <p className="tip" role="status">Loading scheduled reminders…</p>}
-      {error && <p className="tip" role="alert">{error}</p>}
+      {loading && (
+        <p className="tip" role="status">
+          Loading scheduled reminders…
+        </p>
+      )}
+      {error && (
+        <p className="tip" role="alert">
+          {error}
+        </p>
+      )}
       {!loading && reminders.length === 0 && (
-        <p className="tip">No pending reminders. Members can create one with <code>/remind</code> in Discord.</p>
+        <p className="tip">
+          No pending reminders. Members can create one with <code>/remind</code> in Discord.
+        </p>
       )}
       {reminders.length > 0 && (
         <div className="template-list" aria-label="Pending reminders">
           {reminders.map((reminder) => (
             <div className="template-row" key={reminder.id}>
               <div>
-                <b>#{reminder.id} · {new Date(reminder.executeAt).toLocaleString()}</b>
+                <b>
+                  #{reminder.id} · {new Date(reminder.executeAt).toLocaleString()}
+                </b>
                 <small>
                   {reminder.text || 'Reminder'}
-                  {reminder.repeat ? ` · repeats ${reminder.repeat}${reminder.remaining == null ? '' : ` (${reminder.remaining} left)`}` : ''}
+                  {reminder.repeat
+                    ? ` · repeats ${reminder.repeat}${reminder.remaining == null ? '' : ` (${reminder.remaining} left)`}`
+                    : ''}
                   {reminder.timezone ? ` · ${reminder.timezone}` : ''}
                 </small>
                 <span className={`status-pill reminder-status-${reminder.status}`}>
                   {reminder.status === 'dead' ? 'Failed — retry required' : reminder.status}
-                  {reminder.attempts > 0 ? ` · ${reminder.attempts} attempt${reminder.attempts === 1 ? '' : 's'}` : ''}
+                  {reminder.attempts > 0
+                    ? ` · ${reminder.attempts} attempt${reminder.attempts === 1 ? '' : 's'}`
+                    : ''}
                 </span>
                 {reminder.lastError ? <small className="tip">{reminder.lastError}</small> : null}
               </div>
@@ -4625,12 +5040,12 @@ function RemindersManager({
                   </button>
                 )}
                 <button
-                type="button"
-                className="ghost"
-                onClick={() => void cancel(reminder.id)}
-                disabled={localPreviewMode || !enabled || busyAction !== null}
-              >
-                {busyAction === `cancel:${reminder.id}` ? 'Cancelling...' : 'Cancel'}
+                  type="button"
+                  className="ghost"
+                  onClick={() => void cancel(reminder.id)}
+                  disabled={localPreviewMode || !enabled || busyAction !== null}
+                >
+                  {busyAction === `cancel:${reminder.id}` ? 'Cancelling...' : 'Cancel'}
                 </button>
               </div>
             </div>
@@ -4643,16 +5058,20 @@ function RemindersManager({
 
 function isSafeWorkflowReaction(value: string): boolean {
   const characters = Array.from(value);
-  return characters.length > 0
-    && characters.length <= 16
-    && characters.every((character) => {
+  return (
+    characters.length > 0 &&
+    characters.length <= 16 &&
+    characters.every((character) => {
       const codePoint = character.codePointAt(0) ?? 0;
-      return codePoint > 0x7f
-        && !/\s/u.test(character)
-        && character !== '<'
-        && character !== '>'
-        && character !== ':';
-    });
+      return (
+        codePoint > 0x7f &&
+        !/\s/u.test(character) &&
+        character !== '<' &&
+        character !== '>' &&
+        character !== ':'
+      );
+    })
+  );
 }
 
 function WorkflowManager({
@@ -4676,7 +5095,8 @@ function WorkflowManager({
   useEffect(() => {
     if (localPreviewMode) return;
     let cancelled = false;
-    void api.workflows()
+    void api
+      .workflows()
       .then((result) => {
         if (cancelled) return;
         setWorkflows(result.workflows);
@@ -4684,12 +5104,15 @@ function WorkflowManager({
         setMaxReplyLength(result.maxReplyLength);
       })
       .catch((cause) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Could not load workflows.');
+        if (!cancelled)
+          setError(cause instanceof Error ? cause.message : 'Could not load workflows.');
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [localPreviewMode]);
 
   async function create() {
@@ -4702,7 +5125,9 @@ function WorkflowManager({
       return;
     }
     if (action === 'react' && !isSafeWorkflowReaction(trimmedPayload)) {
-      setError('Reactions use one Unicode emoji (maximum 16 characters); custom emojis are not supported.');
+      setError(
+        'Reactions use one Unicode emoji (maximum 16 characters); custom emojis are not supported.',
+      );
       return;
     }
     setBusy(true);
@@ -4743,9 +5168,11 @@ function WorkflowManager({
     setError('');
     try {
       await api.updateWorkflow(workflow.id, !workflow.enabled);
-      setWorkflows((current) => current.map((item) =>
-        item.id === workflow.id ? { ...item, enabled: !item.enabled } : item,
-      ));
+      setWorkflows((current) =>
+        current.map((item) =>
+          item.id === workflow.id ? { ...item, enabled: !item.enabled } : item,
+        ),
+      );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not update the workflow.');
     } finally {
@@ -4773,53 +5200,133 @@ function WorkflowManager({
         <div>
           <small className="eyebrow">AUTOMAÇÕES REAIS</small>
           <h3>Workflow builder</h3>
-          <p>Cria regras seguras de mensagem: quando o texto contém uma condição, o Helper responde ou adiciona uma reação.</p>
+          <p>
+            Cria regras seguras de mensagem: quando o texto contém uma condição, o Helper responde
+            ou adiciona uma reação.
+          </p>
         </div>
       </div>
       {!localPreviewMode && !enabled && (
-        <p className="tip" role="status">Ativa esta funcionalidade e guarda as alterações acima para gerir automações.</p>
+        <p className="tip" role="status">
+          Ativa esta funcionalidade e guarda as alterações acima para gerir automações.
+        </p>
       )}
-      {loading && <p className="tip" role="status">A carregar automações deste servidor…</p>}
+      {loading && (
+        <p className="tip" role="status">
+          A carregar automações deste servidor…
+        </p>
+      )}
       <div className="field-grid">
         <label className="field">
-          <span><b>Nome</b><small>Um nome curto para encontrares a regra.</small></span>
-          <input value={name} maxLength={50} disabled={localPreviewMode || busy || !enabled} onChange={(event) => setName(event.target.value)} placeholder="welcome-reply" />
+          <span>
+            <b>Nome</b>
+            <small>Um nome curto para encontrares a regra.</small>
+          </span>
+          <input
+            value={name}
+            maxLength={50}
+            disabled={localPreviewMode || busy || !enabled}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="welcome-reply"
+          />
         </label>
         <label className="field">
-          <span><b>Quando a mensagem contém</b><small>Texto simples, sem código executável.</small></span>
-          <input value={condition} maxLength={200} disabled={localPreviewMode || busy || !enabled} onChange={(event) => setCondition(event.target.value)} placeholder="regras" />
+          <span>
+            <b>Quando a mensagem contém</b>
+            <small>Texto simples, sem código executável.</small>
+          </span>
+          <input
+            value={condition}
+            maxLength={200}
+            disabled={localPreviewMode || busy || !enabled}
+            onChange={(event) => setCondition(event.target.value)}
+            placeholder="regras"
+          />
         </label>
         <label className="field">
-          <span><b>Ação</b><small>As ações são limitadas para evitar loops e spam.</small></span>
-          <select value={action} disabled={localPreviewMode || busy || !enabled} onChange={(event) => setAction(event.target.value as 'reply' | 'react')}>
+          <span>
+            <b>Ação</b>
+            <small>As ações são limitadas para evitar loops e spam.</small>
+          </span>
+          <select
+            value={action}
+            disabled={localPreviewMode || busy || !enabled}
+            onChange={(event) => setAction(event.target.value as 'reply' | 'react')}
+          >
             <option value="reply">Responder à mensagem</option>
             <option value="react">Adicionar reação</option>
           </select>
         </label>
         <label className="field">
-          <span><b>{action === 'reply' ? 'Resposta' : 'Emoji/reação'}</b><small>{action === 'reply' ? `Até ${maxReplyLength} caracteres.` : 'Emoji Unicode, até 16 caracteres; emojis personalizados ficam bloqueados por segurança.'}</small></span>
-          <textarea value={payload} maxLength={action === 'reply' ? maxReplyLength : 16} rows={2} disabled={localPreviewMode || busy || !enabled} onChange={(event) => setPayload(event.target.value)} placeholder={action === 'reply' ? 'Consulta #regras para conhecer as regras.' : '✅'} />
+          <span>
+            <b>{action === 'reply' ? 'Resposta' : 'Emoji/reação'}</b>
+            <small>
+              {action === 'reply'
+                ? `Até ${maxReplyLength} caracteres.`
+                : 'Emoji Unicode, até 16 caracteres; emojis personalizados ficam bloqueados por segurança.'}
+            </small>
+          </span>
+          <textarea
+            value={payload}
+            maxLength={action === 'reply' ? maxReplyLength : 16}
+            rows={2}
+            disabled={localPreviewMode || busy || !enabled}
+            onChange={(event) => setPayload(event.target.value)}
+            placeholder={action === 'reply' ? 'Consulta #regras para conhecer as regras.' : '✅'}
+          />
         </label>
       </div>
       <div className="inline-actions">
-        <button type="button" className="secondary" onClick={() => void create()} disabled={localPreviewMode || busy || !enabled || !name.trim() || !payload.trim()}>
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => void create()}
+          disabled={localPreviewMode || busy || !enabled || !name.trim() || !payload.trim()}
+        >
           {busy ? 'A guardar…' : 'Adicionar automação'}
         </button>
-        <small>{workflows.length}/{limit} automações usadas</small>
+        <small>
+          {workflows.length}/{limit} automações usadas
+        </small>
       </div>
-      {error && <p className="tip" role="alert">{error}</p>}
-      {!localPreviewMode && !loading && workflows.length === 0 && <p className="tip">Ainda não existem automações. Adiciona a primeira acima.</p>}
+      {error && (
+        <p className="tip" role="alert">
+          {error}
+        </p>
+      )}
+      {!localPreviewMode && !loading && workflows.length === 0 && (
+        <p className="tip">Ainda não existem automações. Adiciona a primeira acima.</p>
+      )}
       {workflows.length > 0 && (
         <div className="template-list" aria-label="Workflows do servidor">
           {workflows.map((workflow) => (
             <div className="template-row" key={workflow.id}>
               <div>
                 <b>{workflow.name}</b>
-                <small>Quando contém “{workflow.condition || 'qualquer texto'}” · {workflow.action === 'react' ? `reage com ${workflow.payload}` : `responde: ${workflow.payload}`}</small>
+                <small>
+                  Quando contém “{workflow.condition || 'qualquer texto'}” ·{' '}
+                  {workflow.action === 'react'
+                    ? `reage com ${workflow.payload}`
+                    : `responde: ${workflow.payload}`}
+                </small>
               </div>
               <div className="inline-actions">
-                <button type="button" className="ghost" onClick={() => void toggle(workflow)} disabled={busy || localPreviewMode || !enabled}>{workflow.enabled ? 'Desativar' : 'Ativar'}</button>
-                <button type="button" className="ghost" onClick={() => void remove(workflow)} disabled={busy || localPreviewMode || !enabled}>Apagar</button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void toggle(workflow)}
+                  disabled={busy || localPreviewMode || !enabled}
+                >
+                  {workflow.enabled ? 'Desativar' : 'Ativar'}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void remove(workflow)}
+                  disabled={busy || localPreviewMode || !enabled}
+                >
+                  Apagar
+                </button>
               </div>
             </div>
           ))}
@@ -4844,17 +5351,21 @@ function RolePanelManager({
   useEffect(() => {
     if (localPreviewMode) return;
     let cancelled = false;
-    void api.rolePanels()
+    void api
+      .rolePanels()
       .then((result) => {
         if (!cancelled) setPanels(result.panels);
       })
       .catch((cause) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : 'Could not load role panels.');
+        if (!cancelled)
+          setError(cause instanceof Error ? cause.message : 'Could not load role panels.');
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [localPreviewMode]);
 
   const channelName = (id?: string) => context?.channels.find((channel) => channel.id === id)?.name;
@@ -4881,9 +5392,11 @@ function RolePanelManager({
     setError('');
     try {
       const result = await api.repairRolePanel(messageId);
-      setPanels((current) => current.map((panel) => panel.message_id === messageId
-        ? { ...panel, message_id: result.messageId }
-        : panel));
+      setPanels((current) =>
+        current.map((panel) =>
+          panel.message_id === messageId ? { ...panel, message_id: result.messageId } : panel,
+        ),
+      );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not repair the role panel.');
     } finally {
@@ -4898,14 +5411,20 @@ function RolePanelManager({
           <small className="eyebrow">REAL DISCORD PANELS</small>
           <h3>Role panel manager</h3>
           <p>
-            Guardar a configuração publica um painel real. Aqui podes confirmar onde está,
-            reparar uma mensagem apagada ou removê-la sem apagar os cargos.
+            Guardar a configuração publica um painel real. Aqui podes confirmar onde está, reparar
+            uma mensagem apagada ou removê-la sem apagar os cargos.
           </p>
         </div>
       </div>
-      {loading && <p className="tip" role="status">A carregar painéis deste servidor…</p>}
+      {loading && (
+        <p className="tip" role="status">
+          A carregar painéis deste servidor…
+        </p>
+      )}
       {!localPreviewMode && !loading && panels.length === 0 && (
-        <p className="tip">Ainda não existe um painel publicado. Escolhe um canal e cargos acima e guarda.</p>
+        <p className="tip">
+          Ainda não existe um painel publicado. Escolhe um canal e cargos acima e guarda.
+        </p>
       )}
       {panels.length > 0 && (
         <div className="template-list" aria-label="Role panels">
@@ -4914,18 +5433,38 @@ function RolePanelManager({
               <div>
                 <b>{panel.title || 'Role panel'}</b>
                 <small>
-                  #{channelName(panel.channel_id) ?? panel.channel_id ?? 'unknown channel'} · {roleNames(panel.role_ids) || 'no roles'} · {panel.selection_mode === 'unique' ? 'one choice' : 'multiple choices'}
+                  #{channelName(panel.channel_id) ?? panel.channel_id ?? 'unknown channel'} ·{' '}
+                  {roleNames(panel.role_ids) || 'no roles'} ·{' '}
+                  {panel.selection_mode === 'unique' ? 'one choice' : 'multiple choices'}
                 </small>
               </div>
               <div className="inline-actions">
-                <button type="button" className="ghost" onClick={() => void repair(panel.message_id)} disabled={busy}>Repair</button>
-                <button type="button" className="ghost" onClick={() => void remove(panel.message_id)} disabled={busy}>Delete</button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void repair(panel.message_id)}
+                  disabled={busy}
+                >
+                  Repair
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void remove(panel.message_id)}
+                  disabled={busy}
+                >
+                  Delete
+                </button>
               </div>
             </div>
           ))}
         </div>
       )}
-      {error && <p className="tip" role="alert">{error}</p>}
+      {error && (
+        <p className="tip" role="alert">
+          {error}
+        </p>
+      )}
     </section>
   );
 }
@@ -4995,32 +5534,73 @@ function FieldControl({
   context: GuildContext | null;
   onChange: (key: string, value: unknown) => void;
 }) {
-  const normalized = value ?? (field.kind === 'toggle' ? false : field.kind === 'tags' || field.kind === 'channels' || field.kind === 'roles' ? [] : '');
-  const resourceOptions = field.kind === 'category'
-    ? (context?.channels ?? []).filter((option) => option.type === 'category')
-    : field.kind === 'channel' || field.kind === 'channels'
-      ? (context?.channels ?? []).filter((option) => option.type !== 'category')
-      : (context?.roles ?? []);
+  const normalized =
+    value ??
+    (field.kind === 'toggle'
+      ? false
+      : field.kind === 'tags' || field.kind === 'channels' || field.kind === 'roles'
+        ? []
+        : '');
+  const resourceOptions =
+    field.kind === 'category'
+      ? (context?.channels ?? []).filter((option) => option.type === 'category')
+      : field.kind === 'channel' || field.kind === 'channels'
+        ? (context?.channels ?? []).filter((option) => option.type !== 'category')
+        : (context?.roles ?? []);
   const multiple = field.kind === 'channels' || field.kind === 'roles';
-  if (field.kind === 'channel' || field.kind === 'category' || field.kind === 'channels' || field.kind === 'role' || field.kind === 'roles')
+  if (
+    field.kind === 'channel' ||
+    field.kind === 'category' ||
+    field.kind === 'channels' ||
+    field.kind === 'role' ||
+    field.kind === 'roles'
+  )
     return (
       <label className="field">
         <span>
           <b>{field.label}</b>
-          <small>{field.help ?? (resourceOptions.length ? 'Seleciona um recurso existente.' : 'A leitura do Discord ainda não está disponível.')}</small>
+          <small>
+            {field.help ??
+              (resourceOptions.length
+                ? 'Seleciona um recurso existente.'
+                : 'A leitura do Discord ainda não está disponível.')}
+          </small>
         </span>
         <select
-          value={multiple ? (Array.isArray(normalized) ? normalized.map(String) : []) : String(normalized)}
+          value={
+            multiple
+              ? Array.isArray(normalized)
+                ? normalized.map(String)
+                : []
+              : String(normalized)
+          }
           multiple={multiple}
           size={multiple ? Math.min(5, Math.max(2, resourceOptions.length)) : undefined}
           onChange={(event) => {
-            const selected = Array.from(event.currentTarget.selectedOptions).map((option) => option.value);
+            const selected = Array.from(event.currentTarget.selectedOptions).map(
+              (option) => option.value,
+            );
             onChange(field.key, multiple ? selected : (selected[0] ?? ''));
           }}
-          disabled={!context?.capabilities.channelSelectors && (field.kind === 'channel' || field.kind === 'category' || field.kind === 'channels') || !context?.capabilities.roleSelectors && (field.kind === 'role' || field.kind === 'roles')}
+          disabled={
+            (!context?.capabilities.channelSelectors &&
+              (field.kind === 'channel' ||
+                field.kind === 'category' ||
+                field.kind === 'channels')) ||
+            (!context?.capabilities.roleSelectors &&
+              (field.kind === 'role' || field.kind === 'roles'))
+          }
         >
           {!multiple && <option value="">Escolhe um recurso</option>}
-          {resourceOptions.map((option) => <option value={option.id} key={option.id}>{field.kind === 'role' || field.kind === 'roles' ? `@${option.name}` : field.kind === 'category' ? `▾ ${option.name}` : `#${option.name}`}</option>)}
+          {resourceOptions.map((option) => (
+            <option value={option.id} key={option.id}>
+              {field.kind === 'role' || field.kind === 'roles'
+                ? `@${option.name}`
+                : field.kind === 'category'
+                  ? `▾ ${option.name}`
+                  : `#${option.name}`}
+            </option>
+          ))}
         </select>
       </label>
     );

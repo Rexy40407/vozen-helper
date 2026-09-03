@@ -154,6 +154,8 @@ describe('handleWelcomeDm (handler)', () => {
         throw Object.assign(new Error('Cannot send messages to this user'), { code: 50007 });
       },
     });
-    await expect(handleWelcomeDm(fakeCtx(db), member as never, calmRaid(), 1000)).resolves.toBeUndefined();
+    await expect(
+      handleWelcomeDm(fakeCtx(db), member as never, calmRaid(), 1000),
+    ).resolves.toBeUndefined();
   });
 });

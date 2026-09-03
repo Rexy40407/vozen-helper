@@ -5,6 +5,7 @@
 > vivo antes de editar.
 
 ## Status
+
 - **Prioridade**: P1
 - **Esforço**: S
 - **Risco**: LOW
@@ -25,7 +26,14 @@ ficam pendurados e nunca terminam sozinhos.
 
 - `src/community/giveaways.ts`, criação (~linha 94):
   ```ts
-  scheduleAction(ctx.db, { guildId: interaction.guildId, type: 'giveaway_end', targetId: interaction.user.id, executeAt: endAt, payload: String(id), caseId: null });
+  scheduleAction(ctx.db, {
+    guildId: interaction.guildId,
+    type: 'giveaway_end',
+    targetId: interaction.user.id,
+    executeAt: endAt,
+    payload: String(id),
+    caseId: null,
+  });
   ```
 - `src/community/giveaways.ts`, `/gend` (~linha 112):
   ```ts
@@ -33,10 +41,12 @@ ficam pendurados e nunca terminam sozinhos.
   await endGiveaway(ctx, id);
   ```
 - `src/store/cases.ts`, `cancelScheduled` (~linha 223) apaga por `(guild_id, type,
-  target_id)` — não olha para o `payload`:
+target_id)` — não olha para o `payload`:
   ```ts
   export function cancelScheduled(db, guildId, type: ScheduledType, targetId: string): void {
-    db.prepare(`DELETE FROM scheduled_actions WHERE guild_id = ? AND type = ? AND target_id = ?`).run(guildId, type, targetId);
+    db.prepare(
+      `DELETE FROM scheduled_actions WHERE guild_id = ? AND type = ? AND target_id = ?`,
+    ).run(guildId, type, targetId);
   }
   ```
 - `endGiveaway(ctx, id)` no mesmo ficheiro já é idempotente (`markGiveawayEnded`
@@ -44,19 +54,21 @@ ficam pendurados e nunca terminam sozinhos.
 
 ## Comandos
 
-| Objetivo | Comando | Esperado |
-|-----------|---------|----------|
-| Typecheck | `npm run typecheck` | exit 0 |
-| Testes | `npx vitest run` | todos passam |
+| Objetivo  | Comando             | Esperado     |
+| --------- | ------------------- | ------------ |
+| Typecheck | `npm run typecheck` | exit 0       |
+| Testes    | `npx vitest run`    | todos passam |
 
 ## Scope
 
 **In scope:**
+
 - `src/store/cases.ts` (nova função de cancelamento por payload)
 - `src/community/giveaways.ts` (usar a nova função)
 - `tests/` — teste do novo cancelamento
 
 **Out of scope:**
+
 - A lógica de `endGiveaway`/`scheduleAction`/`getDueActions` — não alterar.
 - Os outros tipos de ação agendada (`unban`, `reminder`, etc.) — a assinatura antiga de
   `cancelScheduled` continua a servi-los.
@@ -67,6 +79,7 @@ ficam pendurados e nunca terminam sozinhos.
 
 Em `src/store/cases.ts`, adiciona uma função que apaga a ação agendada pelo `payload`
 exato (que para giveaways é o id como string), mantendo `guild_id` + `type`:
+
 ```ts
 /** Cancela ações agendadas de um tipo cujo payload é EXATAMENTE `payload`. */
 export function cancelScheduledByPayload(
@@ -75,9 +88,14 @@ export function cancelScheduledByPayload(
   type: ScheduledType,
   payload: string,
 ): void {
-  db.prepare(`DELETE FROM scheduled_actions WHERE guild_id = ? AND type = ? AND payload = ?`).run(guildId, type, payload);
+  db.prepare(`DELETE FROM scheduled_actions WHERE guild_id = ? AND type = ? AND payload = ?`).run(
+    guildId,
+    type,
+    payload,
+  );
 }
 ```
+
 Mantém `cancelScheduled` como está (outros callers dependem dela).
 
 **Verify**: `npm run typecheck` → exit 0.
@@ -85,9 +103,11 @@ Mantém `cancelScheduled` como está (outros callers dependem dela).
 ### Passo 2: `/gend` usa o cancelamento certo
 
 Em `src/community/giveaways.ts`, no `/gend`, troca a linha de cancelamento por:
+
 ```ts
 cancelScheduledByPayload(ctx.db, interaction.guildId, 'giveaway_end', String(id));
 ```
+
 (importa `cancelScheduledByPayload` do store; remove o import de `cancelScheduled` se
 deixar de ser usado neste ficheiro — o typecheck avisa se ficar por usar.)
 
@@ -97,6 +117,7 @@ deixar de ser usado neste ficheiro — o typecheck avisa se ficar por usar.)
 
 Em `tests/` (novo `tests/giveawaysSchedule.test.ts` ou dentro de `community.test.ts`),
 com DB `:memory:`:
+
 1. `scheduleAction` de dois `giveaway_end` do MESMO host, payloads `'1'` e `'2'`.
 2. `cancelScheduledByPayload(db, g, 'giveaway_end', '1')`.
 3. `getDueActions(db, farFuture)` → resta exatamente a de payload `'2'`.
@@ -121,6 +142,6 @@ Modela por `tests/cases.test.ts` (secção "ações agendadas").
 ## Notas de manutenção
 
 - Alternativa de design (não obrigatória): gravar `giveaway_end` com `targetId = id do
-  giveaway` em vez do host, tornando o cancelamento por `targetId` já correto. Não
+giveaway` em vez do host, tornando o cancelamento por `targetId` já correto. Não
   escolhida para não misturar semânticas de `targetId` entre tipos de ação; se um dia se
   fizer, rever este cancelamento.

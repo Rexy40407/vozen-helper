@@ -6,13 +6,21 @@ import {
   levenshtein,
   scanForScam,
 } from '../src/moderation/phishing.js';
-import { needsDehoist, sanitizeName, isUnreadable, isImpersonating } from '../src/moderation/nickname.js';
+import {
+  needsDehoist,
+  sanitizeName,
+  isUnreadable,
+  isImpersonating,
+} from '../src/moderation/nickname.js';
 
 const PROTECTED = ['discord.com', 'discord.gg', 'discord.gift'];
 
 describe('phishing', () => {
   it('extrai domínios', () => {
-    expect(extractDomains('vê https://www.Example.com/x e http://y.org')).toEqual(['example.com', 'y.org']);
+    expect(extractDomains('vê https://www.Example.com/x e http://y.org')).toEqual([
+      'example.com',
+      'y.org',
+    ]);
   });
   it('blacklist casa domínio e subdomínio', () => {
     expect(isBlacklistedDomain('bad.com', ['bad.com'])).toBe(true);
@@ -30,7 +38,9 @@ describe('phishing', () => {
     expect(isLookalikeDomain('github.com', PROTECTED)).toBe(false);
   });
   it('scanForScam devolve o motivo (URLs precisam de protocolo — menos falsos positivos)', () => {
-    expect(scanForScam('grátis em https://dlscord.gift/free', [], PROTECTED).kind).toBe('lookalike');
+    expect(scanForScam('grátis em https://dlscord.gift/free', [], PROTECTED).kind).toBe(
+      'lookalike',
+    );
     expect(scanForScam('vê https://dlscord.gift/x', [], PROTECTED).hit).toBe(true);
     expect(scanForScam('olá', [], PROTECTED).hit).toBe(false);
     // Domínio "nu" sem protocolo NÃO dispara (limitação assumida).

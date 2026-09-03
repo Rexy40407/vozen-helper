@@ -12,7 +12,10 @@ import { scheduleAction } from '../store/cases.js';
 // Encaminhamento das interações e mensagens das features de comunidade. Mantém o
 // index.ts enxuto; devolve true se tratou o botão.
 
-export async function routeCommunityButton(ctx: AppContext, interaction: ButtonInteraction): Promise<boolean> {
+export async function routeCommunityButton(
+  ctx: AppContext,
+  interaction: ButtonInteraction,
+): Promise<boolean> {
   const id = interaction.customId;
   if (id.startsWith('sug:')) {
     await handleSuggestionVote(ctx, interaction);
@@ -45,7 +48,9 @@ export async function handleCommunityMessage(ctx: AppContext, message: Message):
       type: 'bump_reminder',
       targetId: message.author?.id ?? '0',
       executeAt: Date.now() + 2 * 60 * 60 * 1000,
-      payload: JSON.stringify({ channelId: ctx.modConfig.community.bumpReminder.channelId ?? message.channelId }),
+      payload: JSON.stringify({
+        channelId: ctx.modConfig.community.bumpReminder.channelId ?? message.channelId,
+      }),
       caseId: null,
     });
   }

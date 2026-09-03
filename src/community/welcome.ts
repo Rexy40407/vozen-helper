@@ -80,7 +80,8 @@ export async function handleWelcomeDm(
     ctx.modConfig.community.welcomeDm.enabled,
     now,
   );
-  if (!shouldSendWelcomeDm({ enabled, isBot: member.user.bot, isRaiding: raid.isRaiding(now) })) return;
+  if (!shouldSendWelcomeDm({ enabled, isBot: member.user.bot, isRaiding: raid.isRaiding(now) }))
+    return;
 
   const template = getTextSetting(
     ctx.db,

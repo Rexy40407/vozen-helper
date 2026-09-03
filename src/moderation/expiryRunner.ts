@@ -25,7 +25,8 @@ export function makeExpiryRunner(guildId: string) {
       case 'unmute': {
         // payload = ID do role de mute a remover.
         const m = await guild.members.fetch(action.targetId).catch(() => null);
-        if (m && action.payload) await m.roles.remove(action.payload, 'Fim do mute').catch(() => undefined);
+        if (m && action.payload)
+          await m.roles.remove(action.payload, 'Fim do mute').catch(() => undefined);
         break;
       }
     }

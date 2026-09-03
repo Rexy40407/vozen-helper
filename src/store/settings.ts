@@ -28,14 +28,17 @@ export function setSetting(
 
 /** Remove uma chave. Devolve true se existia. */
 export function deleteSetting(db: Database.Database, guildId: string, key: string): boolean {
-  return db.prepare(`DELETE FROM settings WHERE guild_id = ? AND key = ?`).run(guildId, key).changes > 0;
+  return (
+    db.prepare(`DELETE FROM settings WHERE guild_id = ? AND key = ?`).run(guildId, key).changes > 0
+  );
 }
 
 /** Todas as settings de um guild como mapa key -> value. */
 export function getAllSettings(db: Database.Database, guildId: string): Record<string, string> {
-  const rows = db
-    .prepare(`SELECT key, value FROM settings WHERE guild_id = ?`)
-    .all(guildId) as { key: string; value: string }[];
+  const rows = db.prepare(`SELECT key, value FROM settings WHERE guild_id = ?`).all(guildId) as {
+    key: string;
+    value: string;
+  }[];
   const out: Record<string, string> = {};
   for (const r of rows) out[r.key] = r.value;
   return out;

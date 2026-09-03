@@ -1,9 +1,4 @@
-import {
-  SlashCommandBuilder,
-  MessageFlags,
-  EmbedBuilder,
-  type Message,
-} from 'discord.js';
+import { SlashCommandBuilder, MessageFlags, EmbedBuilder, type Message } from 'discord.js';
 import type { AppContext } from '../context.js';
 import type { Command } from '../commands/index.js';
 import { incrStat, getStatsTotals, type StatField } from './store.js';
@@ -31,7 +26,14 @@ export function handleStatsMessage(ctx: AppContext, message: Message): void {
 
 /** Deteta o /bump do DISBOARD e agenda um lembrete 2h depois. */
 export function handleBumpDetection(ctx: AppContext, message: Message): boolean {
-  if (!isFeatureEnabled(ctx.db, ctx.env.guildId, 'bumpreminder', ctx.modConfig.community.bumpReminder.enabled))
+  if (
+    !isFeatureEnabled(
+      ctx.db,
+      ctx.env.guildId,
+      'bumpreminder',
+      ctx.modConfig.community.bumpReminder.enabled,
+    )
+  )
     return false;
   if (message.author?.id !== DISBOARD_ID || !message.inGuild()) return false;
   const desc = message.embeds[0]?.description ?? '';
@@ -41,7 +43,9 @@ export function handleBumpDetection(ctx: AppContext, message: Message): boolean 
 
 const serverstats: Command = {
   public: true,
-  data: new SlashCommandBuilder().setName('serverstats').setDescription('Basic server statistics.') as SlashCommandBuilder,
+  data: new SlashCommandBuilder()
+    .setName('serverstats')
+    .setDescription('Basic server statistics.') as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const totals = getStatsTotals(ctx.db, interaction.guildId);

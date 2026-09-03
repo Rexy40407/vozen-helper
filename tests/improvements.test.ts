@@ -25,8 +25,22 @@ describe('003 — cancelScheduledByPayload só apaga o payload certo', () => {
     db = initDb(':memory:');
   });
   it('cancela o giveaway 1 e preserva o 2 (mesmo host)', () => {
-    scheduleAction(db, { guildId: 'g', type: 'giveaway_end', targetId: 'host', executeAt: 100, payload: '1', caseId: null });
-    scheduleAction(db, { guildId: 'g', type: 'giveaway_end', targetId: 'host', executeAt: 200, payload: '2', caseId: null });
+    scheduleAction(db, {
+      guildId: 'g',
+      type: 'giveaway_end',
+      targetId: 'host',
+      executeAt: 100,
+      payload: '1',
+      caseId: null,
+    });
+    scheduleAction(db, {
+      guildId: 'g',
+      type: 'giveaway_end',
+      targetId: 'host',
+      executeAt: 200,
+      payload: '2',
+      caseId: null,
+    });
     cancelScheduledByPayload(db, 'g', 'giveaway_end', '1');
     const left = getDueActions(db, 10_000);
     expect(left).toHaveLength(1);
@@ -37,7 +51,14 @@ describe('003 — cancelScheduledByPayload só apaga o payload certo', () => {
 describe('004 — ExpiryScheduler tem guard de reentrância', () => {
   it('passagens sobrepostas não reprocessam a mesma ação', async () => {
     const db = initDb(':memory:');
-    scheduleAction(db, { guildId: 'g', type: 'reminder', targetId: 'u', executeAt: 0, payload: '{}', caseId: null });
+    scheduleAction(db, {
+      guildId: 'g',
+      type: 'reminder',
+      targetId: 'u',
+      executeAt: 0,
+      payload: '{}',
+      caseId: null,
+    });
     let calls = 0;
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));

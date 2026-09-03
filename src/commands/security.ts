@@ -25,7 +25,10 @@ function eph(content: string) {
 }
 
 /** Tranca ou destranca os canais de texto (SendMessages para @everyone). */
-async function setLock(interaction: ChatInputCommandInteraction<'cached'>, lock: boolean): Promise<number> {
+async function setLock(
+  interaction: ChatInputCommandInteraction<'cached'>,
+  lock: boolean,
+): Promise<number> {
   const guild = interaction.guild;
   const everyone = guild.roles.everyone;
   let changed = 0;
@@ -86,7 +89,10 @@ const verifyPanel: Command = {
       .setDescription('Click the button below to get access to the server.')
       .setColor(0x57f287);
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId(VERIFY_BUTTON_ID).setLabel('Verify').setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(VERIFY_BUTTON_ID)
+        .setLabel('Verify')
+        .setStyle(ButtonStyle.Success),
     );
     if (interaction.channel && interaction.channel.type === ChannelType.GuildText) {
       await interaction.channel.send({ embeds: [embed], components: [row] });
@@ -98,7 +104,10 @@ const verifyPanel: Command = {
 };
 
 /** Handler do botão de verificação: atribui o cargo de verificado. */
-export async function handleVerifyButton(interaction: ButtonInteraction, ctx: AppContext): Promise<void> {
+export async function handleVerifyButton(
+  interaction: ButtonInteraction,
+  ctx: AppContext,
+): Promise<void> {
   if (!interaction.inCachedGuild()) return;
   const roleId = ctx.modConfig.verification.verifiedRoleId;
   if (!roleId) return void interaction.reply(eph('Verification not configured.'));
@@ -120,7 +129,9 @@ const unquarantine: Command = {
     .setName('unquarantine')
     .setDescription('Restores the roles of a quarantined member (anti-nuke).')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addUserOption((o) => o.setName('user').setDescription('Member').setRequired(true)) as SlashCommandBuilder,
+    .addUserOption((o) =>
+      o.setName('user').setDescription('Member').setRequired(true),
+    ) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const user = interaction.options.getUser('user', true);

@@ -85,7 +85,12 @@ describe('exportUserData — direito de acesso (art. 15.º)', () => {
     db.prepare(
       `INSERT INTO cases (guild_id, type, target_id, moderator_id, reason, created_at) VALUES (?,?,?,?,?,?)`,
     ).run(G, 'warn', OTHER, OTHER, 'caso de outro', now);
-    db.prepare(`INSERT INTO birthdays (guild_id, user_id, day, month) VALUES (?,?,?,?)`).run(G, U, 3, 4);
+    db.prepare(`INSERT INTO birthdays (guild_id, user_id, day, month) VALUES (?,?,?,?)`).run(
+      G,
+      U,
+      3,
+      4,
+    );
     db.prepare(`INSERT INTO levels (guild_id, user_id, xp) VALUES (?,?,?)`).run(G, U, 1234);
 
     const data = exportUserData(db, G, U);
@@ -121,8 +126,18 @@ describe('deleteUserData — direito ao apagamento (art. 17.º)', () => {
   it('apaga dados voluntários e PRESERVA os de moderação, reportando ambos', () => {
     const now = 1_800_000_000_000;
     // Voluntário
-    db.prepare(`INSERT INTO birthdays (guild_id, user_id, day, month) VALUES (?,?,?,?)`).run(G, U, 3, 4);
-    db.prepare(`INSERT INTO afk (guild_id, user_id, reason, since) VALUES (?,?,?,?)`).run(G, U, 'brb', now);
+    db.prepare(`INSERT INTO birthdays (guild_id, user_id, day, month) VALUES (?,?,?,?)`).run(
+      G,
+      U,
+      3,
+      4,
+    );
+    db.prepare(`INSERT INTO afk (guild_id, user_id, reason, since) VALUES (?,?,?,?)`).run(
+      G,
+      U,
+      'brb',
+      now,
+    );
     db.prepare(`INSERT INTO levels (guild_id, user_id, xp) VALUES (?,?,?)`).run(G, U, 50);
     // Moderação (deve manter-se)
     db.prepare(
@@ -142,7 +157,12 @@ describe('deleteUserData — direito ao apagamento (art. 17.º)', () => {
 
   it('não toca em dados de outro utilizador', () => {
     const now = 1_800_000_000_000;
-    db.prepare(`INSERT INTO birthdays (guild_id, user_id, day, month) VALUES (?,?,?,?)`).run(G, OTHER, 1, 1);
+    db.prepare(`INSERT INTO birthdays (guild_id, user_id, day, month) VALUES (?,?,?,?)`).run(
+      G,
+      OTHER,
+      1,
+      1,
+    );
     deleteUserData(db, G, U, now);
     expect(db.prepare(`SELECT COUNT(*) AS n FROM birthdays`).get()).toEqual({ n: 1 });
   });

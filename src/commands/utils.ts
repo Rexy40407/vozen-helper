@@ -22,7 +22,12 @@ const slowmode: Command = {
     .setDescription("Sets the channel's slowmode (0 = off).")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
     .addIntegerOption((o) =>
-      o.setName('seconds').setDescription('Seconds (0-21600)').setRequired(true).setMinValue(0).setMaxValue(21600),
+      o
+        .setName('seconds')
+        .setDescription('Seconds (0-21600)')
+        .setRequired(true)
+        .setMinValue(0)
+        .setMaxValue(21600),
     ) as SlashCommandBuilder,
   async execute(interaction) {
     if (!interaction.inCachedGuild()) return;
@@ -46,7 +51,9 @@ const userinfo: Command = {
     .setName('userinfo')
     .setDescription('Shows triage information about a user.')
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
-    .addUserOption((o) => o.setName('user').setDescription('User').setRequired(true)) as SlashCommandBuilder,
+    .addUserOption((o) =>
+      o.setName('user').setDescription('User').setRequired(true),
+    ) as SlashCommandBuilder,
   async execute(interaction, ctx) {
     if (!interaction.inCachedGuild()) return;
     const user = interaction.options.getUser('user', true);
@@ -62,9 +69,20 @@ const userinfo: Command = {
         { name: 'Cases', value: String(caseCount), inline: true },
       );
     if (member?.joinedTimestamp) {
-      embed.addFields({ name: 'Joined', value: `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>`, inline: true });
+      embed.addFields({
+        name: 'Joined',
+        value: `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>`,
+        inline: true,
+      });
       const roles = [...member.roles.cache.keys()].filter((r) => r !== interaction.guildId);
-      if (roles.length) embed.addFields({ name: 'Roles', value: roles.map((r) => `<@&${r}>`).join(' ').slice(0, 900) });
+      if (roles.length)
+        embed.addFields({
+          name: 'Roles',
+          value: roles
+            .map((r) => `<@&${r}>`)
+            .join(' ')
+            .slice(0, 900),
+        });
     } else {
       embed.addFields({ name: 'In server?', value: 'No', inline: true });
     }

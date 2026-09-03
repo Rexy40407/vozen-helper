@@ -41,9 +41,24 @@ export function purgeExpired(db: Database.Database, guildId: string, now: number
   };
 
   const purge = db.transaction(() => {
-    del('cases', `DELETE FROM cases WHERE guild_id = ? AND created_at < ?`, guildId, now - RETENTION.casesMs);
-    del('activity_log', `DELETE FROM activity_log WHERE guild_id = ? AND created_at < ?`, guildId, now - RETENTION.activityMs);
-    del('notes', `DELETE FROM notes WHERE guild_id = ? AND created_at < ?`, guildId, now - RETENTION.notesMs);
+    del(
+      'cases',
+      `DELETE FROM cases WHERE guild_id = ? AND created_at < ?`,
+      guildId,
+      now - RETENTION.casesMs,
+    );
+    del(
+      'activity_log',
+      `DELETE FROM activity_log WHERE guild_id = ? AND created_at < ?`,
+      guildId,
+      now - RETENTION.activityMs,
+    );
+    del(
+      'notes',
+      `DELETE FROM notes WHERE guild_id = ? AND created_at < ?`,
+      guildId,
+      now - RETENTION.notesMs,
+    );
     del(
       'infractions',
       `DELETE FROM infractions WHERE guild_id = ? AND created_at < ?`,
@@ -90,9 +105,19 @@ export function purgeExpired(db: Database.Database, guildId: string, now: number
       now - RETENTION.scheduledOrphanMs,
     );
     // AFK esquecido (o normal é limpar-se quando o membro volta).
-    del('afk', `DELETE FROM afk WHERE guild_id = ? AND since < ?`, guildId, now - RETENTION.afkOrphanMs);
+    del(
+      'afk',
+      `DELETE FROM afk WHERE guild_id = ? AND since < ?`,
+      guildId,
+      now - RETENTION.afkOrphanMs,
+    );
     // Stats agregados além de 1 ano (comparação lexicográfica de 'YYYY-MM-DD').
-    del('stats', `DELETE FROM stats WHERE guild_id = ? AND date < ?`, guildId, toDateStr(now - RETENTION.statsMs));
+    del(
+      'stats',
+      `DELETE FROM stats WHERE guild_id = ? AND date < ?`,
+      guildId,
+      toDateStr(now - RETENTION.statsMs),
+    );
 
     // Limpeza de órfãos por cascata (votos/entradas sem pai).
     del(
@@ -153,10 +178,26 @@ export function exportUserData(db: Database.Database, guildId: string, userId: s
     cases,
     // NOTA: a tabela `notes` (notas internas de staff sobre o membro) é DELIBERADAMENTE
     // omitida — o schema marca-a como invisível ao membro; expô-la aqui seria uma fuga.
-    infractions: rows(`SELECT * FROM infractions WHERE guild_id = ? AND target_id = ?`, guildId, userId),
-    quarantine: rows(`SELECT * FROM quarantine WHERE guild_id = ? AND user_id = ?`, guildId, userId),
-    stickyRoles: rows(`SELECT * FROM sticky_roles WHERE guild_id = ? AND user_id = ?`, guildId, userId),
-    suggestions: rows(`SELECT * FROM suggestions WHERE guild_id = ? AND author_id = ?`, guildId, userId),
+    infractions: rows(
+      `SELECT * FROM infractions WHERE guild_id = ? AND target_id = ?`,
+      guildId,
+      userId,
+    ),
+    quarantine: rows(
+      `SELECT * FROM quarantine WHERE guild_id = ? AND user_id = ?`,
+      guildId,
+      userId,
+    ),
+    stickyRoles: rows(
+      `SELECT * FROM sticky_roles WHERE guild_id = ? AND user_id = ?`,
+      guildId,
+      userId,
+    ),
+    suggestions: rows(
+      `SELECT * FROM suggestions WHERE guild_id = ? AND author_id = ?`,
+      guildId,
+      userId,
+    ),
     suggestionVotes: rows(`SELECT * FROM suggestion_votes WHERE user_id = ?`, userId),
     afk: rows(`SELECT * FROM afk WHERE guild_id = ? AND user_id = ?`, guildId, userId),
     birthdays: rows(`SELECT * FROM birthdays WHERE guild_id = ? AND user_id = ?`, guildId, userId),
@@ -209,7 +250,12 @@ export function deleteUserData(
     );
     rec('giveaway_entries', `DELETE FROM giveaway_entries WHERE user_id = ?`, userId);
     rec('suggestion_votes', `DELETE FROM suggestion_votes WHERE user_id = ?`, userId);
-    rec('suggestions', `DELETE FROM suggestions WHERE guild_id = ? AND author_id = ?`, guildId, userId);
+    rec(
+      'suggestions',
+      `DELETE FROM suggestions WHERE guild_id = ? AND author_id = ?`,
+      guildId,
+      userId,
+    );
   });
   run();
   // `now` fica disponível para futura auditoria/anonimização; não afeta o apagamento atual.
@@ -218,8 +264,16 @@ export function deleteUserData(
   const count = (sql: string, ...p: unknown[]): number =>
     (db.prepare(sql).get(...p) as { n: number }).n;
   const kept: Record<string, number> = {
-    cases: count(`SELECT COUNT(*) AS n FROM cases WHERE guild_id = ? AND target_id = ?`, guildId, userId),
-    notes: count(`SELECT COUNT(*) AS n FROM notes WHERE guild_id = ? AND target_id = ?`, guildId, userId),
+    cases: count(
+      `SELECT COUNT(*) AS n FROM cases WHERE guild_id = ? AND target_id = ?`,
+      guildId,
+      userId,
+    ),
+    notes: count(
+      `SELECT COUNT(*) AS n FROM notes WHERE guild_id = ? AND target_id = ?`,
+      guildId,
+      userId,
+    ),
     infractions: count(
       `SELECT COUNT(*) AS n FROM infractions WHERE guild_id = ? AND target_id = ?`,
       guildId,

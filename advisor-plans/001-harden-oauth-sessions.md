@@ -89,14 +89,14 @@ legacy token transport without changing the public account UX.
 
 ## Commands you will need
 
-| Purpose | Command | Expected on success |
-|---|---|---|
-| Rust audit | `cargo audit` | exit 0 |
-| Format | `cargo fmt --all -- --check` | exit 0 |
-| Tests | `cargo test --workspace --all-targets` | all pass |
-| Lint | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | exit 0 |
-| Node rollback checks | `npm ci; npm run lint; npm run typecheck; npm run build; npm test` | all exit 0 |
-| Panel bridge check | `npm ci --prefix ..\vozen-org-ui-fix\apps\helper-panel; npm run ui:check --prefix ..\vozen-org-ui-fix\apps\helper-panel; npm run build --prefix ..\vozen-org-ui-fix\apps\helper-panel` | all exit 0 |
+| Purpose              | Command                                                                                                                                                                                | Expected on success |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| Rust audit           | `cargo audit`                                                                                                                                                                          | exit 0              |
+| Format               | `cargo fmt --all -- --check`                                                                                                                                                           | exit 0              |
+| Tests                | `cargo test --workspace --all-targets`                                                                                                                                                 | all pass            |
+| Lint                 | `cargo clippy --workspace --all-targets --all-features -- -D warnings`                                                                                                                 | exit 0              |
+| Node rollback checks | `npm ci; npm run lint; npm run typecheck; npm run build; npm test`                                                                                                                     | all exit 0          |
+| Panel bridge check   | `npm ci --prefix ..\vozen-org-ui-fix\apps\helper-panel; npm run ui:check --prefix ..\vozen-org-ui-fix\apps\helper-panel; npm run build --prefix ..\vozen-org-ui-fix\apps\helper-panel` | all exit 0          |
 
 ## Scope
 
@@ -204,11 +204,11 @@ guild selector.
 
 - [ ] No raw verifier is inserted into an HTTP header with `unwrap`.
 - [ ] OAuth callback ignores/rejects a URL-supplied PKCE verifier and consumes
-  one server-side state record exactly once.
+      one server-side state record exactly once.
 - [ ] Idle expiry uses persisted metadata, not `Utc::now()` reconstructed from
-  a signed token.
+      a signed token.
 - [ ] Browser completion uses an HttpOnly same-origin cookie and leaks no
-  bearer/session credential through URL or web storage.
+      bearer/session credential through URL or web storage.
 - [ ] Tests cover the specified negative/security cases and all commands pass.
 - [ ] No file outside the in-scope list changed.
 

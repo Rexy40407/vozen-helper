@@ -1,17 +1,18 @@
-# Plan 007: Forçar um `undici` sem o advisory *high* (via `overrides`)
+# Plan 007: Forçar um `undici` sem o advisory _high_ (via `overrides`)
 
 > **Instruções do executor**: passo a passo, verifica, STOP nas condições, atualiza o
 > README. **Drift check** (sem git): confirma o `package.json` vivo antes de editar.
 
 ## Status
+
 - **Prioridade**: P2 · **Esforço**: S · **Risco**: LOW/MED · **Depende de**: nenhum
 - **Categoria**: dependencies · **Planned at**: N/A (não é repo git), 2026-07-14
 
 ## Porque é que isto importa
 
-`npm audit` reporta 1 advisory *high* + 3 *moderate*, todos no `undici` (`<=6.26.0`)
+`npm audit` reporta 1 advisory _high_ + 3 _moderate_, todos no `undici` (`<=6.26.0`)
 trazido transitivamente por `discord.js` (`@discordjs/rest` → `@discordjs/ws`). O
-*high* é HTTP header injection via `Set-Cookie` (GHSA-p88m-4jfj-68fv). O `undici` é o
+_high_ é HTTP header injection via `Set-Cookie` (GHSA-p88m-4jfj-68fv). O `undici` é o
 cliente HTTP em runtime do discord.js (REST + gateway), logo é código alcançável. O
 alcance prático é limitado — um grep a `src/` confirma que o bot só faz pedidos a
 endpoints do Discord (não a URLs controladas por atacantes; o resolvedor de redirects de
@@ -34,13 +35,13 @@ corrigir uma dependência de runtime central na mesma.
 
 ## Comandos
 
-| Objetivo | Comando | Esperado |
-|-----------|---------|----------|
-| Ver advisories | `npm audit` | lista atual (antes) |
-| Reinstalar | `npm install` | exit 0, atualiza lockfile |
-| Re-auditar | `npm audit` | **0** high (depois) |
-| Typecheck/Build | `npm run typecheck` / `npm run build` | exit 0 |
-| Testes | `npx vitest run` | todos passam |
+| Objetivo        | Comando                               | Esperado                  |
+| --------------- | ------------------------------------- | ------------------------- |
+| Ver advisories  | `npm audit`                           | lista atual (antes)       |
+| Reinstalar      | `npm install`                         | exit 0, atualiza lockfile |
+| Re-auditar      | `npm audit`                           | **0** high (depois)       |
+| Typecheck/Build | `npm run typecheck` / `npm run build` | exit 0                    |
+| Testes          | `npx vitest run`                      | todos passam              |
 
 ## Scope
 
@@ -62,11 +63,13 @@ audit indica como fixed.
 
 Acrescenta ao `package.json` (top-level, ao lado de `dependencies`) — ajusta a versão à
 que o audit indicou:
+
 ```json
 "overrides": {
   "undici": "^6.26.1"
 }
 ```
+
 (Comentário opcional numa chave `"//overrides"` a explicar, como no Vozen-bot.)
 
 ### Passo 3: reinstalar e re-auditar
@@ -75,6 +78,7 @@ que o audit indicou:
 npm install
 npm audit
 ```
+
 **Verify**: `npm audit` → **0 vulnerabilidades high** (os moderates podem baixar também;
 o objetivo mínimo é eliminar o high). Se ainda houver high, STOP.
 
@@ -83,6 +87,7 @@ o objetivo mínimo é eliminar o high). Se ainda houver high, STOP.
 ```
 npm run typecheck && npm run build && npx vitest run
 ```
+
 **Verify**: todos exit 0 / todos os testes passam. O `undici` é interno ao discord.js,
 por isso não deve haver mudanças de tipos no nosso código.
 

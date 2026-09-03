@@ -4,12 +4,7 @@
 //
 // Chave = `${executorId}:${actionKind}`. Estado em memória (nukes são de segundos).
 
-export type NukeActionKind =
-  | 'channelDelete'
-  | 'roleDelete'
-  | 'ban'
-  | 'kick'
-  | 'webhookCreate';
+export type NukeActionKind = 'channelDelete' | 'roleDelete' | 'ban' | 'kick' | 'webhookCreate';
 
 export class NukeTracker {
   private readonly hits = new Map<string, number[]>();

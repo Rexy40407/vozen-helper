@@ -44,7 +44,10 @@ export function canModeratorActOn(
 ): CheckResult {
   if (modIsOwner) return { ok: true };
   if (modTopPosition <= targetTopPosition) {
-    return { ok: false, reason: 'You cannot moderate someone with a role equal to or higher than yours.' };
+    return {
+      ok: false,
+      reason: 'You cannot moderate someone with a role equal to or higher than yours.',
+    };
   }
   return { ok: true };
 }

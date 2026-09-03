@@ -81,7 +81,10 @@ export class SpamTracker {
       heat += this.cfg.mentionHeat * (ev.mentionCount - this.cfg.mentionLimit);
       signals.push('mentions');
     }
-    if (ev.content.length >= this.cfg.capsMinLength && capsRatio(ev.content) >= this.cfg.capsRatio) {
+    if (
+      ev.content.length >= this.cfg.capsMinLength &&
+      capsRatio(ev.content) >= this.cfg.capsRatio
+    ) {
       heat += this.cfg.capsHeat;
       signals.push('caps');
     }
