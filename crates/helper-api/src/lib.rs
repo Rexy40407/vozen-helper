@@ -678,8 +678,13 @@ async fn health() -> impl IntoResponse {
 
 #[derive(Debug, Deserialize)]
 struct GrowthQuery {
+    product: Option<String>,
     from: Option<String>,
     to: Option<String>,
+}
+
+fn valid_helper_growth_product(product: Option<&str>) -> bool {
+    matches!(product, None | Some("helper"))
 }
 
 /// Aggregate-only growth reporting for the dedicated owner tracker.  A normal
@@ -702,6 +707,9 @@ async fn admin_growth(
             StatusCode::FORBIDDEN,
             "private_tracker_forbidden",
         ));
+    }
+    if !valid_helper_growth_product(query.product.as_deref()) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "bad_product"));
     }
     let today = Utc::now().date_naive();
     let to = query
@@ -11491,6 +11499,14 @@ mod tests {
         let encoded = serde_json::to_string(&payload).expect("json");
         assert!(!encoded.contains("guildId"));
         assert!(!encoded.contains("userId"));
+    }
+
+    #[test]
+    fn helper_growth_route_rejects_a_mismatched_product() {
+        assert!(valid_helper_growth_product(None));
+        assert!(valid_helper_growth_product(Some("helper")));
+        assert!(!valid_helper_growth_product(Some("tts")));
+        assert!(!valid_helper_growth_product(Some("")));
     }
 
     #[test]
