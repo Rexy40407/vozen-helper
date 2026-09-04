@@ -24,13 +24,20 @@ pub struct GrowthDailyMetric {
 #[serde(rename_all = "camelCase")]
 pub struct GrowthOverview {
     pub active_guilds: i64,
+    pub configured_guilds: i64,
+    pub used_guilds: i64,
     pub joins: i64,
     pub leaves: i64,
     pub net: i64,
     pub setup_rate: f64,
     pub activation_rate: f64,
+    pub retained_w7_count: i64,
+    pub eligible_w7: i64,
+    pub retained_w30_count: i64,
+    pub eligible_w30: i64,
     pub retained_w7: Option<f64>,
     pub retained_w30: Option<f64>,
+    pub measurement_started_on: Option<String>,
     pub daily: Vec<GrowthDailyMetric>,
 }
 
@@ -159,14 +166,22 @@ impl Store {
             |row| row.get(0),
         )?;
         if tx.execute(
+            "UPDATE helper_growth_lifecycle SET first_value_at=?2
+             WHERE guild_id=?1 AND first_value_at IS NULL",
+            params![guild_id, now_ms],
+        )? == 1
+        {
+            increment(&tx, &day, &source, "first_value")?;
+        }
+        if tx.execute(
             "INSERT INTO helper_growth_activity_day(guild_id,day) VALUES(?1,?2) ON CONFLICT(guild_id,day) DO NOTHING",
             params![guild_id, day],
         )? == 1 {
             increment(&tx, &day, &source, "active")?;
         }
+        record_due_retention(&tx, guild_id, now_ms, &source)?;
         tx.commit()?;
-        drop(conn);
-        self.record_growth_first_value(guild_id, now_ms)
+        Ok(())
     }
 
     pub fn growth_overview(
@@ -209,26 +224,58 @@ impl Store {
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?
         };
+        let eligible_w7 = eligible_count(&conn, now_ms, 7)?;
+        let retained_w7_count = lifetime_sum_event(&conn, "retained_w7")?;
+        let eligible_w30 = eligible_count(&conn, now_ms, 30)?;
+        let retained_w30_count = lifetime_sum_event(&conn, "retained_w30")?;
+        let measurement_started_on = conn.query_row(
+            "SELECT MIN(day) FROM helper_growth_daily_metric",
+            [],
+            |row| row.get(0),
+        )?;
         Ok(GrowthOverview {
             active_guilds,
+            configured_guilds: setup,
+            used_guilds: activated,
             joins,
             leaves,
             net: joins - leaves,
             setup_rate: setup as f64 / denominator,
             activation_rate: activated as f64 / denominator,
-            retained_w7: retention_rate(&conn, now_ms, 7)?,
-            retained_w30: retention_rate(&conn, now_ms, 30)?,
+            retained_w7_count,
+            eligible_w7,
+            retained_w30_count,
+            eligible_w30,
+            retained_w7: retention_rate(retained_w7_count, eligible_w7),
+            retained_w30: retention_rate(retained_w30_count, eligible_w30),
+            measurement_started_on,
             daily,
         })
     }
 
     pub fn purge_growth_lifecycle(&self, now_ms: i64) -> Result<usize> {
         let cutoff = now_ms - Duration::days(RETENTION_DAYS).num_milliseconds();
-        let conn = self.conn.lock().expect("store mutex poisoned");
-        Ok(conn.execute(
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        for table in [
+            "helper_growth_activity_day",
+            "helper_growth_retention_record",
+        ] {
+            tx.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE guild_id IN
+                     (SELECT guild_id FROM helper_growth_lifecycle
+                      WHERE departed_at IS NOT NULL AND departed_at < ?1)"
+                ),
+                [cutoff],
+            )?;
+        }
+        let deleted = tx.execute(
             "DELETE FROM helper_growth_lifecycle WHERE departed_at IS NOT NULL AND departed_at < ?1",
             [cutoff],
-        )?)
+        )?;
+        tx.commit()?;
+        Ok(deleted)
     }
 }
 
@@ -254,22 +301,97 @@ fn sum_event(
     )?)
 }
 
-fn retention_rate(conn: &rusqlite::Connection, now_ms: i64, days: i64) -> Result<Option<f64>> {
-    let cutoff = now_ms - Duration::days(days).num_milliseconds();
-    let cohort: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM helper_growth_lifecycle WHERE first_joined_at<=?1",
-        [cutoff],
+fn lifetime_sum_event(conn: &rusqlite::Connection, event: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(value),0) FROM helper_growth_daily_metric WHERE event=?1",
+        [event],
+        |row| row.get(0),
+    )?)
+}
+
+fn eligible_count(conn: &rusqlite::Connection, now_ms: i64, days: i64) -> Result<i64> {
+    let cutoff_day = utc_day(now_ms.saturating_sub(Duration::days(days).num_milliseconds()));
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(value),0) FROM helper_growth_daily_metric
+         WHERE event='first_value' AND day<=?1",
+        [cutoff_day],
+        |row| row.get(0),
+    )?)
+}
+
+fn retention_rate(retained: i64, eligible: i64) -> Option<f64> {
+    (eligible > 0).then_some(retained as f64 / eligible as f64)
+}
+
+fn record_due_retention(
+    tx: &rusqlite::Transaction<'_>,
+    guild_id: &str,
+    now_ms: i64,
+    source: &str,
+) -> Result<()> {
+    let first_value_at: Option<i64> = tx.query_row(
+        "SELECT first_value_at FROM helper_growth_lifecycle WHERE guild_id=?1",
+        [guild_id],
         |row| row.get(0),
     )?;
-    if cohort == 0 {
-        return Ok(None);
+    let Some(first_value_at) = first_value_at else {
+        return Ok(());
+    };
+    let day = utc_day(now_ms);
+    for (window_days, event) in [(7_i64, "retained_w7"), (30_i64, "retained_w30")] {
+        let threshold =
+            first_value_at.saturating_add(Duration::days(window_days).num_milliseconds());
+        if now_ms < threshold {
+            continue;
+        }
+        if tx.execute(
+            "INSERT OR IGNORE INTO helper_growth_retention_record(guild_id,window_days)
+             VALUES(?1,?2)",
+            params![guild_id, window_days],
+        )? == 1
+        {
+            increment(tx, &day, source, event)?;
+        }
     }
-    let retained: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM helper_growth_lifecycle WHERE first_joined_at<=?1 AND departed_at IS NULL AND last_activity_at>=?1",
-        [cutoff],
-        |row| row.get(0),
-    )?;
-    Ok(Some(retained as f64 / cohort as f64))
+    Ok(())
+}
+
+pub(super) fn backfill_growth_retention(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    let candidates = {
+        let mut statement = tx.prepare(
+            "SELECT guild_id,first_value_at,last_activity_at,install_source
+             FROM helper_growth_lifecycle
+             WHERE first_value_at IS NOT NULL AND last_activity_at IS NOT NULL",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    for (guild_id, first_value_at, last_activity_at, source) in candidates {
+        for (window_days, event) in [(7_i64, "retained_w7"), (30_i64, "retained_w30")] {
+            let threshold =
+                first_value_at.saturating_add(Duration::days(window_days).num_milliseconds());
+            if last_activity_at < threshold {
+                continue;
+            }
+            if tx.execute(
+                "INSERT OR IGNORE INTO helper_growth_retention_record(guild_id,window_days)
+                 VALUES(?1,?2)",
+                params![guild_id, window_days],
+            )? == 1
+            {
+                increment(tx, &utc_day(last_activity_at), &source, event)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn utc_day(now_ms: i64) -> String {
@@ -293,6 +415,7 @@ pub fn growth_source(value: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn records_one_activation_funnel_and_purges_departed_guilds() {
@@ -327,11 +450,137 @@ mod tests {
                 .unwrap(),
             1
         );
+        let conn = store.conn.lock().expect("store mutex");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM helper_growth_activity_day",
+                [],
+                |row| { row.get::<_, i64>(0) }
+            )
+            .expect("activity identities"),
+            0
+        );
     }
 
     #[test]
     fn only_allowlisted_sources_are_retained() {
         assert_eq!(growth_source("helper-hero"), Some("helper-hero"));
         assert_eq!(growth_source("https://attacker.invalid"), None);
+    }
+
+    #[test]
+    fn retention_outcomes_survive_the_required_guild_identity_purge() {
+        let store = Store::open(":memory:").expect("store");
+        let start = 1_800_000_000_000_i64;
+        let day = Duration::days(1).num_milliseconds();
+        for guild_id in ["week", "month"] {
+            store
+                .record_growth_install(guild_id, "home", start)
+                .expect("install");
+            store
+                .record_growth_activity(guild_id, start)
+                .expect("activate");
+        }
+        store
+            .record_growth_activity("week", start + 8 * day)
+            .expect("week return");
+        store
+            .record_growth_activity("month", start + 31 * day)
+            .expect("month return");
+
+        let before = store
+            .growth_overview("2027-01-01", "2027-03-31", start + 40 * day)
+            .expect("overview before purge");
+        assert_eq!(before.retained_w7, Some(1.0));
+        assert_eq!(before.retained_w30, Some(0.5));
+
+        store.purge_guild("week").expect("purge week");
+        store.purge_guild("month").expect("purge month");
+        let after = store
+            .growth_overview("2027-01-01", "2027-03-31", start + 40 * day)
+            .expect("overview after purge");
+        assert_eq!(after.retained_w7, Some(1.0));
+        assert_eq!(after.retained_w30, Some(0.5));
+        assert_eq!(
+            store
+                .conn
+                .lock()
+                .expect("store mutex")
+                .query_row(
+                    "SELECT COUNT(*) FROM helper_growth_retention_record",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("retention identities"),
+            0
+        );
+    }
+
+    #[test]
+    fn migration_backfills_existing_retention_outcomes_once() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "vozen-helper-growth-{}-{nonce}.sqlite",
+            std::process::id()
+        ));
+        let start = 1_800_000_000_000_i64;
+        let day = Duration::days(1).num_milliseconds();
+        let store = Store::open(&path).expect("initial store");
+        store
+            .conn
+            .lock()
+            .expect("store mutex")
+            .execute_batch(&format!(
+                "INSERT INTO helper_growth_lifecycle
+                   (guild_id,first_joined_at,last_joined_at,install_source,
+                    first_value_at,last_activity_at)
+                 VALUES
+                   ('week',{start},{start},'home',{start},{}),
+                   ('month',{start},{start},'home',{start},{});
+                 INSERT INTO helper_growth_daily_metric(day,source,event,value)
+                 VALUES('{}','home','first_value',2);",
+                start + 8 * day,
+                start + 31 * day,
+                utc_day(start),
+            ))
+            .expect("historical lifecycle");
+        drop(store);
+
+        for _ in 0..2 {
+            let reopened = Store::open(&path).expect("reopen migrated store");
+            let overview = reopened
+                .growth_overview("2027-01-01", "2027-03-31", start + 40 * day)
+                .expect("overview");
+            assert_eq!(
+                (
+                    overview.eligible_w7,
+                    overview.retained_w7_count,
+                    overview.eligible_w30,
+                    overview.retained_w30_count,
+                ),
+                (2, 2, 2, 1)
+            );
+            assert_eq!(
+                reopened
+                    .conn
+                    .lock()
+                    .expect("store mutex")
+                    .query_row(
+                        "SELECT COUNT(*) FROM helper_growth_retention_record",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .expect("retention records"),
+                3
+            );
+            drop(reopened);
+        }
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
     }
 }

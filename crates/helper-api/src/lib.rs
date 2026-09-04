@@ -729,7 +729,7 @@ async fn admin_growth(
         .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     let topgg = topgg_admin_payload(topgg, overview.active_guilds);
     let mut daily = BTreeMap::<(String, String), serde_json::Value>::new();
-    for point in overview.daily {
+    for point in &overview.daily {
         let row = daily
             .entry((point.day.clone(), point.source.clone()))
             .or_insert_with(|| {
@@ -741,6 +741,7 @@ async fn admin_growth(
                     "setupCompleted": 0,
                     "firstValue": 0,
                     "active": 0,
+                    "votes": 0,
                 })
             });
         let field = match point.event.as_str() {
@@ -754,6 +755,14 @@ async fn admin_growth(
         row[field] = serde_json::Value::from(point.value);
     }
     let daily = daily.into_values().collect::<Vec<_>>();
+    Ok(Json(helper_growth_admin_payload(&overview, daily, topgg)))
+}
+
+fn helper_growth_admin_payload(
+    overview: &helper_store::GrowthOverview,
+    daily: Vec<serde_json::Value>,
+    topgg: Option<serde_json::Value>,
+) -> serde_json::Value {
     let setup_completed = daily
         .iter()
         .filter_map(|point| {
@@ -774,21 +783,30 @@ async fn admin_growth(
             value as f64 / joins as f64
         }
     };
-    Ok(Json(serde_json::json!({
+    serde_json::json!({
         "product": "helper",
         "currentGuilds": overview.active_guilds,
+        "baselineGuilds": 0,
+        "measurementStartedOn": overview.measurement_started_on,
+        "configuredGuilds": overview.configured_guilds,
+        "usedGuilds": overview.used_guilds,
         "joins": joins,
         "leaves": overview.leaves,
         "net": overview.net,
         "setupCompleted": setup_completed,
         "firstValue": first_value,
+        "votes": 0,
         "setupRate": rate(setup_completed),
         "activationRate": rate(first_value),
+        "retainedW7": overview.retained_w7_count,
+        "eligibleW7": overview.eligible_w7,
+        "retainedW30": overview.retained_w30_count,
+        "eligibleW30": overview.eligible_w30,
         "retainedW7Rate": overview.retained_w7,
         "retainedW30Rate": overview.retained_w30,
         "daily": daily,
         "topgg": topgg,
-    })))
+    })
 }
 
 fn topgg_admin_payload(
@@ -11423,6 +11441,57 @@ mod tests {
     };
     use helper_store::Store;
     use tower::ServiceExt;
+
+    #[test]
+    fn helper_growth_payload_matches_the_shared_aggregate_contract() {
+        let overview = helper_store::GrowthOverview {
+            active_guilds: 4,
+            configured_guilds: 3,
+            used_guilds: 2,
+            joins: 2,
+            leaves: 1,
+            net: 1,
+            setup_rate: 0.75,
+            activation_rate: 0.5,
+            retained_w7_count: 1,
+            eligible_w7: 2,
+            retained_w30_count: 0,
+            eligible_w30: 1,
+            retained_w7: Some(0.5),
+            retained_w30: Some(0.0),
+            measurement_started_on: Some("2026-08-28".into()),
+            daily: Vec::new(),
+        };
+        let daily = vec![serde_json::json!({
+            "day": "2026-09-04",
+            "source": "helper-hero",
+            "joins": 2,
+            "leaves": 1,
+            "setupCompleted": 1,
+            "firstValue": 1,
+            "active": 2,
+            "votes": 0,
+        })];
+        let payload = helper_growth_admin_payload(&overview, daily, None);
+
+        assert_eq!(payload["product"], "helper");
+        assert_eq!(payload["currentGuilds"], 4);
+        assert_eq!(payload["baselineGuilds"], 0);
+        assert_eq!(payload["measurementStartedOn"], "2026-08-28");
+        assert_eq!(payload["configuredGuilds"], 3);
+        assert_eq!(payload["usedGuilds"], 2);
+        assert_eq!(payload["retainedW7"], 1);
+        assert_eq!(payload["eligibleW7"], 2);
+        assert_eq!(payload["retainedW30"], 0);
+        assert_eq!(payload["eligibleW30"], 1);
+        assert_eq!(payload["retainedW7Rate"], 0.5);
+        assert_eq!(payload["retainedW30Rate"], 0.0);
+        assert_eq!(payload["votes"], 0);
+        assert_eq!(payload["daily"][0]["votes"], 0);
+        let encoded = serde_json::to_string(&payload).expect("json");
+        assert!(!encoded.contains("guildId"));
+        assert!(!encoded.contains("userId"));
+    }
 
     #[test]
     fn topgg_owner_payload_alerts_on_staleness_or_more_than_five_percent_drift() {
