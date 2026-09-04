@@ -24,7 +24,8 @@ jobs:
         with:
           node-version: '22'
       - run: npm ci
-      - run: npm audit --audit-level=high
+      - name: Audit npm dependencies
+        run: node tools/npm-audit-ci.mjs
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
@@ -34,7 +35,7 @@ jobs:
         run: npm ci --ignore-scripts --no-audit
       - name: Audit dashboard panel
         working-directory: panel
-        run: npm audit --audit-level=high
+        run: node ../tools/npm-audit-ci.mjs
       - name: Build dashboard panel
         working-directory: panel
         run: npm run build
