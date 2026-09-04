@@ -8838,6 +8838,18 @@ async fn apply_discord_nickname(
     Ok(previous_nickname)
 }
 
+fn record_setup_for_enabled_feature(
+    store: &Store,
+    guild_id: &str,
+    enabled: bool,
+    now_ms: i64,
+) -> Result<()> {
+    if enabled {
+        store.record_growth_setup_completed(guild_id, now_ms)?;
+    }
+    Ok(())
+}
+
 async fn update_feature_detail(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -9117,6 +9129,13 @@ async fn update_feature_detail(
     } else {
         serde_json::json!(null)
     };
+    record_setup_for_enabled_feature(
+        &state.store,
+        &claims.guild_id,
+        record.enabled,
+        Utc::now().timestamp_millis(),
+    )
+    .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     Ok(Json(
         serde_json::json!({ "guildId": claims.guild_id, "key": key, "enabled": record.enabled, "config": update.config, "revision": record.revision, "maturity": effective_feature_maturity(&state, &key), "issues": issues, "discordApply": discord_apply }),
     ))
@@ -9886,10 +9905,13 @@ async fn update_feature_config(
                 client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
             }
         })?;
-    state
-        .store
-        .record_growth_setup_completed(&claims.guild_id, Utc::now().timestamp_millis())
-        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    record_setup_for_enabled_feature(
+        &state.store,
+        &claims.guild_id,
+        record.enabled,
+        Utc::now().timestamp_millis(),
+    )
+    .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
     Ok(Json(serde_json::json!({
         "ok": true,
         "guildId": claims.guild_id,
@@ -11449,6 +11471,25 @@ mod tests {
     };
     use helper_store::Store;
     use tower::ServiceExt;
+
+    #[test]
+    fn setup_growth_only_marks_an_enabled_valid_feature() {
+        let store = Store::open(":memory:").expect("open test store");
+        let now = 1_800_000_000_000_i64;
+        store.record_growth_join("guild", now).unwrap();
+
+        record_setup_for_enabled_feature(&store, "guild", false, now + 1).unwrap();
+        let before = store
+            .growth_overview("2027-01-01", "2027-12-31", now + 1)
+            .unwrap();
+        assert_eq!(before.configured_guilds, 0);
+
+        record_setup_for_enabled_feature(&store, "guild", true, now + 2).unwrap();
+        let after = store
+            .growth_overview("2027-01-01", "2027-12-31", now + 2)
+            .unwrap();
+        assert_eq!(after.configured_guilds, 1);
+    }
 
     #[test]
     fn helper_growth_payload_matches_the_shared_aggregate_contract() {

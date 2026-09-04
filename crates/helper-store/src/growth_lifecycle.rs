@@ -10,6 +10,10 @@ use chrono::{DateTime, Duration, Utc};
 use rusqlite::{OptionalExtension, params};
 
 const RETENTION_DAYS: i64 = 30;
+const FIRST_VALUE_EVENT: &str = "first_value_v2";
+const ACTIVE_EVENT: &str = "active_v2";
+const RETAINED_W7_EVENT: &str = "retained_w7_v2";
+const RETAINED_W30_EVENT: &str = "retained_w30_v2";
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -110,7 +114,7 @@ impl Store {
     }
 
     pub fn record_growth_first_value(&self, guild_id: &str, now_ms: i64) -> Result<()> {
-        self.record_growth_once(guild_id, now_ms, "first_value", "first_value_at")
+        self.record_growth_value(guild_id, now_ms, false)
     }
 
     fn record_growth_once(
@@ -148,6 +152,10 @@ impl Store {
     }
 
     pub fn record_growth_activity(&self, guild_id: &str, now_ms: i64) -> Result<()> {
+        self.record_growth_value(guild_id, now_ms, true)
+    }
+
+    fn record_growth_value(&self, guild_id: &str, now_ms: i64, active: bool) -> Result<()> {
         if guild_id.trim().is_empty() {
             return Ok(());
         }
@@ -155,31 +163,49 @@ impl Store {
         let mut conn = self.conn.lock().expect("store mutex poisoned");
         let tx = conn.transaction()?;
         tx.execute(
-            "INSERT INTO helper_growth_lifecycle(guild_id,first_joined_at,last_joined_at,install_source,last_activity_at,departed_at) \
-             VALUES(?1,?2,?2,'unknown',?2,NULL) \
-             ON CONFLICT(guild_id) DO UPDATE SET last_activity_at=excluded.last_activity_at",
+            "INSERT INTO helper_growth_lifecycle(guild_id,first_joined_at,last_joined_at,install_source,departed_at) \
+             VALUES(?1,?2,?2,'unknown',NULL) ON CONFLICT(guild_id) DO NOTHING",
             params![guild_id, now_ms],
         )?;
-        let source: String = tx.query_row(
-            "SELECT install_source FROM helper_growth_lifecycle WHERE guild_id=?1",
+        let (source, setup_completed_at, first_value_at): (String, Option<i64>, Option<i64>) =
+            tx.query_row(
+            "SELECT install_source,setup_completed_at,first_value_at FROM helper_growth_lifecycle WHERE guild_id=?1",
             [guild_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-        if tx.execute(
-            "UPDATE helper_growth_lifecycle SET first_value_at=?2
-             WHERE guild_id=?1 AND first_value_at IS NULL",
-            params![guild_id, now_ms],
-        )? == 1
-        {
-            increment(&tx, &day, &source, "first_value")?;
+        let Some(setup_completed_at) = setup_completed_at else {
+            tx.commit()?;
+            return Ok(());
+        };
+        if first_value_at.is_none_or(|first| first < setup_completed_at) {
+            tx.execute(
+                "UPDATE helper_growth_lifecycle SET first_value_at=?2 WHERE guild_id=?1",
+                params![guild_id, now_ms],
+            )?;
+            // A pre-v2 command could have created an invalid retention clock.
+            // Starting from the first post-setup value resets only that derived
+            // identity; aggregate v1 rows remain untouched for auditability.
+            tx.execute(
+                "DELETE FROM helper_growth_retention_record WHERE guild_id=?1",
+                [guild_id],
+            )?;
+            increment(&tx, &day, &source, FIRST_VALUE_EVENT)?;
         }
-        if tx.execute(
-            "INSERT INTO helper_growth_activity_day(guild_id,day) VALUES(?1,?2) ON CONFLICT(guild_id,day) DO NOTHING",
+        if active {
+            tx.execute(
+                "UPDATE helper_growth_lifecycle SET last_activity_at=?2 WHERE guild_id=?1",
+                params![guild_id, now_ms],
+            )?;
+        }
+        if active && tx.execute(
+            "INSERT INTO helper_growth_activity_day_v2(guild_id,day) VALUES(?1,?2) ON CONFLICT(guild_id,day) DO NOTHING",
             params![guild_id, day],
         )? == 1 {
-            increment(&tx, &day, &source, "active")?;
+            increment(&tx, &day, &source, ACTIVE_EVENT)?;
         }
-        record_due_retention(&tx, guild_id, now_ms, &source)?;
+        if active {
+            record_due_retention(&tx, guild_id, now_ms, &source)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -199,7 +225,9 @@ impl Store {
         let joins = sum_event(&conn, from_day, to_day, "join")?;
         let leaves = sum_event(&conn, from_day, to_day, "leave")?;
         let activated: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM helper_growth_lifecycle WHERE first_value_at IS NOT NULL AND departed_at IS NULL",
+            "SELECT COUNT(*) FROM helper_growth_lifecycle
+             WHERE first_value_at IS NOT NULL AND setup_completed_at IS NOT NULL
+               AND first_value_at>=setup_completed_at AND departed_at IS NULL",
             [],
             |row| row.get(0),
         )?;
@@ -211,7 +239,14 @@ impl Store {
         let denominator = active_guilds.max(1) as f64;
         let daily = {
             let mut statement = conn.prepare(
-                "SELECT day,source,event,value FROM helper_growth_daily_metric WHERE day>=?1 AND day<=?2 ORDER BY day,source,event",
+                "SELECT day,source,
+                        CASE event WHEN 'first_value_v2' THEN 'first_value'
+                                   WHEN 'active_v2' THEN 'active' ELSE event END,
+                        value
+                 FROM helper_growth_daily_metric
+                 WHERE day>=?1 AND day<=?2
+                   AND event NOT IN ('first_value','active','retained_w7','retained_w30')
+                 ORDER BY day,source,event",
             )?;
             statement
                 .query_map(params![from_day, to_day], |row| {
@@ -225,9 +260,9 @@ impl Store {
                 .collect::<std::result::Result<Vec<_>, _>>()?
         };
         let eligible_w7 = eligible_count(&conn, now_ms, 7)?;
-        let retained_w7_count = lifetime_sum_event(&conn, "retained_w7")?;
+        let retained_w7_count = lifetime_sum_event(&conn, RETAINED_W7_EVENT)?;
         let eligible_w30 = eligible_count(&conn, now_ms, 30)?;
-        let retained_w30_count = lifetime_sum_event(&conn, "retained_w30")?;
+        let retained_w30_count = lifetime_sum_event(&conn, RETAINED_W30_EVENT)?;
         let measurement_started_on = conn.query_row(
             "SELECT MIN(day) FROM helper_growth_daily_metric",
             [],
@@ -259,6 +294,7 @@ impl Store {
         let tx = conn.transaction()?;
         for table in [
             "helper_growth_activity_day",
+            "helper_growth_activity_day_v2",
             "helper_growth_retention_record",
         ] {
             tx.execute(
@@ -313,8 +349,8 @@ fn eligible_count(conn: &rusqlite::Connection, now_ms: i64, days: i64) -> Result
     let cutoff_day = utc_day(now_ms.saturating_sub(Duration::days(days).num_milliseconds()));
     Ok(conn.query_row(
         "SELECT COALESCE(SUM(value),0) FROM helper_growth_daily_metric
-         WHERE event='first_value' AND day<=?1",
-        [cutoff_day],
+         WHERE event=?2 AND day<=?1",
+        params![cutoff_day, FIRST_VALUE_EVENT],
         |row| row.get(0),
     )?)
 }
@@ -330,7 +366,10 @@ fn record_due_retention(
     source: &str,
 ) -> Result<()> {
     let first_value_at: Option<i64> = tx.query_row(
-        "SELECT first_value_at FROM helper_growth_lifecycle WHERE guild_id=?1",
+        "SELECT CASE
+                  WHEN setup_completed_at IS NOT NULL AND first_value_at>=setup_completed_at
+                  THEN first_value_at ELSE NULL END
+         FROM helper_growth_lifecycle WHERE guild_id=?1",
         [guild_id],
         |row| row.get(0),
     )?;
@@ -338,7 +377,7 @@ fn record_due_retention(
         return Ok(());
     };
     let day = utc_day(now_ms);
-    for (window_days, event) in [(7_i64, "retained_w7"), (30_i64, "retained_w30")] {
+    for (window_days, event) in [(7_i64, RETAINED_W7_EVENT), (30_i64, RETAINED_W30_EVENT)] {
         let threshold =
             first_value_at.saturating_add(Duration::days(window_days).num_milliseconds());
         if now_ms < threshold {
@@ -357,40 +396,78 @@ fn record_due_retention(
 }
 
 pub(super) fn backfill_growth_retention(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    let already_migrated = tx
+        .query_row(
+            "SELECT value FROM helper_meta WHERE key='growth_taxonomy_v2'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .is_some_and(|value| value == "complete");
+    if already_migrated {
+        return Ok(());
+    }
     let candidates = {
         let mut statement = tx.prepare(
             "SELECT guild_id,first_value_at,last_activity_at,install_source
              FROM helper_growth_lifecycle
-             WHERE first_value_at IS NOT NULL AND last_activity_at IS NOT NULL",
+             WHERE setup_completed_at IS NOT NULL
+               AND first_value_at IS NOT NULL
+               AND first_value_at>=setup_completed_at",
         )?;
         statement
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(2)?,
                     row.get::<_, String>(3)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?
     };
     for (guild_id, first_value_at, last_activity_at, source) in candidates {
-        for (window_days, event) in [(7_i64, "retained_w7"), (30_i64, "retained_w30")] {
+        increment(tx, &utc_day(first_value_at), &source, FIRST_VALUE_EVENT)?;
+        let activity_days = {
+            let mut statement = tx.prepare(
+                "SELECT day FROM helper_growth_activity_day
+                 WHERE guild_id=?1 AND day>=?2 ORDER BY day",
+            )?;
+            statement
+                .query_map(params![guild_id, utc_day(first_value_at)], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for day in activity_days {
+            tx.execute(
+                "INSERT OR IGNORE INTO helper_growth_activity_day_v2(guild_id,day) VALUES(?1,?2)",
+                params![guild_id, day],
+            )?;
+            increment(tx, &day, &source, ACTIVE_EVENT)?;
+        }
+        let Some(last_activity_at) = last_activity_at else {
+            continue;
+        };
+        for (window_days, event) in [(7_i64, RETAINED_W7_EVENT), (30_i64, RETAINED_W30_EVENT)] {
             let threshold =
                 first_value_at.saturating_add(Duration::days(window_days).num_milliseconds());
             if last_activity_at < threshold {
                 continue;
             }
-            if tx.execute(
+            tx.execute(
                 "INSERT OR IGNORE INTO helper_growth_retention_record(guild_id,window_days)
                  VALUES(?1,?2)",
                 params![guild_id, window_days],
-            )? == 1
-            {
-                increment(tx, &utc_day(last_activity_at), &source, event)?;
-            }
+            )?;
+            increment(tx, &utc_day(last_activity_at), &source, event)?;
         }
     }
+    tx.execute(
+        "INSERT INTO helper_meta(key,value) VALUES('growth_taxonomy_v2','complete')
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [],
+    )?;
     Ok(())
 }
 
@@ -451,21 +528,95 @@ mod tests {
             1
         );
         let conn = store.conn.lock().expect("store mutex");
-        assert_eq!(
-            conn.query_row(
-                "SELECT COUNT(*) FROM helper_growth_activity_day",
-                [],
-                |row| { row.get::<_, i64>(0) }
-            )
-            .expect("activity identities"),
-            0
-        );
+        for table in [
+            "helper_growth_activity_day",
+            "helper_growth_activity_day_v2",
+        ] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("activity identities"),
+                0,
+                "{table} must be purged with the lifecycle identity"
+            );
+        }
     }
 
     #[test]
     fn only_allowlisted_sources_are_retained() {
         assert_eq!(growth_source("helper-hero"), Some("helper-hero"));
         assert_eq!(growth_source("https://attacker.invalid"), None);
+    }
+
+    #[test]
+    fn activation_requires_setup_and_replaces_a_legacy_pre_setup_value() {
+        let store = Store::open(":memory:").expect("store");
+        let start = 1_800_000_000_000_i64;
+        store.record_growth_join("guild", start).unwrap();
+
+        // Simulate a value written by the old broad command taxonomy.
+        {
+            let conn = store.conn.lock().expect("store mutex");
+            conn.execute(
+                "UPDATE helper_growth_lifecycle SET first_value_at=?2,last_activity_at=?2 WHERE guild_id=?1",
+                params!["guild", start + 1],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO helper_growth_daily_metric(day,source,event,value) VALUES(?1,'unknown','first_value',1)",
+                [utc_day(start + 1)],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO helper_growth_daily_metric(day,source,event,value) VALUES(?1,'unknown','active',1)",
+                [utc_day(start + 1)],
+            )
+            .unwrap();
+        }
+        store.record_growth_activity("guild", start + 2).unwrap();
+        let before = store
+            .growth_overview("2027-01-01", "2027-12-31", start + 2)
+            .unwrap();
+        assert_eq!(before.configured_guilds, 0);
+        assert_eq!(before.used_guilds, 0);
+        assert_eq!(
+            before
+                .daily
+                .iter()
+                .filter(|row| row.event == "first_value" || row.event == "active")
+                .map(|row| row.value)
+                .sum::<i64>(),
+            0
+        );
+
+        store
+            .record_growth_setup_completed("guild", start + 3)
+            .unwrap();
+        store.record_growth_activity("guild", start + 4).unwrap();
+        let after = store
+            .growth_overview("2027-01-01", "2027-12-31", start + 4)
+            .unwrap();
+        assert_eq!(after.configured_guilds, 1);
+        assert_eq!(after.used_guilds, 1);
+        assert_eq!(
+            after
+                .daily
+                .iter()
+                .filter(|row| row.event == "first_value")
+                .map(|row| row.value)
+                .sum::<i64>(),
+            1
+        );
+        assert_eq!(
+            after
+                .daily
+                .iter()
+                .filter(|row| row.event == "active")
+                .map(|row| row.value)
+                .sum::<i64>(),
+            1
+        );
     }
 
     #[test]
@@ -477,6 +628,9 @@ mod tests {
             store
                 .record_growth_install(guild_id, "home", start)
                 .expect("install");
+            store
+                .record_growth_setup_completed(guild_id, start)
+                .expect("setup");
             store
                 .record_growth_activity(guild_id, start)
                 .expect("activate");
@@ -536,12 +690,13 @@ mod tests {
             .execute_batch(&format!(
                 "INSERT INTO helper_growth_lifecycle
                    (guild_id,first_joined_at,last_joined_at,install_source,
-                    first_value_at,last_activity_at)
+                    setup_completed_at,first_value_at,last_activity_at)
                  VALUES
-                   ('week',{start},{start},'home',{start},{}),
-                   ('month',{start},{start},'home',{start},{});
+                   ('week',{start},{start},'home',{start},{start},{}),
+                   ('month',{start},{start},'home',{start},{start},{});
                  INSERT INTO helper_growth_daily_metric(day,source,event,value)
-                 VALUES('{}','home','first_value',2);",
+                 VALUES('{}','home','first_value',2);
+                 DELETE FROM helper_meta WHERE key='growth_taxonomy_v2';",
                 start + 8 * day,
                 start + 31 * day,
                 utc_day(start),

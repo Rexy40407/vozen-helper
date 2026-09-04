@@ -2062,14 +2062,18 @@ impl EventHandler for Handler {
                         .await;
                 } else if let Some(guild_id) = command.guild_id {
                     let now = Utc::now().timestamp_millis();
-                    if command.data.name == "setup" {
+                    if command.data.name == "setup"
+                        && helper_setup_is_complete(&self.store, &guild_id.to_string())
+                    {
                         let _ = self
                             .store
                             .record_growth_setup_completed(&guild_id.to_string(), now);
                     }
-                    let _ = self
-                        .store
-                        .record_growth_activity(&guild_id.to_string(), now);
+                    if helper_command_counts_as_value(&command.data.name) {
+                        let _ = self
+                            .store
+                            .record_growth_activity(&guild_id.to_string(), now);
+                    }
                 }
             }
             Interaction::Component(component) => {
@@ -3939,8 +3943,8 @@ impl EventHandler for Handler {
     }
 }
 
-pub async fn run(config: &Config) -> Result<()> {
-    let intents = GatewayIntents::GUILDS
+fn helper_gateway_intents() -> GatewayIntents {
+    GatewayIntents::GUILDS
         | GatewayIntents::GUILD_MEMBERS
         | GatewayIntents::GUILD_MODERATION
         | GatewayIntents::GUILD_MESSAGES
@@ -3950,7 +3954,39 @@ pub async fn run(config: &Config) -> Result<()> {
         | GatewayIntents::GUILD_WEBHOOKS
         | GatewayIntents::AUTO_MODERATION_CONFIGURATION
         | GatewayIntents::AUTO_MODERATION_EXECUTION
-        | GatewayIntents::MESSAGE_CONTENT;
+        | GatewayIntents::MESSAGE_CONTENT
+}
+
+/// Growth activation measures a successful product action, not opening docs,
+/// checking health, or completing onboarding.  Keeping this decision next to
+/// the gateway handler prevents informational commands from inflating
+/// `first_value` and daily-active guilds.
+fn helper_command_counts_as_value(command: &str) -> bool {
+    !matches!(
+        command,
+        "ping"
+            | "language"
+            | "help"
+            | "setup"
+            | "modules"
+            | "status"
+            | "dashboard"
+            | "plan"
+            | "privacy"
+            | "permissions"
+    )
+}
+
+fn helper_setup_is_complete(store: &Store, guild_id: &str) -> bool {
+    store
+        .get_setting(guild_id, "core.setup.completed")
+        .ok()
+        .flatten()
+        .is_some_and(|value| value == "true")
+}
+
+pub async fn run(config: &Config) -> Result<()> {
+    let intents = helper_gateway_intents();
     let store = Store::open(&config.database_url)?;
     let (topgg_trigger, topgg_guilds) = if let Some(token) = config.topgg_token.clone() {
         let (trigger, guilds) = spawn_topgg_metrics(
@@ -11941,7 +11977,7 @@ fn starboard_allowed_mentions(author_id: serenity::all::UserId) -> CreateAllowed
 }
 
 fn permission_passport_message() -> String {
-    "**Permission Passport**\nBase: `View Channels`, `Send Messages`, `Embed Links`, `Read Message History`, `Use Application Commands`.\nOptional security: `Manage Messages`, `Moderate Members`, `Kick Members`, `Ban Members`, `Manage Roles`.\nOptional support/events: `Manage Channels`, `Manage Threads`, `Create Private Threads`.\nGateway: `MESSAGE_CONTENT` and `GUILD_MEMBERS` are enabled only for modules that need them.\nEvery extra permission has a module and an explicit consequence; use the dashboard to compare granted permissions with the required ones.".to_string()
+    "**Permission Passport**\nBase: `View Channels`, `Send Messages`, `Embed Links`, `Read Message History`, `Use Application Commands`.\nOptional security: `Manage Messages`, `Moderate Members`, `Kick Members`, `Ban Members`, `Manage Roles`.\nOptional support/events: `Manage Channels`, `Manage Threads`, `Create Private Threads`.\nGateway: `MESSAGE_CONTENT` and `GUILD_MEMBERS` must be enabled for the app at gateway startup; their data is processed only by configured modules that need it.\nEvery extra permission has a module and an explicit consequence; use the dashboard to compare granted permissions with the required ones.".to_string()
 }
 
 fn parse_scheduled_event_window(
@@ -12412,19 +12448,89 @@ mod tests {
         anti_spam_warning_reason, anti_spam_warning_targets, command_feature_key,
         custom_command_channel_ignored, custom_command_is_staff, english_bot_text,
         evaluate_join_gate_verification, evaluate_nickname, feature_enabled, feature_title,
-        helper_locale, helper_locale_for_guild, instagram_access_allowed,
+        helper_command_counts_as_value, helper_gateway_intents, helper_locale,
+        helper_locale_for_guild, helper_setup_is_complete, instagram_access_allowed,
         is_destructive_audit_action, join_burst_armed, parse_custom_command, parse_duration,
-        parse_reminder_delay, parse_scheduled_event_window, reminder_repeat_interval_ms,
-        render_custom_command, rss_retry_seconds, scheduled_action_feature, shadow_mode_enabled,
-        should_cleanup_temp_channel, should_clear_anti_spam_timeout, template_message,
-        ticket_member_is_staff, ticket_opening_message,
+        parse_reminder_delay, parse_scheduled_event_window, permission_passport_message,
+        reminder_repeat_interval_ms, render_custom_command, rss_retry_seconds,
+        scheduled_action_feature, shadow_mode_enabled, should_cleanup_temp_channel,
+        should_clear_anti_spam_timeout, template_message, ticket_member_is_staff,
+        ticket_opening_message,
     };
     use chrono::TimeZone;
     use helper_store::Store;
+    use serenity::all::GatewayIntents;
     use std::{
         collections::{HashMap, VecDeque},
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn gateway_intents_are_bounded_and_the_passport_explains_app_level_access() {
+        let intents = helper_gateway_intents();
+
+        assert!(intents.contains(GatewayIntents::GUILDS));
+        assert!(intents.contains(GatewayIntents::GUILD_MEMBERS));
+        assert!(intents.contains(GatewayIntents::MESSAGE_CONTENT));
+        assert!(!intents.contains(GatewayIntents::GUILD_PRESENCES));
+        assert!(!intents.contains(GatewayIntents::DIRECT_MESSAGES));
+        assert!(!intents.contains(GatewayIntents::DIRECT_MESSAGE_REACTIONS));
+
+        let passport = permission_passport_message();
+        assert!(passport.contains("enabled for the app at gateway startup"));
+        assert!(passport.contains("processed only by configured modules"));
+        assert!(!passport.contains("enabled only for modules"));
+    }
+
+    #[test]
+    fn growth_first_value_excludes_onboarding_and_diagnostics() {
+        for command in [
+            "ping",
+            "language",
+            "help",
+            "setup",
+            "modules",
+            "status",
+            "dashboard",
+            "plan",
+            "privacy",
+            "permissions",
+        ] {
+            assert!(
+                !helper_command_counts_as_value(command),
+                "{command} must not count as first value"
+            );
+        }
+
+        for command in [
+            "warn",
+            "ticket-panel",
+            "rolepanel",
+            "event-create",
+            "workflow-dry-run",
+            "serverstats",
+        ] {
+            assert!(
+                helper_command_counts_as_value(command),
+                "{command} should count as first value after success"
+            );
+        }
+    }
+
+    #[test]
+    fn growth_setup_requires_at_least_one_saved_module() {
+        let store = Store::open(":memory:").expect("open test store");
+
+        assert!(!helper_setup_is_complete(&store, "guild"));
+        store
+            .set_setting("guild", "core.setup.completed", "false")
+            .unwrap();
+        assert!(!helper_setup_is_complete(&store, "guild"));
+        store
+            .set_setting("guild", "core.setup.completed", "true")
+            .unwrap();
+        assert!(helper_setup_is_complete(&store, "guild"));
+    }
 
     #[test]
     fn helper_language_defaults_to_english_and_only_accepts_site_locales() {
