@@ -485,6 +485,7 @@ pub fn growth_source(value: &str) -> Option<&'static str> {
         "helper-pricing" => Some("helper-pricing"),
         "commands" => Some("commands"),
         "topgg" => Some("topgg"),
+        "discordbotlist" => Some("discordbotlist"),
         _ => None,
     }
 }
@@ -546,6 +547,7 @@ mod tests {
     #[test]
     fn only_allowlisted_sources_are_retained() {
         assert_eq!(growth_source("helper-hero"), Some("helper-hero"));
+        assert_eq!(growth_source("discordbotlist"), Some("discordbotlist"));
         assert_eq!(growth_source("https://attacker.invalid"), None);
     }
 
