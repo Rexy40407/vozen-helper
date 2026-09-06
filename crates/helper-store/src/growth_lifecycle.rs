@@ -62,26 +62,49 @@ impl Store {
         let day = utc_day(now_ms);
         let mut conn = self.conn.lock().expect("store mutex poisoned");
         let tx = conn.transaction()?;
-        let previous_departure: Option<Option<i64>> = tx
+        let previous: Option<(Option<i64>, String, i64)> = tx
             .query_row(
-                "SELECT departed_at FROM helper_growth_lifecycle WHERE guild_id=?1",
+                "SELECT departed_at,install_source,last_joined_at FROM helper_growth_lifecycle WHERE guild_id=?1",
                 [guild_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        let is_new_or_rejoined =
-            previous_departure.is_none() || previous_departure.flatten().is_some();
+        let is_new_or_rejoined = previous.as_ref().is_none_or(|row| row.0.is_some());
+        let persisted_source = previous
+            .as_ref()
+            .map(|row| row.1.as_str())
+            .unwrap_or("unknown");
+        let effective_source = if persisted_source == "unknown" {
+            source
+        } else {
+            persisted_source
+        };
+        let mut attribute_recent_join = false;
+        if let Some((None, old_source, joined_at)) = &previous
+            && old_source == "unknown"
+            && source != "unknown"
+            && (0..=10 * 60 * 1_000).contains(&now_ms.saturating_sub(*joined_at))
+        {
+            attribute_recent_join = tx.execute(
+                "UPDATE helper_growth_daily_metric SET value=value-1
+                     WHERE day=?1 AND source='unknown' AND event='join' AND value>0",
+                [utc_day(*joined_at)],
+            )? != 0;
+            if attribute_recent_join {
+                increment(&tx, &utc_day(*joined_at), source, "join")?;
+            }
+        }
         tx.execute(
             "INSERT INTO helper_growth_lifecycle(guild_id,first_joined_at,last_joined_at,install_source,departed_at) \
              VALUES(?1,?2,?2,?3,NULL) \
              ON CONFLICT(guild_id) DO UPDATE SET \
-               last_joined_at=excluded.last_joined_at, \
-               install_source=CASE WHEN helper_growth_lifecycle.install_source='unknown' THEN excluded.install_source ELSE helper_growth_lifecycle.install_source END, \
+               last_joined_at=CASE WHEN ?4 THEN excluded.last_joined_at ELSE helper_growth_lifecycle.last_joined_at END, \
+               install_source=CASE WHEN ?4 OR ?5 THEN excluded.install_source ELSE helper_growth_lifecycle.install_source END, \
                departed_at=NULL",
-            params![guild_id, now_ms, source],
+            params![guild_id, now_ms, effective_source, is_new_or_rejoined, attribute_recent_join],
         )?;
         if is_new_or_rejoined {
-            increment(&tx, &day, source, "join")?;
+            increment(&tx, &day, effective_source, "join")?;
         }
         tx.commit()?;
         Ok(())
@@ -492,6 +515,67 @@ pub fn growth_source(value: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn oauth_and_gateway_count_one_attributed_join_in_either_order() {
+        for oauth_first in [false, true] {
+            let store = Store::open(":memory:").unwrap();
+            let start = Duration::days(1).num_milliseconds() - 1;
+            if oauth_first {
+                store
+                    .record_growth_install("guild", "helper-hero", start)
+                    .unwrap();
+            }
+            store.record_growth_join("guild", start).unwrap();
+            store
+                .record_growth_install("guild", "helper-hero", start + 2)
+                .unwrap();
+            store
+                .record_growth_install("guild", "topgg", start + 3)
+                .unwrap();
+            store
+                .record_growth_join("guild", start + 86_400_000)
+                .unwrap();
+            let overview = store
+                .growth_overview("1970-01-01", "1970-01-03", start + 86_400_000)
+                .unwrap();
+            assert_eq!(overview.joins, 1);
+            let joined = overview
+                .daily
+                .iter()
+                .find(|row| row.event == "join" && row.value == 1)
+                .unwrap();
+            assert_eq!(
+                (&*joined.day, &*joined.source),
+                ("1970-01-01", "helper-hero")
+            );
+            let conn = store.conn.lock().unwrap();
+            let last: i64 = conn
+                .query_row(
+                    "SELECT last_joined_at FROM helper_growth_lifecycle WHERE guild_id='guild'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(last, start);
+        }
+    }
+
+    #[test]
+    fn rejoin_keeps_the_original_source_in_daily_metrics() {
+        let store = Store::open(":memory:").unwrap();
+        store
+            .record_growth_install("guild", "helper-hero", 0)
+            .unwrap();
+        store.record_growth_departure("guild", 1).unwrap();
+        store.record_growth_join("guild", 86_400_000).unwrap();
+        let overview = store
+            .growth_overview("1970-01-01", "1970-01-03", 86_400_001)
+            .unwrap();
+        assert_eq!(overview.joins, 2);
+        assert!(overview.daily.iter().all(|row| row.source == "helper-hero"));
+    }
+
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
