@@ -186,6 +186,12 @@ pub fn is_known_feature(key: &str) -> bool {
     FEATURE_KEYS.contains(&key)
 }
 
+fn valid_discord_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value.parse::<u64>().is_ok_and(|id| id != 0)
+}
+
 /// Parse the JSON feature representation into the bounded anti-spam policy
 /// shared by the API and gateway.
 pub fn anti_spam_policy_from_json(value: &serde_json::Value) -> AntiSpamPolicy {
@@ -507,15 +513,24 @@ fn normalize_host(value: &str) -> String {
     let trimmed = value
         .trim()
         .trim_matches(|character: char| "<>[](){}\"'`,;!?".contains(character));
+    let trimmed = ["https://", "http://"]
+        .iter()
+        .find_map(|scheme| trimmed.find(scheme).map(|start| &trimmed[start..]))
+        .unwrap_or(trimmed);
     let without_scheme = trimmed
         .strip_prefix("https://")
         .or_else(|| trimmed.strip_prefix("http://"))
         .unwrap_or(trimmed);
-    let without_www = without_scheme
-        .strip_prefix("www.")
-        .unwrap_or(without_scheme);
+    let authority = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    let without_www = authority.strip_prefix("www.").unwrap_or(authority);
     let host = without_www
-        .split(['/', '?', '#', ':'])
+        .split(':')
         .next()
         .unwrap_or_default()
         .trim_end_matches('.')
@@ -1644,7 +1659,7 @@ impl FeatureAdapter for AlertSubscriptionAdapter {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .trim();
-        if channel.is_empty() || channel.parse::<u64>().is_err() {
+        if channel.is_empty() || !valid_discord_id(channel) {
             issues.push(ValidationIssue {
                 path: "targetChannelId".into(),
                 code: "invalid_discord_id".into(),
@@ -1836,7 +1851,7 @@ pub fn evaluate_poll(
     let channel_id = object
         .and_then(|values| values.get("channel"))
         .and_then(serde_json::Value::as_str)
-        .filter(|value| value.parse::<u64>().is_ok())
+        .filter(|value| valid_discord_id(value))
         .unwrap_or(command_channel_id)
         .to_owned();
     let default_hours = object
@@ -1978,7 +1993,7 @@ pub fn evaluate_event(
         .map(str::to_owned);
     if announcement_channel_id
         .as_deref()
-        .is_some_and(|value| value.parse::<u64>().is_err())
+        .is_some_and(|value| !valid_discord_id(value))
     {
         let mut decision = empty();
         decision.reason_code = "invalid_announcement_channel";
@@ -2077,7 +2092,7 @@ pub fn evaluate_giveaway(
         .map(str::to_owned);
     if required_role
         .as_deref()
-        .is_some_and(|value| value.parse::<u64>().is_err())
+        .is_some_and(|value| !valid_discord_id(value))
     {
         return GiveawayDecision {
             allowed: false,
@@ -2143,7 +2158,7 @@ pub fn evaluate_suggestion(
     let channel_id = object
         .and_then(|values| values.get("channel"))
         .and_then(serde_json::Value::as_str)
-        .filter(|value| value.parse::<u64>().is_ok())
+        .filter(|value| valid_discord_id(value))
         .unwrap_or(command_channel_id)
         .to_owned();
     let staff_channel_id = object
@@ -2154,7 +2169,7 @@ pub fn evaluate_suggestion(
         .map(str::to_owned);
     if staff_channel_id
         .as_deref()
-        .is_some_and(|value| value.parse::<u64>().is_err())
+        .is_some_and(|value| !valid_discord_id(value))
     {
         return SuggestionDecision {
             allowed: false,
@@ -2225,7 +2240,7 @@ pub fn evaluate_birthday(
     let channel_id = object
         .and_then(|values| values.get("channel"))
         .and_then(serde_json::Value::as_str)
-        .filter(|value| value.parse::<u64>().is_ok())
+        .filter(|value| valid_discord_id(value))
         .unwrap_or_default()
         .to_owned();
     if channel_id.is_empty() {
@@ -2261,7 +2276,10 @@ pub fn evaluate_birthday(
         .to_owned();
     BirthdayDecision {
         allowed: true,
-        message: message.replace("{user}", &format!("<@{member_id}>")),
+        message: truncate_chars(
+            &message.replace("{user}", &format!("<@{member_id}>")),
+            2_000,
+        ),
         channel_id,
         timezone,
         reason_code: "birthday_ready",
@@ -2516,7 +2534,7 @@ fn project_role_panels(config: &serde_json::Value) -> Vec<(String, String)> {
         let ids = values
             .iter()
             .filter_map(serde_json::Value::as_str)
-            .filter(|value| value.parse::<u64>().is_ok())
+            .filter(|value| valid_discord_id(value))
             .take(5)
             .collect::<Vec<_>>();
         if !ids.is_empty() {
@@ -2545,7 +2563,7 @@ fn validate_interaction_config(config: &serde_json::Value, key: &str) -> Vec<Val
         if object.get(field).is_some_and(|value| {
             value
                 .as_str()
-                .is_some_and(|text| !text.trim().is_empty() && text.parse::<u64>().is_err())
+                .is_some_and(|text| !text.trim().is_empty() && !valid_discord_id(text))
         }) {
             issues.push(ValidationIssue {
                 path: field.into(),
@@ -2637,7 +2655,7 @@ fn validate_interaction_config(config: &serde_json::Value, key: &str) -> Vec<Val
                     && items.len() <= 5
                     && items
                         .iter()
-                        .all(|value| value.as_str().is_some_and(|id| id.parse::<u64>().is_ok()))
+                        .all(|value| value.as_str().is_some_and(valid_discord_id))
             });
             if !valid {
                 issues.push(ValidationIssue {
@@ -2918,7 +2936,7 @@ impl FeatureAdapter for CommunityInteractionAdapter {
                 values
                     .iter()
                     .filter_map(serde_json::Value::as_str)
-                    .filter_map(|value| value.parse::<u64>().ok())
+                    .filter_map(|value| value.parse::<u64>().ok().filter(|id| *id != 0))
                     .take(5)
                     .collect::<Vec<_>>()
             })
@@ -2931,7 +2949,7 @@ impl FeatureAdapter for CommunityInteractionAdapter {
                 values
                     .iter()
                     .filter_map(serde_json::Value::as_str)
-                    .filter_map(|value| value.parse::<u64>().ok())
+                    .filter_map(|value| value.parse::<u64>().ok().filter(|id| *id != 0))
                     .take(5)
                     .collect::<Vec<_>>()
             })
@@ -2940,7 +2958,7 @@ impl FeatureAdapter for CommunityInteractionAdapter {
             .get("clickedRoleId")
             .or_else(|| fixture.get("clicked_role_id"))
             .and_then(serde_json::Value::as_str)
-            .and_then(|value| value.parse::<u64>().ok())
+            .and_then(|value| value.parse::<u64>().ok().filter(|id| *id != 0))
             .or_else(|| panel_role_ids.first().copied())
             .unwrap_or_default();
         let selection_mode = config
@@ -3110,7 +3128,7 @@ impl FeatureAdapter for TempChannelsAdapter {
         if let Some(value) = object.get("categoryId")
             && !value
                 .as_str()
-                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok())
+                .is_some_and(|text| text.is_empty() || valid_discord_id(text))
         {
             issues.push(ValidationIssue {
                 path: "categoryId".into(),
@@ -3435,9 +3453,7 @@ impl FeatureAdapter for CustomCommandsAdapter {
                 channels.len() <= 50
                     && channels.iter().all(|channel| {
                         channel.as_str().is_some_and(|id| {
-                            !id.is_empty()
-                                && id.len() <= 20
-                                && id.chars().all(|c| c.is_ascii_digit())
+                            valid_discord_id(id.trim()) && id.chars().count() <= 20
                         })
                     })
             });
@@ -3648,7 +3664,7 @@ pub fn evaluate_audit(config: &serde_json::Value, destructive_actions: i64) -> A
         .map(str::to_owned);
     if log_channel_id
         .as_deref()
-        .is_some_and(|value| value.parse::<u64>().is_err())
+        .is_some_and(|value| !valid_discord_id(value))
     {
         return AuditDecision {
             should_contain: false,
@@ -3789,7 +3805,7 @@ impl FeatureAdapter for AuditAdapter {
         if object.get("logChannel").is_some_and(|value| {
             !value
                 .as_str()
-                .is_some_and(|raw| raw.is_empty() || raw.parse::<u64>().is_ok())
+                .is_some_and(|raw| raw.is_empty() || valid_discord_id(raw))
         }) {
             issues.push(ValidationIssue {
                 path: "logChannel".into(),
@@ -4013,14 +4029,15 @@ impl FeatureAdapter for BirthdaysAdapter {
             }];
         };
         let mut issues = Vec::new();
-        if object
+        if !object
             .get("channel")
-            .is_some_and(|value| value.as_str().is_none())
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| valid_discord_id(value.trim()))
         {
             issues.push(ValidationIssue {
                 path: "channel".into(),
-                code: "string_required".into(),
-                message: "Choose an announcement channel.".into(),
+                code: "invalid_channel_id".into(),
+                message: "Choose a real Discord announcement channel.".into(),
                 severity: "error".into(),
             });
         }
@@ -4335,7 +4352,7 @@ impl FeatureAdapter for FeedAdapter {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .trim();
-        if target_channel.is_empty() || target_channel.parse::<u64>().is_err() {
+        if target_channel.is_empty() || !valid_discord_id(target_channel) {
             issues.push(ValidationIssue {
                 path: "targetChannelId".into(),
                 code: "invalid_discord_id".into(),
@@ -4523,7 +4540,7 @@ impl FeatureAdapter for BlueskyAdapter {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .trim();
-        if target.is_empty() || target.parse::<u64>().is_err() {
+        if target.is_empty() || !valid_discord_id(target) {
             issues.push(ValidationIssue {
                 path: "targetChannelId".into(),
                 code: "invalid_discord_id".into(),
@@ -4648,12 +4665,24 @@ impl FeatureAdapter for ExternalProviderAdapter {
         if let Some(value) = object.get("targetChannelId")
             && !value
                 .as_str()
-                .is_some_and(|text| text.trim().is_empty() || text.trim().parse::<u64>().is_ok())
+                .is_some_and(|text| text.trim().is_empty() || valid_discord_id(text.trim()))
         {
             issues.push(ValidationIssue {
                 path: "targetChannelId".into(),
                 code: "invalid_discord_id".into(),
                 message: "Choose a real Discord channel.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(value) = object.get("targetRoleId")
+            && !value
+                .as_str()
+                .is_some_and(|text| text.trim().is_empty() || valid_discord_id(text.trim()))
+        {
+            issues.push(ValidationIssue {
+                path: "targetRoleId".into(),
+                code: "invalid_discord_id".into(),
+                message: "Choose a real Discord role.".into(),
                 severity: "error".into(),
             });
         }
@@ -4760,7 +4789,7 @@ impl FeatureAdapter for ExternalProviderAdapter {
             if let Some(value) = object.get("targetRoleId")
                 && let Some(role) = value.as_str()
                 && !role.trim().is_empty()
-                && role.parse::<u64>().is_err()
+                && !valid_discord_id(role.trim())
             {
                 issues.push(ValidationIssue {
                     path: "targetRoleId".into(),
@@ -4995,7 +5024,7 @@ impl FeatureAdapter for CryptoAdapter {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .trim();
-            if target.is_empty() || target.parse::<u64>().is_err() {
+            if target.is_empty() || !valid_discord_id(target) {
                 issues.push(ValidationIssue {
                     path: "targetChannelId".into(),
                     code: "invalid_discord_id".into(),
@@ -5164,7 +5193,7 @@ fn validate_channel_and_schedule(
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .trim();
-    if target.is_empty() || target.parse::<u64>().is_err() {
+    if target.is_empty() || !valid_discord_id(target) {
         issues.push(ValidationIssue {
             path: "targetChannelId".into(),
             code: "invalid_discord_id".into(),
@@ -5278,7 +5307,7 @@ impl FeatureAdapter for TicketsAdapter {
             if let Some(value) = object.get(field)
                 && !(value
                     .as_str()
-                    .is_some_and(|raw| raw.is_empty() || raw.parse::<u64>().is_ok()))
+                    .is_some_and(|raw| raw.is_empty() || valid_discord_id(raw)))
             {
                 issues.push(ValidationIssue {
                     path: field.into(),
@@ -5364,7 +5393,7 @@ impl FeatureAdapter for TicketsAdapter {
         {
             pairs.push((
                 "support.ticket.sla_ms".into(),
-                (value * 3_600_000).to_string(),
+                value.clamp(1, 168).saturating_mul(3_600_000).to_string(),
             ));
         }
         if let Some(value) = object.get("maxOpen").and_then(serde_json::Value::as_i64) {
@@ -5460,7 +5489,7 @@ impl FeatureAdapter for WelcomeAdapter {
             if object.get(field).is_some_and(|value| {
                 !value
                     .as_str()
-                    .is_some_and(|raw| raw.is_empty() || raw.parse::<u64>().is_ok())
+                    .is_some_and(|raw| raw.is_empty() || valid_discord_id(raw))
             }) {
                 issues.push(ValidationIssue {
                     path: field.into(),
@@ -5924,7 +5953,7 @@ pub fn evaluate_reminder(
             ),
         );
     }
-    if observation.text.len() > policy.max_text_length {
+    if observation.text.chars().count() > policy.max_text_length {
         return reject(
             "text_exceeds_limit",
             format!(
@@ -6753,7 +6782,7 @@ pub fn evaluate_stats(
             explanation: "Choose a real Discord channel before enabling live statistics.".into(),
         };
     };
-    if channel_id.parse::<u64>().is_err() {
+    if !valid_discord_id(&channel_id) {
         return StatsDecision {
             allowed: false,
             channel_id: Some(channel_id),
@@ -6879,7 +6908,7 @@ impl FeatureAdapter for StatsAdapter {
             && (!value.is_string()
                 || value
                     .as_str()
-                    .is_some_and(|value| !value.is_empty() && value.parse::<u64>().is_err()))
+                    .is_some_and(|value| !value.is_empty() && !valid_discord_id(value)))
         {
             issues.push(ValidationIssue {
                 path: "channelId".into(),
@@ -7352,10 +7381,9 @@ impl FeatureAdapter for AntiScamAdapter {
         for field in ["ignoredChannels", "ignoredRoles"] {
             if let Some(value) = object.get(field) {
                 let valid_ids = value.as_array().is_some_and(|items| {
-                    items.iter().all(|item| {
-                        item.as_str()
-                            .is_some_and(|id| id.trim().parse::<u64>().is_ok())
-                    })
+                    items
+                        .iter()
+                        .all(|item| item.as_str().is_some_and(|id| valid_discord_id(id.trim())))
                 });
                 if !valid_ids {
                     issues.push(ValidationIssue {
@@ -7382,7 +7410,7 @@ impl FeatureAdapter for AntiScamAdapter {
         if let Some(value) = object.get("logChannel")
             && !value
                 .as_str()
-                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok())
+                .is_some_and(|text| text.is_empty() || valid_discord_id(text))
         {
             issues.push(ValidationIssue {
                 path: "logChannel".into(),
@@ -7528,7 +7556,7 @@ pub fn evaluate_welcome_channel(
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .trim();
-    if channel_id.parse::<u64>().is_err() || channel_id == "0" {
+    if !valid_discord_id(channel_id) || channel_id == "0" {
         return WelcomeChannelDecision {
             allowed: false,
             message: String::new(),
@@ -7636,7 +7664,7 @@ impl FeatureAdapter for WelcomeChannelAdapter {
         if !object
             .get("channelId")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|value| value.is_empty() || value.parse::<u64>().is_ok())
+            .is_some_and(|value| value.is_empty() || valid_discord_id(value))
         {
             issues.push(ValidationIssue {
                 path: "channelId".into(),
@@ -7701,7 +7729,7 @@ impl FeatureAdapter for WelcomeChannelAdapter {
             if object.get(field).is_some_and(|value| {
                 !value
                     .as_str()
-                    .is_some_and(|raw| raw.is_empty() || raw.parse::<u64>().is_ok())
+                    .is_some_and(|raw| raw.is_empty() || valid_discord_id(raw))
             }) {
                 issues.push(ValidationIssue {
                     path: field.into(),
@@ -7881,7 +7909,7 @@ impl FeatureAdapter for LevelsAdapter {
         if let Some(value) = object.get("announceChannel")
             && !value
                 .as_str()
-                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok())
+                .is_some_and(|text| text.is_empty() || valid_discord_id(text))
         {
             issues.push(ValidationIssue {
                 path: "announceChannel".into(),
@@ -7935,11 +7963,9 @@ impl FeatureAdapter for LevelsAdapter {
         if let Some(value) = object.get("ignoredChannels") {
             if let Some(values) = value.as_array() {
                 if values.len() > 100
-                    || values.iter().any(|item| {
-                        !item
-                            .as_str()
-                            .is_some_and(|text| text.parse::<u64>().is_ok())
-                    })
+                    || values
+                        .iter()
+                        .any(|item| !item.as_str().is_some_and(valid_discord_id))
                 {
                     issues.push(ValidationIssue {
                         path: "ignoredChannels".into(),
@@ -7969,9 +7995,11 @@ impl FeatureAdapter for LevelsAdapter {
                         let level = parts
                             .next()
                             .and_then(|part| part.trim().parse::<u32>().ok());
-                        let role = parts
-                            .next()
-                            .and_then(|part| part.trim().parse::<u64>().ok());
+                        let role = parts.next().and_then(|part| {
+                            valid_discord_id(part.trim())
+                                .then(|| part.trim().parse::<u64>().ok())
+                                .flatten()
+                        });
                         level.is_none() || role.is_none() || parts.next().is_some()
                     })
                 {
@@ -8193,7 +8221,7 @@ impl FeatureAdapter for StarboardAdapter {
         if let Some(value) = object.get("channel")
             && !value
                 .as_str()
-                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok())
+                .is_some_and(|text| text.is_empty() || valid_discord_id(text))
         {
             issues.push(ValidationIssue {
                 path: "channel".into(),
@@ -8208,7 +8236,7 @@ impl FeatureAdapter for StarboardAdapter {
                     items.len() <= 100
                         && items.iter().all(|item| {
                             item.as_str().is_some_and(|text| {
-                                !text.trim().is_empty() && text.parse::<u64>().is_ok()
+                                !text.trim().is_empty() && valid_discord_id(text)
                             })
                         })
                 });
@@ -8537,7 +8565,7 @@ impl FeatureAdapter for AntiRaidAdapter {
         if let Some(value) = object.get("alertChannel")
             && !value
                 .as_str()
-                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok())
+                .is_some_and(|text| text.is_empty() || valid_discord_id(text))
         {
             issues.push(ValidationIssue {
                 path: "alertChannel".into(),
@@ -8724,7 +8752,7 @@ impl FeatureAdapter for JoinGateAdapter {
         if let Some(value) = object.get("verifiedRole")
             && !value
                 .as_str()
-                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok())
+                .is_some_and(|text| text.is_empty() || valid_discord_id(text))
         {
             issues.push(ValidationIssue {
                 path: "verifiedRole".into(),
@@ -8736,7 +8764,7 @@ impl FeatureAdapter for JoinGateAdapter {
         if object.get("autoRole").is_some_and(|value| {
             !value
                 .as_str()
-                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok())
+                .is_some_and(|text| text.is_empty() || valid_discord_id(text))
         }) {
             issues.push(ValidationIssue {
                 path: "autoRole".into(),
@@ -8748,7 +8776,7 @@ impl FeatureAdapter for JoinGateAdapter {
         if object.get("logChannel").is_some_and(|value| {
             !value
                 .as_str()
-                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok())
+                .is_some_and(|text| text.is_empty() || valid_discord_id(text))
         }) {
             issues.push(ValidationIssue {
                 path: "logChannel".into(),
@@ -9065,7 +9093,7 @@ impl FeatureAdapter for AntiSpamAdapter {
                     items.len() <= 100
                         && items.iter().all(|item| {
                             item.as_str().is_some_and(|text| {
-                                !text.is_empty()
+                                valid_discord_id(text.trim())
                                     && text.chars().count() <= 64
                                     && !text.chars().any(char::is_control)
                             })
@@ -9084,7 +9112,7 @@ impl FeatureAdapter for AntiSpamAdapter {
         if let Some(value) = config.get("logChannel") {
             let valid = value
                 .as_str()
-                .is_some_and(|text| text.is_empty() || text.parse::<u64>().is_ok());
+                .is_some_and(|text| text.is_empty() || valid_discord_id(text));
             if !valid {
                 issues.push(ValidationIssue {
                     path: "logChannel".into(),
@@ -9289,10 +9317,9 @@ impl FeatureAdapter for AchievementsAdapter {
         }
         for field in ["firstRewardRole", "regularRewardRole", "pillarRewardRole"] {
             if let Some(value) = object.get(field) {
-                let valid = value.as_str().is_some_and(|role| {
-                    role.is_empty()
-                        || (role.len() <= 22 && role.chars().all(|c| c.is_ascii_digit()))
-                });
+                let valid = value
+                    .as_str()
+                    .is_some_and(|role| role.is_empty() || valid_discord_id(role.trim()));
                 if !valid {
                     issues.push(ValidationIssue {
                         path: field.into(),
@@ -10996,6 +11023,131 @@ pub fn parse_ip(value: &str) -> Result<IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_adapter_handles_null_unicode_and_numeric_boundary_inputs() {
+        let probes = [
+            serde_json::Value::Null,
+            serde_json::json!(false),
+            serde_json::json!(0),
+            serde_json::json!(i64::MIN),
+            serde_json::json!(u64::MAX),
+            serde_json::json!("🦀é\u{0000}"),
+            serde_json::json!([null, "🦀é\u{0000}", 0]),
+            serde_json::json!({}),
+        ];
+        for key in FEATURE_KEYS {
+            let adapter = feature_adapter(key).unwrap();
+            let descriptor = adapter.descriptor();
+            for probe in &probes {
+                adapter.validate(probe);
+                adapter.runtime_projection(probe);
+                adapter.simulate(probe, probe);
+                for field in descriptor.defaults.as_object().unwrap().keys() {
+                    let mut config = descriptor.defaults.clone();
+                    config[field] = probe.clone();
+                    adapter.validate(&config);
+                    let projection = adapter.runtime_projection(&config);
+                    let unique: HashSet<_> = projection.iter().map(|(key, _)| key).collect();
+                    assert_eq!(
+                        unique.len(),
+                        projection.len(),
+                        "{key}.{field}: duplicate projection"
+                    );
+                    adapter.simulate(&config, probe);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn catalogue_discord_id_fields_reject_zero() {
+        for key in FEATURE_KEYS {
+            let adapter = feature_adapter(key).unwrap();
+            let descriptor = adapter.descriptor();
+            for section in descriptor.schema["sections"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                for field in section["fields"].as_array().into_iter().flatten() {
+                    let Some(name) = field["key"].as_str() else {
+                        continue;
+                    };
+                    let value = match field["kind"].as_str() {
+                        Some("channel" | "role") => serde_json::json!("0"),
+                        Some("channels" | "roles") => serde_json::json!(["0"]),
+                        _ => continue,
+                    };
+                    let mut config = descriptor.defaults.clone();
+                    config[name] = value;
+                    assert!(
+                        adapter
+                            .validate(&config)
+                            .iter()
+                            .any(|issue| issue.path == name),
+                        "{key}.{name} accepts zero"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reminders_count_unicode_characters_and_birthdays_bound_expanded_messages() {
+        let policy = ReminderPolicy {
+            max_text_length: 50,
+            ..ReminderPolicy::default()
+        };
+        let mut observation = ReminderObservation {
+            delay_ms: 1000,
+            text: "🦀".repeat(50),
+            repeat: None,
+            timezone: "UTC".into(),
+        };
+        assert!(evaluate_reminder(&policy, &observation).allowed);
+        observation.text.push('é');
+        assert_eq!(
+            evaluate_reminder(&policy, &observation).reason_code,
+            "text_exceeds_limit"
+        );
+        let birthday = evaluate_birthday(
+            &serde_json::json!({"channel":"123", "message":"{user}".repeat(166)}),
+            "123456789012345678",
+            9,
+            7,
+        );
+        assert!(birthday.allowed);
+        assert!(birthday.message.chars().count() <= 2000);
+        assert!(!evaluate_birthday(&serde_json::json!({"channel":"0"}), "123", 9, 7).allowed);
+        assert!(!evaluate_stats(&serde_json::json!({}), Some("0"), 0, 0, 0).allowed);
+    }
+
+    #[test]
+    fn scam_policy_matches_markdown_links_and_userinfo_hosts() {
+        let policy = scam_policy_from_json(
+            &serde_json::json!({"blockedDomains":["bad.example"],"blockInvites":true}),
+        );
+        for content in [
+            "[gift](https://bad.example/claim)",
+            "https://trusted.example@bad.example/",
+            "[join](https://discord.gg/raid)",
+        ] {
+            assert!(
+                !evaluate_scam(&policy, "123", content).matched.is_empty(),
+                "{content}"
+            );
+        }
+        for content in [
+            "https://bad.example.safe.example/",
+            "https://bad.example@safe.example/",
+        ] {
+            assert!(
+                evaluate_scam(&policy, "123", content).matched.is_empty(),
+                "{content}"
+            );
+        }
+    }
     use helper_contracts::Plan;
 
     #[test]

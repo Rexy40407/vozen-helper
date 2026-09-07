@@ -20,12 +20,23 @@ use sha2::{Digest, Sha256};
 use sha3::Keccak256;
 use std::{
     collections::HashMap,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{sync::Mutex as AsyncMutex, task::JoinHandle};
 use url::Url;
+
+/// Shared API/gateway gate. Sandbox permits only creator OAuth; the legacy
+/// process-wide token remains production-approval-only.
+pub fn tiktok_runtime_allowed(
+    approved: bool,
+    sandbox: bool,
+    oauth_ready: bool,
+    fallback_ready: bool,
+) -> bool {
+    (approved && fallback_ready) || ((approved || sandbox) && oauth_ready)
+}
 
 /// Reads a boolean provider gate using the same tolerant representation in
 /// every runtime boundary. Secrets and other values are never returned.
@@ -90,9 +101,7 @@ pub struct YouTubeSearchResult {
 /// validated, resolved away from private/link-local addresses and fetched
 /// without following redirects so this cannot become an SSRF proxy.
 #[derive(Clone)]
-pub struct RssClient {
-    http: Client,
-}
+pub struct RssClient;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RssItem {
@@ -339,7 +348,7 @@ impl EthereumRpcClient {
         if !response.status().is_success() {
             anyhow::bail!("rpc_http_error:{}", response.status());
         }
-        let payload: serde_json::Value = response.json().await?;
+        let payload: serde_json::Value = bounded_provider_json(response).await?;
         if let Some(error) = payload.get("error") {
             anyhow::bail!(
                 "rpc_error:{}",
@@ -819,7 +828,7 @@ impl TikTokOAuthClient {
         if !response.status().is_success() {
             anyhow::bail!("tiktok_oauth_error:{}", response.status());
         }
-        let grant: TikTokTokenGrant = response.json().await?;
+        let grant: TikTokTokenGrant = bounded_provider_json(response).await?;
         if grant.access_token.is_empty()
             || grant.refresh_token.is_empty()
             || grant.open_id.is_empty()
@@ -914,8 +923,8 @@ impl TikTokClient {
         if !response.status().is_success() {
             anyhow::bail!("tiktok_api_error:{}", response.status());
         }
-        let payload: TikTokVideoResponse = response.json().await?;
-        if !payload.error.code.is_empty() {
+        let payload: TikTokVideoResponse = bounded_provider_json(response).await?;
+        if !payload.error.code.is_empty() && payload.error.code != "ok" {
             anyhow::bail!(
                 "tiktok_api_error:{}:{}",
                 payload.error.code,
@@ -927,6 +936,7 @@ impl TikTokClient {
             .videos
             .into_iter()
             .filter(|video| !video.id.trim().is_empty())
+            .take(20)
             .map(|video| TikTokVideo {
                 id: video.id,
                 title: video.title,
@@ -1005,7 +1015,7 @@ impl InstagramClient {
         if !response.status().is_success() {
             anyhow::bail!("instagram_api_error:{}", response.status());
         }
-        let payload: InstagramMediaResponse = response.json().await?;
+        let payload: InstagramMediaResponse = bounded_provider_json(response).await?;
         if let Some(error) = payload.error {
             anyhow::bail!(
                 "instagram_api_error:{}:{}",
@@ -1089,7 +1099,7 @@ impl KickClient {
         if !response.status().is_success() {
             anyhow::bail!("kick_api_error:{}", response.status());
         }
-        let payload: serde_json::Value = response.json().await?;
+        let payload: serde_json::Value = bounded_provider_json(response).await?;
         if let Some(error) = payload.get("message").and_then(serde_json::Value::as_str)
             && payload.get("data").is_none()
         {
@@ -1209,7 +1219,7 @@ impl StripeConnectClient {
         let Some(timestamp) = timestamp else {
             return false;
         };
-        if (now - timestamp).abs() > 300 || signatures.is_empty() {
+        if now.abs_diff(timestamp) > 300 || signatures.is_empty() {
             return false;
         }
         let mut mac = Hmac::<Sha256>::new_from_slice(self.webhook_secret.as_bytes())
@@ -1286,7 +1296,7 @@ impl BlueskyClient {
         if !response.status().is_success() {
             anyhow::bail!("bluesky_api_error:{}", response.status());
         }
-        let payload: BlueskyAuthorFeedResponse = response.json().await?;
+        let payload: BlueskyAuthorFeedResponse = bounded_provider_json(response).await?;
         Ok(payload.feed.into_iter().next().map(|item| {
             let post = item.post;
             let rkey = post.uri.rsplit('/').next().unwrap_or_default();
@@ -1401,7 +1411,7 @@ impl CoinGeckoClient {
             request = request.header("x-cg-demo-api-key", api_key.as_ref());
         }
         let response = request.send().await?.error_for_status()?;
-        let payload: HashMap<String, CoinGeckoPrice> = response.json().await?;
+        let payload: HashMap<String, CoinGeckoPrice> = bounded_provider_json(response).await?;
         Ok(normalized_ids
             .into_iter()
             .filter_map(|id| {
@@ -1500,7 +1510,7 @@ impl GasClient {
             }))
         };
         let gas_response = request("eth_gasPrice").send().await?.error_for_status()?;
-        let gas_payload: serde_json::Value = gas_response.json().await?;
+        let gas_payload: serde_json::Value = bounded_provider_json(gas_response).await?;
         let gas_hex = gas_payload
             .get("result")
             .and_then(serde_json::Value::as_str)
@@ -1508,8 +1518,7 @@ impl GasClient {
         let gas_wei = u128::from_str_radix(gas_hex.trim_start_matches("0x"), 16)
             .map_err(|_| anyhow::anyhow!("rpc_invalid_gas_price"))?;
         let block_number = match request("eth_blockNumber").send().await {
-            Ok(response) => response
-                .json::<serde_json::Value>()
+            Ok(response) => bounded_provider_json::<serde_json::Value>(response)
                 .await
                 .ok()
                 .and_then(|value| {
@@ -1753,7 +1762,7 @@ impl TwitchClient {
         if !status.is_success() {
             anyhow::bail!("twitch_api_error:{status}");
         }
-        let payload: TwitchUsersResponse = response.json().await?;
+        let payload: TwitchUsersResponse = bounded_provider_json(response).await?;
         Ok(payload.data.into_iter().next().map(|value| TwitchUser {
             id: value.id,
             login: value.login,
@@ -1786,7 +1795,7 @@ impl TwitchClient {
         if !status.is_success() {
             anyhow::bail!("twitch_api_error:{status}");
         }
-        let payload: TwitchSearchChannelsResponse = response.json().await?;
+        let payload: TwitchSearchChannelsResponse = bounded_provider_json(response).await?;
         Ok(payload
             .data
             .into_iter()
@@ -1871,7 +1880,7 @@ impl TwitchClient {
         if !response.status().is_success() {
             anyhow::bail!("twitch_api_error:{}", response.status());
         }
-        let payload: TwitchEventSubResponse = response.json().await?;
+        let payload: TwitchEventSubResponse = bounded_provider_json(response).await?;
         Ok(payload.data.iter().any(|item| {
             item.status == "enabled"
                 && item
@@ -1901,7 +1910,7 @@ impl TwitchClient {
         if !response.status().is_success() {
             anyhow::bail!("twitch_auth_error:{}", response.status());
         }
-        let value: TwitchTokenResponse = response.json().await?;
+        let value: TwitchTokenResponse = bounded_provider_json(response).await?;
         let token = TwitchToken {
             access_token: value.access_token.clone(),
             expires_at: Instant::now() + Duration::from_secs(value.expires_in),
@@ -1913,19 +1922,13 @@ impl TwitchClient {
 
 impl RssClient {
     pub fn new() -> Self {
-        Self {
-            http: Client::builder()
-                .timeout(Duration::from_secs(10))
-                .redirect(reqwest::redirect::Policy::none())
-                .user_agent("Vozen-Helper/1.0 (+https://vozen.org)")
-                .build()
-                .expect("valid RSS HTTP client"),
-        }
+        Self
     }
 
     pub async fn fetch(&self, raw_url: &str) -> anyhow::Result<Option<RssFeed>> {
-        let url = validate_feed_url(raw_url).await?;
-        let response = self.http.get(url.clone()).send().await?;
+        let (url, addresses) = validate_feed_url(raw_url).await?;
+        let http = feed_http_client(&url, &addresses)?;
+        let response = http.get(url.clone()).send().await?;
         let status = response.status();
         if !status.is_success() {
             anyhow::bail!("rss_http_error:{status}");
@@ -1960,7 +1963,43 @@ impl Default for RssClient {
 
 const MAX_FEED_BYTES: usize = 1_048_576;
 
-async fn validate_feed_url(raw_url: &str) -> anyhow::Result<Url> {
+const MAX_PROVIDER_JSON_BYTES: usize = 1_048_576;
+
+async fn bounded_provider_json<T: serde::de::DeserializeOwned>(
+    mut response: reqwest::Response,
+) -> anyhow::Result<T> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_PROVIDER_JSON_BYTES as u64)
+    {
+        anyhow::bail!("provider_response_too_large");
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_PROVIDER_JSON_BYTES {
+            anyhow::bail!("provider_response_too_large");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+// Pin the validated DNS answers for this request, including HTTPS SNI/Host.
+// Proxies must not resolve the hostname independently and bypass this check.
+fn feed_http_client(url: &Url, addresses: &[SocketAddr]) -> anyhow::Result<Client> {
+    Ok(Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .resolve_to_addrs(url.host_str().unwrap_or_default(), addresses)
+        .user_agent("Vozen-Helper/1.0 (+https://vozen.org)")
+        .build()?)
+}
+
+async fn validate_feed_url(raw_url: &str) -> anyhow::Result<(Url, Vec<SocketAddr>)> {
+    if raw_url.chars().count() > 2_000 {
+        anyhow::bail!("invalid_rss_url");
+    }
     let url = Url::parse(raw_url.trim()).map_err(|_| anyhow::anyhow!("invalid_rss_url"))?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
@@ -1980,10 +2019,18 @@ async fn validate_feed_url(raw_url: &str) -> anyhow::Result<Url> {
     let port = url
         .port_or_known_default()
         .ok_or_else(|| anyhow::anyhow!("invalid_rss_url"))?;
-    let addresses = tokio::net::lookup_host((host.as_str(), port))
+    let addresses = match url.host() {
+        Some(url::Host::Ipv4(ip)) => vec![SocketAddr::new(ip.into(), port)],
+        Some(url::Host::Ipv6(ip)) => vec![SocketAddr::new(ip.into(), port)],
+        _ => tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::net::lookup_host((host.as_str(), port)),
+        )
         .await
         .map_err(|_| anyhow::anyhow!("rss_host_unresolvable"))?
-        .collect::<Vec<_>>();
+        .map_err(|_| anyhow::anyhow!("rss_host_unresolvable"))?
+        .collect::<Vec<_>>(),
+    };
     if addresses.is_empty()
         || addresses
             .iter()
@@ -1991,25 +2038,35 @@ async fn validate_feed_url(raw_url: &str) -> anyhow::Result<Url> {
     {
         anyhow::bail!("rss_private_host");
     }
-    Ok(url)
+    Ok((url, addresses))
 }
 
 fn private_or_local(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(value) => {
+            let [a, b, _, _] = value.octets();
             value.is_private()
                 || value.is_loopback()
                 || value.is_link_local()
                 || value.is_unspecified()
                 || value.is_broadcast()
-                || value.octets()[0] == 0
+                || value.is_documentation()
+                || a == 0
+                || a >= 224
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 198 && (18..=19).contains(&b))
         }
         IpAddr::V6(value) => {
+            if let Some(ip) = value.to_ipv4_mapped() {
+                return private_or_local(IpAddr::V4(ip));
+            }
             value.is_loopback()
                 || value.is_unique_local()
                 || value.is_unicast_link_local()
                 || value.is_unspecified()
                 || value.is_multicast()
+                || value.segments()[0] & 0xe000 != 0x2000
+                || (value.segments()[0] == 0x2001 && value.segments()[1] == 0x0db8)
         }
     }
 }
@@ -2360,7 +2417,7 @@ impl YouTubeClient {
         if !status.is_success() {
             anyhow::bail!("youtube_api_error:{status}");
         }
-        let payload: YouTubeSearchResponse = response.json().await?;
+        let payload: YouTubeSearchResponse = bounded_provider_json(response).await?;
         Ok(payload
             .items
             .into_iter()
@@ -2401,7 +2458,7 @@ impl YouTubeClient {
             // and should never be reflected through the panel API.
             anyhow::bail!("youtube_api_error:{status}");
         }
-        let payload = response.json::<YouTubeChannelsResponse>().await?;
+        let payload = bounded_provider_json::<YouTubeChannelsResponse>(response).await?;
         Ok(payload.items.into_iter().next().map(|item| YouTubeChannel {
             id: item.id,
             title: item.snippet.title,
@@ -2431,8 +2488,7 @@ impl YouTubeClient {
         if !status.is_success() {
             anyhow::bail!("youtube_api_error:{status}");
         }
-        let uploads = response
-            .json::<YouTubeChannelDetailsResponse>()
+        let uploads = bounded_provider_json::<YouTubeChannelDetailsResponse>(response)
             .await?
             .items
             .into_iter()
@@ -2456,7 +2512,7 @@ impl YouTubeClient {
         if !status.is_success() {
             anyhow::bail!("youtube_api_error:{status}");
         }
-        let payload = response.json::<YouTubePlaylistItemsResponse>().await?;
+        let payload = bounded_provider_json::<YouTubePlaylistItemsResponse>(response).await?;
         Ok(payload.items.into_iter().find_map(|item| {
             let id = item.content_details.video_id?;
             Some(YouTubeVideo {
@@ -2481,6 +2537,158 @@ fn valid_channel_id(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A local HTTP boundary exercises the real client without provider secrets.
+    fn serve_once(response: String) -> (SocketAddr, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            loop {
+                let count = stream.read(&mut buffer).unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            // Oversize-response tests deliberately close the connection early.
+            let _ = stream.write_all(response.as_bytes());
+            String::from_utf8(request).unwrap()
+        });
+        (address, task)
+    }
+
+    fn json_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn tiktok_client_accepts_official_success_and_rejects_api_errors() {
+        for (code, expected) in [("ok", true), ("access_token_invalid", false)] {
+            let videos = (0..25)
+                .map(|id| serde_json::json!({"id":id.to_string(), "title":"Olá 🦀"}))
+                .collect::<Vec<_>>();
+            let body =
+                serde_json::json!({"data":{"videos":videos},"error":{"code":code}}).to_string();
+            let (address, server) = serve_once(json_response(&body));
+            let mut client =
+                TikTokClient::new("test-token", format!("http://localhost:{}", address.port()))
+                    .unwrap();
+            client.http = Client::builder().no_proxy().build().unwrap();
+            let result = client.latest_videos().await;
+            if expected {
+                let videos = result.unwrap();
+                assert_eq!(videos.len(), 20);
+                assert_eq!(videos[0].title, "Olá 🦀");
+            } else {
+                assert!(result.unwrap_err().to_string().contains(code));
+            }
+            let request = server.join().unwrap();
+            assert!(request.starts_with("POST /v2/video/list/?fields="));
+            assert!(request.contains("\"max_count\":20"));
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_json_limit_rejects_declared_and_chunked_oversize_responses() {
+        let chunk = "x".repeat(MAX_PROVIDER_JSON_BYTES + 1);
+        for response in [
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                chunk.len()
+            ),
+            format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{chunk}\r\n0\r\n\r\n",
+                chunk.len()
+            ),
+        ] {
+            let (address, server) = serve_once(response);
+            let response = Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(format!("http://{address}"))
+                .send()
+                .await
+                .unwrap();
+            let error = bounded_provider_json::<serde_json::Value>(response)
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), "provider_response_too_large");
+            server.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn rss_client_pins_dns_and_does_not_follow_redirects() {
+        let (address, server) = serve_once("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into());
+        let url = Url::parse(&format!("http://feed.invalid:{}/rss", address.port())).unwrap();
+        // .invalid cannot resolve: success proves the client uses only these answers.
+        let response = feed_http_client(&url, &[address])
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        assert!(server.join().unwrap().contains("host: feed.invalid:"));
+    }
+
+    #[tokio::test]
+    async fn rss_rejects_private_literals_before_connecting() {
+        for url in [
+            "http://127.0.0.1/rss",
+            "http://[::1]/rss",
+            "http://[::ffff:127.0.0.1]/rss",
+            "http://100.64.0.1/rss",
+            "http://224.0.0.1/rss",
+            "file:///etc/passwd",
+            "http://user:pass@example.com",
+        ] {
+            assert!(validate_feed_url(url).await.is_err(), "{url}");
+        }
+        for address in [
+            "::ffff:10.0.0.1",
+            "::ffff:169.254.169.254",
+            "198.18.0.1",
+            "240.0.0.1",
+            "64:ff9b::7f00:1",
+        ] {
+            assert!(private_or_local(address.parse().unwrap()), "{address}");
+        }
+        for address in ["8.8.8.8", "2606:4700:4700::1111"] {
+            assert!(!private_or_local(address.parse().unwrap()), "{address}");
+        }
+    }
+
+    #[test]
+    fn stripe_signature_extreme_timestamps_are_rejected_without_overflow() {
+        let client =
+            StripeConnectClient::new("sk_test_123456789012345", "whsec_123456789012345").unwrap();
+        for timestamp in [i64::MIN, i64::MAX] {
+            assert!(!client.verify_webhook(b"{}", &format!("t={timestamp},v1=invalid"), 1000));
+        }
+    }
 
     #[test]
     fn provider_flag_parser_is_case_insensitive_and_trimmed() {
@@ -2994,7 +3202,7 @@ impl EntitlementClient {
         if !response.status().is_success() {
             anyhow::bail!("central entitlement service returned {}", response.status());
         }
-        let central: CentralResponse = response.json().await?;
+        let central: CentralResponse = bounded_provider_json(response).await?;
         let plan = match central.plan.as_str() {
             "plus" => Plan::Plus,
             "premium" => Plan::Premium {

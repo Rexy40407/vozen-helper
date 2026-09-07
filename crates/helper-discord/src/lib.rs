@@ -24,6 +24,7 @@ use helper_modules::{
     KickStream, RssClient, TikTokClient, TikTokOAuthClient, TikTokVideo, TokenCipher,
     TwitchChannelSearchResult, TwitchClient, YouTubeClient, YouTubeSearchResult, env_flag_is_true,
     first_env_flag_is_true, format_rss_message, format_twitch_message, format_youtube_message,
+    tiktok_runtime_allowed,
 };
 use helper_store::{
     BlueskySubscriptionRecord, InstagramSubscriptionRecord, KickSubscriptionRecord,
@@ -38,9 +39,9 @@ use serenity::{
         CommandInteraction, Context, CreateActionRow, CreateAllowedMentions, CreateAttachment,
         CreateButton, CreateChannel, CreateCommand, CreateCommandOption, CreateEmbed,
         CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage,
-        CreateMessage, EditChannel, EditMessage, EventHandler, GatewayIntents, Guild, Interaction,
-        MessageId, MessageUpdateEvent, PermissionOverwrite, PermissionOverwriteType, Permissions,
-        ReactionType, Ready, RoleId, UnavailableGuild,
+        CreateMessage, EditChannel, EditInteractionResponse, EditMessage, EventHandler,
+        GatewayIntents, Guild, Interaction, MessageId, MessageUpdateEvent, PermissionOverwrite,
+        PermissionOverwriteType, Permissions, ReactionType, Ready, RoleId, UnavailableGuild,
     },
     async_trait,
 };
@@ -2048,16 +2049,27 @@ impl EventHandler for Handler {
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         match interaction {
             Interaction::Command(command) => {
+                // Acknowledge before provider, entitlement, or Discord requests.
+                let ephemeral = command_response_ephemeral(&self.store, &command);
+                if let Err(error) = command
+                    .create_response(
+                        &ctx,
+                        CreateInteractionResponse::Defer(
+                            CreateInteractionResponseMessage::new().ephemeral(ephemeral),
+                        ),
+                    )
+                    .await
+                {
+                    warn!(%error, "command acknowledgement failed");
+                    return;
+                }
                 if let Err(error) = self.handle_command(&ctx, &command).await {
                     tracing::error!(%error, command = %command.data.name, "command failed");
                     let _ = command
-                        .create_response(
+                        .edit_response(
                             &ctx,
-                            CreateInteractionResponse::Message(
-                                CreateInteractionResponseMessage::new()
-                                    .content("Something went wrong while running that command.")
-                                    .ephemeral(true),
-                            ),
+                            EditInteractionResponse::new()
+                                .content("Something went wrong while running that command."),
                         )
                         .await;
                 } else if let Some(guild_id) = command.guild_id {
@@ -2077,16 +2089,17 @@ impl EventHandler for Handler {
                 }
             }
             Interaction::Component(component) => {
+                if let Err(error) = component.defer_ephemeral(&ctx).await {
+                    warn!(%error, "component acknowledgement failed");
+                    return;
+                }
                 if let Err(error) = self.handle_component(&ctx, &component).await {
                     tracing::error!(%error, "component failed");
                     let _ = component
-                        .create_response(
+                        .edit_response(
                             &ctx,
-                            CreateInteractionResponse::Message(
-                                CreateInteractionResponseMessage::new()
-                                    .content("Unable to complete this action.")
-                                    .ephemeral(true),
-                            ),
+                            EditInteractionResponse::new()
+                                .content("Unable to complete this action."),
                         )
                         .await;
                 } else if let Some(guild_id) = component.guild_id {
@@ -3325,17 +3338,29 @@ impl EventHandler for Handler {
             return;
         }
         let policy = scam_policy_for_store(&self.store, &guild_text);
-        let edit_role_ids = new
+        let author = event
+            .author
             .as_ref()
-            .and_then(|message| message.member.as_ref())
-            .map(|member| {
-                member
-                    .roles
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+            .or_else(|| new.as_ref().map(|message| &message.author));
+        if author.is_some_and(|author| author.bot) {
+            return;
+        }
+        let snapshot_roles = edit_member_roles(&event, new.as_ref());
+        let edit_role_ids = if let Some(roles) = snapshot_roles {
+            roles.iter().map(ToString::to_string).collect::<Vec<_>>()
+        } else if !policy.ignored_roles.is_empty() {
+            let Some(user_id) = author.map(|author| author.id) else {
+                return;
+            };
+            // Cache is intentionally disabled. Never enforce an ignored-role
+            // policy against an invented empty member snapshot.
+            let Ok(member) = guild_id.member(&ctx.http, user_id).await else {
+                return;
+            };
+            member.roles.iter().map(ToString::to_string).collect()
+        } else {
+            Vec::new()
+        };
         let decision = evaluate_scam_with_roles(
             &policy,
             &event.channel_id.to_string(),
@@ -4947,9 +4972,14 @@ async fn run_tiktok_worker(
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
         interval.tick().await;
-        if oauth.is_none()
-            && !first_env_flag_is_true(&["TIKTOK_APP_APPROVED", "TIKTOK_DISPLAY_API_APPROVED"])
-        {
+        let approved =
+            first_env_flag_is_true(&["TIKTOK_APP_APPROVED", "TIKTOK_DISPLAY_API_APPROVED"]);
+        if !tiktok_runtime_allowed(
+            approved,
+            env_flag_is_true("TIKTOK_SANDBOX_MODE"),
+            oauth.is_some() && cipher.is_some(),
+            fallback_tiktok.is_some(),
+        ) {
             continue;
         }
         let due = match store.due_tiktok_subscriptions(Utc::now().timestamp_millis(), 25) {
@@ -4977,6 +5007,7 @@ async fn run_tiktok_worker(
                 oauth.as_ref(),
                 cipher.as_ref(),
                 fallback_tiktok.as_ref(),
+                approved,
             )
             .await
             {
@@ -5010,6 +5041,7 @@ async fn tiktok_client_for_guild(
     oauth: Option<&TikTokOAuthClient>,
     cipher: Option<&TokenCipher>,
     fallback: Option<&TikTokClient>,
+    allow_fallback: bool,
 ) -> Result<TikTokClient> {
     if let (Some(oauth), Some(cipher), Some(mut grant)) =
         (oauth, cipher, store.tiktok_grant(guild_id)?)
@@ -5041,6 +5073,7 @@ async fn tiktok_client_for_guild(
             .ok_or_else(|| anyhow::anyhow!("tiktok_access_token_invalid"));
     }
     fallback
+        .filter(|_| allow_fallback)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("tiktok_grant_missing"))
 }
@@ -5856,13 +5889,12 @@ impl Handler {
         let svg =
             rank_card::render_rank_card(&config, &profile.name, Some(&avatar_url), rank, level, xp);
         command
-            .create_response(
+            .edit_response(
                 ctx,
-                CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new()
-                        .content(format!("{} · level {} · {} XP", profile.name, level, xp))
-                        .add_file(CreateAttachment::bytes(svg.into_bytes(), "rank-card.svg")),
-                ),
+                EditInteractionResponse::new()
+                    .content(format!("{} · level {} · {} XP", profile.name, level, xp))
+                    .allowed_mentions(CreateAllowedMentions::new())
+                    .new_attachment(CreateAttachment::bytes(svg.into_bytes(), "rank-card.svg")),
             )
             .await?;
         Ok(())
@@ -6779,7 +6811,7 @@ impl Handler {
                     return respond(ctx, command, &decision.explanation).await;
                 }
                 let max_results = decision.max_results;
-                let http = HttpClient::new();
+                let http = HttpClient::builder().timeout(Duration::from_secs(15)).build()?;
                 match provider.as_str() {
                     "youtube" if youtube => {
                         let Some(client) = self.youtube.as_ref() else {
@@ -7429,8 +7461,11 @@ impl Handler {
                 format!("Giveaway #{id} created.")
             }
             "giveaway-end" | "gend" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
                 let id = option_i64(command, "id").unwrap_or(0);
-                if finish_giveaway(&ctx.http, &self.store, id).await? {
+                if finish_giveaway(&ctx.http, &self.store, &guild_id.to_string(), id).await? {
                     format!("Giveaway #{id} ended.")
                 } else {
                     "Giveaway not found or already ended.".to_string()
@@ -7449,8 +7484,11 @@ impl Handler {
                 }
             }
             "greroll" => {
+                let Some(guild_id) = command.guild_id else {
+                    return respond(ctx, command, "This command can only be used in a server.").await;
+                };
                 let id = option_i64(command, "id").unwrap_or(0);
-                match reroll_giveaway(&ctx.http, &self.store, id).await? {
+                match reroll_giveaway(&ctx.http, &self.store, &guild_id.to_string(), id).await? {
                     Some(winner) => format!("Giveaway #{id} rerolled: <@{winner}>."),
                     None => "Giveaway not found, still active or without participants.".to_string(),
                 }
@@ -8626,37 +8664,7 @@ impl Handler {
             }
             _ => "Comando desconhecido.".to_string(),
         };
-        let public_leaderboard = command.data.name == "leaderboard"
-            && command.guild_id.is_some_and(|guild_id| {
-                setting_bool(
-                    &self.store,
-                    &guild_id.to_string(),
-                    "community.leaderboard.public",
-                    true,
-                )
-            });
-        let public_stats = command.data.name == "serverstats"
-            && command.guild_id.is_some_and(|guild_id| {
-                setting_bool(
-                    &self.store,
-                    &guild_id.to_string(),
-                    "insights.stats.public",
-                    false,
-                )
-            });
-        command
-            .create_response(
-                ctx,
-                CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new()
-                        .content(english_bot_text(&content))
-                        .ephemeral(
-                            command.data.name != "ping" && !(public_leaderboard || public_stats),
-                        ),
-                ),
-            )
-            .await?;
-        Ok(())
+        respond(ctx, command, &content).await
     }
 
     async fn handle_component(
@@ -8710,12 +8718,24 @@ impl Handler {
                 )
                 .await;
             }
-            let vote = if kind == "up" { 1 } else { -1 };
-            self.store
-                .vote_suggestion(id, &component.user.id.to_string(), vote)?;
             let Some(suggestion) = self.store.suggestion(id)? else {
                 return respond_component(ctx, component, "Sugestão não encontrada.").await;
             };
+            if !component_record_matches(
+                component,
+                &suggestion.guild_id,
+                suggestion.message_id.as_deref(),
+            ) {
+                return respond_component(
+                    ctx,
+                    component,
+                    "This suggestion does not belong to this panel.",
+                )
+                .await;
+            }
+            let vote = if kind == "up" { 1 } else { -1 };
+            self.store
+                .vote_suggestion(id, &component.user.id.to_string(), vote)?;
             let (up, down) = self.store.suggestion_votes(id)?;
             let author = if setting_bool(
                 &self.store,
@@ -8762,7 +8782,20 @@ impl Handler {
             let Some(giveaway) = self.store.giveaway(id)? else {
                 return respond_component(ctx, component, "Giveaway não encontrado.").await;
             };
-            if giveaway.ended {
+            if !component_record_matches(
+                component,
+                &giveaway.guild_id,
+                giveaway.message_id.as_deref(),
+            ) || giveaway.channel_id != component.channel_id.to_string()
+            {
+                return respond_component(
+                    ctx,
+                    component,
+                    "This giveaway does not belong to this panel.",
+                )
+                .await;
+            }
+            if giveaway.ended || giveaway.end_at <= Utc::now().timestamp_millis() {
                 return respond_component(ctx, component, "Este giveaway já terminou.").await;
             }
             if let Some(role_id) = giveaway
@@ -8780,15 +8813,15 @@ impl Handler {
                     .await;
                 }
             }
-            if self
+            let response = match self
                 .store
-                .add_giveaway_entry(id, &component.user.id.to_string())?
+                .toggle_giveaway_entry(id, &component.user.id.to_string())?
             {
-                return respond_component(ctx, component, "Entrada registada. Boa sorte!").await;
-            }
-            self.store
-                .remove_giveaway_entry(id, &component.user.id.to_string())?;
-            return respond_component(ctx, component, "Saíste do giveaway.").await;
+                Some(true) => "Entrada registada. Boa sorte!",
+                Some(false) => "Saíste do giveaway.",
+                None => "Este giveaway já terminou.",
+            };
+            return respond_component(ctx, component, response).await;
         }
         if let Some(raw) = component.data.custom_id.strip_prefix("poll:") {
             if !feature_enabled(&self.store, &guild_id.to_string(), "management.polls", None) {
@@ -8811,7 +8844,20 @@ impl Handler {
             let Some(poll) = self.store.poll(id)? else {
                 return respond_component(ctx, component, "Poll não encontrada.").await;
             };
-            if poll.closed || choice >= poll.options.len() {
+            if !component_record_matches(component, &poll.guild_id, poll.message_id.as_deref())
+                || poll.channel_id != component.channel_id.to_string()
+            {
+                return respond_component(
+                    ctx,
+                    component,
+                    "This poll does not belong to this panel.",
+                )
+                .await;
+            }
+            if poll.closed
+                || poll.end_at <= Utc::now().timestamp_millis()
+                || choice >= poll.options.len()
+            {
                 return respond_component(
                     ctx,
                     component,
@@ -8819,8 +8865,17 @@ impl Handler {
                 )
                 .await;
             }
-            self.store
-                .vote_poll(id, &component.user.id.to_string(), choice)?;
+            if !self
+                .store
+                .vote_poll(id, &component.user.id.to_string(), choice)?
+            {
+                return respond_component(
+                    ctx,
+                    component,
+                    "Esta poll já terminou ou a opção é inválida.",
+                )
+                .await;
+            }
             return respond_component(
                 ctx,
                 component,
@@ -9076,6 +9131,15 @@ impl Handler {
             };
             return respond_component(ctx, component, &response).await;
         }
+        // Existing tickets can still be closed while disabled, but stale panels
+        // must not create or reopen tickets, or claim work for a disabled module.
+        if matches!(
+            component.data.custom_id.as_str(),
+            "ticket:claim" | "ticket:reopen"
+        ) && !feature_enabled(&self.store, &guild_id.to_string(), "support.tickets", None)
+        {
+            return respond_component(ctx, component, "Tickets are disabled in this server.").await;
+        }
         match component.data.custom_id.as_str() {
             "ticket:open" => {
                 if !feature_enabled(
@@ -9117,6 +9181,14 @@ impl Handler {
                     "support.ticket.staff_role_id",
                 )
                 .map(RoleId::new);
+                if staff_role_id == Some(RoleId::new(guild_id.get())) {
+                    return respond_component(
+                        ctx,
+                        component,
+                        "Configure a support role other than @everyone.",
+                    )
+                    .await;
+                }
                 let mut overwrites = vec![
                     PermissionOverwrite {
                         allow: Permissions::empty(),
@@ -9131,12 +9203,9 @@ impl Handler {
                         kind: PermissionOverwriteType::Member(component.user.id),
                     },
                     PermissionOverwrite {
-                        // Keep role pings scoped to private ticket channels. This
-                        // lets Helper notify a configured support role even when
-                        // that role is not globally mentionable.
-                        allow: visible
-                            | Permissions::MANAGE_CHANNELS
-                            | Permissions::MENTION_EVERYONE,
+                        // Do not try to grant MENTION_EVERYONE to ourselves:
+                        // Discord rejects permissions the bot does not possess.
+                        allow: visible | Permissions::MANAGE_CHANNELS,
                         deny: Permissions::empty(),
                         kind: PermissionOverwriteType::Member(bot_id),
                     },
@@ -9218,6 +9287,7 @@ impl Handler {
                 let is_staff = ticket_actor_is_staff(
                     ctx,
                     guild_id,
+                    component.channel_id,
                     component.user.id,
                     component.member.as_ref(),
                     setting_u64_optional(
@@ -9236,6 +9306,28 @@ impl Handler {
                     )
                     .await;
                 }
+                let Some(ticket) = self
+                    .store
+                    .ticket_by_channel(&component.channel_id.to_string())?
+                else {
+                    return respond_component(ctx, component, "Ticket not found.").await;
+                };
+                if ticket.guild_id != guild_id.to_string() || ticket.status != "open" {
+                    return respond_component(
+                        ctx,
+                        component,
+                        "This ticket is not open in this server.",
+                    )
+                    .await;
+                }
+                if ticket.claimed_by.is_some() {
+                    return respond_component(
+                        ctx,
+                        component,
+                        "This ticket has already been claimed.",
+                    )
+                    .await;
+                }
                 if self.store.claim_ticket(
                     &component.channel_id.to_string(),
                     &component.user.id.to_string(),
@@ -9249,7 +9341,12 @@ impl Handler {
                         .await?;
                     respond_component(ctx, component, "Ticket claimed.").await
                 } else {
-                    respond_component(ctx, component, "This ticket is already closed.").await
+                    respond_component(
+                        ctx,
+                        component,
+                        "This ticket is closed or has already been claimed.",
+                    )
+                    .await
                 }
             }
             "ticket:reopen" => {
@@ -9263,6 +9360,7 @@ impl Handler {
                 let is_staff = ticket_actor_is_staff(
                     ctx,
                     guild_id,
+                    component.channel_id,
                     component.user.id,
                     component.member.as_ref(),
                     setting_u64_optional(
@@ -9273,11 +9371,30 @@ impl Handler {
                     .map(RoleId::new),
                 )
                 .await;
-                if !is_opener && !is_staff {
+                if ticket.guild_id != guild_id.to_string() || (!is_opener && !is_staff) {
                     return respond_component(
                         ctx,
                         component,
                         "Only the ticket author or support team can reopen this ticket.",
+                    )
+                    .await;
+                }
+                let max_open = setting_u64(
+                    &self.store,
+                    &guild_id.to_string(),
+                    "support.ticket.max_open",
+                    1,
+                )
+                .clamp(1, 10);
+                if self
+                    .store
+                    .active_ticket_count_for_user(&ticket.guild_id, &ticket.user_id)?
+                    >= max_open as u32
+                {
+                    return respond_component(
+                        ctx,
+                        component,
+                        "The ticket author already has the maximum number of open tickets.",
                     )
                     .await;
                 }
@@ -9328,6 +9445,7 @@ impl Handler {
                 let is_staff = ticket_actor_is_staff(
                     ctx,
                     guild_id,
+                    component.channel_id,
                     component.user.id,
                     component.member.as_ref(),
                     setting_u64_optional(
@@ -9338,7 +9456,7 @@ impl Handler {
                     .map(RoleId::new),
                 )
                 .await;
-                if !is_opener && !is_staff {
+                if ticket_for_auth.guild_id != guild_id.to_string() || (!is_opener && !is_staff) {
                     return respond_component(
                         ctx,
                         component,
@@ -9399,7 +9517,7 @@ impl Handler {
                     respond_component(
                         ctx,
                         component,
-                        "Ticket closed and archived. The channel was not deleted.",
+                        "Ticket closed. The channel and its history were preserved.",
                     )
                     .await?;
                 } else {
@@ -9412,16 +9530,58 @@ impl Handler {
     }
 }
 
+fn edit_member_roles<'a>(
+    event: &'a MessageUpdateEvent,
+    message: Option<&'a serenity::all::Message>,
+) -> Option<&'a [RoleId]> {
+    event
+        .member
+        .as_ref()
+        .and_then(|member| member.as_deref())
+        .or_else(|| message.and_then(|message| message.member.as_deref()))
+        .map(|member| member.roles.as_slice())
+}
+
+fn discord_error_code(error: &serenity::Error, code: isize) -> bool {
+    matches!(error, serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(response)) if response.error.code == code)
+}
+
+fn component_record_matches(
+    component: &serenity::all::ComponentInteraction,
+    guild_id: &str,
+    message_id: Option<&str>,
+) -> bool {
+    component
+        .guild_id
+        .is_some_and(|guild| guild.to_string() == guild_id)
+        && message_id.is_some_and(|message| message == component.message.id.to_string())
+}
+
+fn command_response_ephemeral(store: &Store, command: &CommandInteraction) -> bool {
+    match command.data.name.as_str() {
+        "ping" | "rank" => false,
+        "leaderboard" => !command.guild_id.is_some_and(|guild| {
+            setting_bool(
+                store,
+                &guild.to_string(),
+                "community.leaderboard.public",
+                true,
+            )
+        }),
+        "serverstats" => !command.guild_id.is_some_and(|guild| {
+            setting_bool(store, &guild.to_string(), "insights.stats.public", false)
+        }),
+        _ => true,
+    }
+}
+
 async fn respond(ctx: &Context, command: &CommandInteraction, content: &str) -> Result<()> {
     command
-        .create_response(
+        .edit_response(
             ctx,
-            CreateInteractionResponse::Message(
-                CreateInteractionResponseMessage::new()
-                    .content(english_bot_text(content))
-                    .allowed_mentions(CreateAllowedMentions::new())
-                    .ephemeral(true),
-            ),
+            EditInteractionResponse::new()
+                .content(english_bot_text(content))
+                .allowed_mentions(CreateAllowedMentions::new()),
         )
         .await?;
     Ok(())
@@ -9433,14 +9593,11 @@ async fn respond_component(
     content: &str,
 ) -> Result<()> {
     component
-        .create_response(
+        .edit_response(
             ctx,
-            CreateInteractionResponse::Message(
-                CreateInteractionResponseMessage::new()
-                    .content(english_bot_text(content))
-                    .allowed_mentions(CreateAllowedMentions::new())
-                    .ephemeral(true),
-            ),
+            EditInteractionResponse::new()
+                .content(english_bot_text(content))
+                .allowed_mentions(CreateAllowedMentions::new()),
         )
         .await?;
     Ok(())
@@ -10838,11 +10995,16 @@ fn join_burst_count(
     count
 }
 
-async fn finish_giveaway(http: &serenity::http::Http, store: &Store, id: i64) -> Result<bool> {
+async fn finish_giveaway(
+    http: &serenity::http::Http,
+    store: &Store,
+    guild_id: &str,
+    id: i64,
+) -> Result<bool> {
     let Some(giveaway) = store.giveaway(id)? else {
         return Ok(false);
     };
-    if giveaway.ended || !store.end_giveaway(id)? {
+    if giveaway.guild_id != guild_id || giveaway.ended || !store.end_giveaway(id)? {
         return Ok(false);
     }
     let winners = {
@@ -10896,12 +11058,13 @@ async fn finish_giveaway(http: &serenity::http::Http, store: &Store, id: i64) ->
 async fn reroll_giveaway(
     http: &serenity::http::Http,
     store: &Store,
+    guild_id: &str,
     id: i64,
 ) -> Result<Option<String>> {
     let Some(giveaway) = store.giveaway(id)? else {
         return Ok(None);
     };
-    if !giveaway.ended {
+    if giveaway.guild_id != guild_id || !giveaway.ended {
         return Ok(None);
     }
     let mut entries = store.giveaway_entries(id)?;
@@ -10924,11 +11087,16 @@ async fn reroll_giveaway(
     Ok(Some(winner))
 }
 
-async fn finish_poll(http: &serenity::http::Http, store: &Store, id: i64) -> Result<bool> {
+async fn finish_poll(
+    http: &serenity::http::Http,
+    store: &Store,
+    guild_id: &str,
+    id: i64,
+) -> Result<bool> {
     let Some(poll) = store.poll(id)? else {
         return Ok(false);
     };
-    if poll.closed || !store.close_poll(id)? {
+    if poll.guild_id != guild_id || poll.closed || !store.close_poll(id)? {
         return Ok(false);
     }
     let counts = store.poll_counts(id, poll.options.len())?;
@@ -10969,6 +11137,19 @@ async fn finish_poll(http: &serenity::http::Http, store: &Store, id: i64) -> Res
     Ok(true)
 }
 
+fn lockdown_overwrite(
+    everyone: RoleId,
+    existing: Option<&PermissionOverwrite>,
+) -> PermissionOverwrite {
+    PermissionOverwrite {
+        allow: existing.map_or(Permissions::empty(), |value| value.allow)
+            - Permissions::SEND_MESSAGES,
+        deny: existing.map_or(Permissions::empty(), |value| value.deny)
+            | Permissions::SEND_MESSAGES,
+        kind: PermissionOverwriteType::Role(everyone),
+    }
+}
+
 async fn apply_lockdown(
     http: &serenity::http::Http,
     store: &Store,
@@ -10997,15 +11178,12 @@ async fn apply_lockdown(
                     store.set_setting(&guild_id.to_string(), &key, "")?;
                 }
             }
+            let existing = channel
+                .permission_overwrites
+                .iter()
+                .find(|overwrite| overwrite.kind == PermissionOverwriteType::Role(everyone));
             channel
-                .create_permission(
-                    http,
-                    PermissionOverwrite {
-                        allow: Permissions::empty(),
-                        deny: Permissions::SEND_MESSAGES,
-                        kind: PermissionOverwriteType::Role(everyone),
-                    },
-                )
+                .create_permission(http, lockdown_overwrite(everyone, existing))
                 .await?;
             changed += 1;
         } else if let Some(previous) = store.get_setting(&guild_id.to_string(), &key)? {
@@ -11274,10 +11452,12 @@ fn feature_maturity_allows_runtime(key: &str) -> bool {
         // RSS and podcasts use public HTTP feeds and the worker's SSRF
         // checks; there is no provider secret to require here.
         (helper_contracts::FeatureMaturity::Beta, "social.rss") => true,
-        (helper_contracts::FeatureMaturity::Blocked, "social.tiktok") => {
-            approved(&["TIKTOK_APP_APPROVED", "TIKTOK_DISPLAY_API_APPROVED"])
-                && configured("TIKTOK_ACCESS_TOKEN")
-        }
+        (helper_contracts::FeatureMaturity::Blocked, "social.tiktok") => tiktok_runtime_allowed(
+            approved(&["TIKTOK_APP_APPROVED", "TIKTOK_DISPLAY_API_APPROVED"]),
+            env_flag_is_true("TIKTOK_SANDBOX_MODE"),
+            TikTokOAuthClient::from_env().is_some(),
+            TikTokClient::from_env().is_some(),
+        ),
         (helper_contracts::FeatureMaturity::Blocked, "social.instagram") => {
             instagram_runtime_allowed()
                 && configured("META_INSTAGRAM_ACCESS_TOKEN")
@@ -11470,7 +11650,8 @@ fn feature_title(key: &str) -> &'static str {
 
 fn scheduled_action_feature(action_type: &str) -> Option<&'static str> {
     match action_type {
-        "unban" => Some("management.moderation"),
+        // Releasing a temporary sanction must survive a feature disable.
+        "unban" => None,
         "giveaway_end" => Some("community.giveaways"),
         "poll_end" => Some("management.polls"),
         "ticket_sla" => Some("support.tickets"),
@@ -11593,25 +11774,20 @@ fn ticket_member_is_staff(
         || permissions.contains(Permissions::ADMINISTRATOR)
 }
 
-/// Component payloads can omit resolved permissions and can lag behind a role
-/// change. Accept a valid snapshot immediately, then verify against Discord's
-/// current member and role state before denying a ticket action.
+/// Resolved interaction permissions include channel overwrites. A negative
+/// result must not fall back to broader guild-level permissions.
 async fn ticket_actor_is_staff(
     ctx: &Context,
     guild_id: serenity::all::GuildId,
+    channel_id: ChannelId,
     user_id: serenity::all::UserId,
     interaction_member: Option<&serenity::all::Member>,
     configured_role_id: Option<RoleId>,
 ) -> bool {
-    if interaction_member.is_some_and(|member| {
-        ticket_member_is_staff(
-            configured_role_id,
-            &member.roles,
-            member.permissions.unwrap_or_else(Permissions::empty),
-            false,
-        )
-    }) {
-        return true;
+    if let Some(member) = interaction_member
+        && let Some(permissions) = member.permissions
+    {
+        return ticket_member_is_staff(configured_role_id, &member.roles, permissions, false);
     }
 
     let (member, guild) = tokio::join!(
@@ -11627,16 +11803,13 @@ async fn ticket_actor_is_staff(
     let Ok(guild) = guild else {
         return false;
     };
-    let mut permissions = guild
-        .roles
-        .get(&RoleId::new(guild_id.get()))
-        .map(|role| role.permissions)
-        .unwrap_or_else(Permissions::empty);
-    for role_id in &member.roles {
-        if let Some(role) = guild.roles.get(role_id) {
-            permissions |= role.permissions;
-        }
+    let Ok(serenity::all::Channel::Guild(channel)) = channel_id.to_channel(&ctx.http).await else {
+        return false;
+    };
+    if channel.guild_id != guild_id {
+        return false;
     }
+    let permissions = guild.user_permissions_in(&channel, &member);
     ticket_member_is_staff(
         configured_role_id,
         &member.roles,
@@ -12184,20 +12357,25 @@ async fn deliver_scheduled_action(
             .parse::<u64>()
             .map(serenity::all::UserId::new)
             .map_err(|_| anyhow::anyhow!("invalid scheduled unban user"))?;
-        let _ = guild.unban(http, user).await;
+        if let Err(error) = guild.unban(http, user).await {
+            // Unknown Ban is already released; transient failures retain the job.
+            if !discord_error_code(&error, 10026) {
+                return Err(error.into());
+            }
+        }
         store.delete_scheduled_action(id)?;
         return Ok(());
     }
     if action_type == "giveaway_end" {
         if let Some(giveaway_id) = value.get("giveaway_id").and_then(serde_json::Value::as_i64) {
-            let _ = finish_giveaway(http, store, giveaway_id).await?;
+            let _ = finish_giveaway(http, store, guild_id, giveaway_id).await?;
         }
         store.delete_scheduled_action(id)?;
         return Ok(());
     }
     if action_type == "poll_end" {
         if let Some(poll_id) = value.get("poll_id").and_then(serde_json::Value::as_i64) {
-            let _ = finish_poll(http, store, poll_id).await?;
+            let _ = finish_poll(http, store, guild_id, poll_id).await?;
         }
         store.delete_scheduled_action(id)?;
         return Ok(());
@@ -12206,6 +12384,8 @@ async fn deliver_scheduled_action(
         if let Some(raw_channel) = value.get("channel_id").and_then(serde_json::Value::as_str)
             && let Ok(Some(ticket)) = store.ticket_by_channel(raw_channel)
             && ticket.status == "open"
+            && ticket.guild_id == guild_id
+            && ticket.claimed_by.is_none()
             && let Ok(channel) = raw_channel.parse::<u64>()
         {
             let _ = ChannelId::new(channel)
@@ -12390,7 +12570,19 @@ async fn deliver_scheduled_action(
         } else {
             text.to_string()
         };
-        let mut message = serenity::all::CreateMessage::new().content(content);
+        let mut message = serenity::all::CreateMessage::new()
+            .content(content)
+            .allowed_mentions(CreateAllowedMentions::new().users(
+                if action_type == "reminder" && notify_user {
+                    target_id
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|id| *id > 0)
+                        .map(serenity::all::UserId::new)
+                } else {
+                    None
+                },
+            ));
         if action_type == "event_reminder" {
             // Event names are user-controlled; never let a reminder turn an
             // event title into an unexpected @everyone or role mention.
@@ -12441,6 +12633,91 @@ fn approved_wallet_contract(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tiktok_runtime_accepts_creator_oauth_without_a_global_token() {
+        assert!(super::tiktok_runtime_allowed(true, false, true, false));
+        assert!(super::tiktok_runtime_allowed(false, true, true, false));
+    }
+
+    #[test]
+    fn tiktok_runtime_keeps_approval_and_credentials_required() {
+        assert!(!super::tiktok_runtime_allowed(false, false, true, true));
+        assert!(!super::tiktok_runtime_allowed(false, true, false, true));
+        assert!(!super::tiktok_runtime_allowed(true, false, false, false));
+        assert!(super::tiktok_runtime_allowed(true, false, false, true));
+    }
+
+    #[tokio::test]
+    async fn tiktok_creator_client_is_guild_scoped_and_sandbox_has_no_global_fallback() {
+        let store = helper_store::Store::open(":memory:").unwrap();
+        let cipher = super::TokenCipher::new("test-secret-at-least-thirty-two-bytes").unwrap();
+        let oauth = super::TikTokOAuthClient::new(
+            "test-client",
+            "test-client-secret",
+            "https://example.test/callback",
+            "https://www.tiktok.com/v2/auth/authorize/",
+            "https://open.tiktokapis.com/v2/oauth/token/",
+        )
+        .unwrap();
+        let fallback =
+            super::TikTokClient::new("test-global-token", "https://open.tiktokapis.com").unwrap();
+        let now = chrono::Utc::now().timestamp();
+        store
+            .save_tiktok_grant(
+                "guild-a",
+                "test-creator",
+                "Creator",
+                &cipher.seal("test-creator-access").unwrap(),
+                &cipher.seal("test-creator-refresh").unwrap(),
+                "user.info.basic,video.list",
+                now + 3600,
+                now + 7200,
+                now,
+            )
+            .unwrap();
+        let creator = super::tiktok_client_for_guild(
+            &store,
+            "guild-a",
+            Some(&oauth),
+            Some(&cipher),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(creator.is_configured());
+        assert!(
+            super::tiktok_client_for_guild(
+                &store,
+                "guild-b",
+                Some(&oauth),
+                Some(&cipher),
+                Some(&fallback),
+                false,
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            super::tiktok_client_for_guild(&store, "guild-b", None, None, Some(&fallback), true,)
+                .await
+                .is_ok()
+        );
+        store.delete_tiktok_grant("guild-a").unwrap();
+        assert!(
+            super::tiktok_client_for_guild(
+                &store,
+                "guild-a",
+                Some(&oauth),
+                Some(&cipher),
+                Some(&fallback),
+                false,
+            )
+            .await
+            .is_err()
+        );
+    }
+
     use super::{
         HELPER_LANGUAGE_SETTING, HELPER_LOCALES, account_age_days,
         adapter::{DiscordAdapter, Effect, FakeDiscordAdapter},
@@ -13227,10 +13504,9 @@ mod tests {
             scheduled_action_feature("ticket_sla"),
             Some("support.tickets")
         );
-        assert_eq!(
-            scheduled_action_feature("unban"),
-            Some("management.moderation")
-        );
+        // Releasing a temporary sanction must survive a moderation toggle
+        // being disabled after the sanction was created.
+        assert_eq!(scheduled_action_feature("unban"), None);
         assert_eq!(scheduled_action_feature("reminder"), None);
     }
 

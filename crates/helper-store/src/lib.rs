@@ -5166,7 +5166,7 @@ impl Store {
     pub fn claim_ticket(&self, channel_id: &str, user_id: &str) -> Result<bool> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         Ok(conn.execute(
-            "UPDATE tickets SET claimed_by=?2 WHERE channel_id=?1 AND status='open'",
+            "UPDATE tickets SET claimed_by=?2 WHERE channel_id=?1 AND status='open' AND (claimed_by IS NULL OR claimed_by=?2)",
             params![channel_id, user_id],
         )? > 0)
     }
@@ -5533,18 +5533,48 @@ impl Store {
     pub fn add_giveaway_entry(&self, id: i64, user_id: &str) -> Result<bool> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         Ok(conn.execute(
-            "INSERT OR IGNORE INTO giveaway_entries(giveaway_id,user_id) VALUES(?1,?2)",
-            params![id, user_id],
+            "INSERT OR IGNORE INTO giveaway_entries(giveaway_id,user_id)
+             SELECT id,?2 FROM giveaways WHERE id=?1 AND ended=0 AND end_at>?3",
+            params![id, user_id, Utc::now().timestamp_millis()],
         )? > 0)
     }
 
     pub fn remove_giveaway_entry(&self, id: i64, user_id: &str) -> Result<()> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
-            "DELETE FROM giveaway_entries WHERE giveaway_id=?1 AND user_id=?2",
-            params![id, user_id],
+            "DELETE FROM giveaway_entries WHERE giveaway_id=?1 AND user_id=?2
+             AND EXISTS(SELECT 1 FROM giveaways WHERE id=?1 AND ended=0 AND end_at>?3)",
+            params![id, user_id, Utc::now().timestamp_millis()],
         )?;
         Ok(())
+    }
+
+    /// Some(true) joined, Some(false) left, None no longer open.
+    /// Keep the deadline check and toggle in one transaction, including across
+    /// connections, so a closing worker cannot draw from a changing entry set.
+    pub fn toggle_giveaway_entry(&self, id: i64, user_id: &str) -> Result<Option<bool>> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let open: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM giveaways WHERE id=?1 AND ended=0 AND end_at>?2)",
+            params![id, Utc::now().timestamp_millis()],
+            |row| row.get(0),
+        )?;
+        if !open {
+            return Ok(None);
+        }
+        let removed = tx.execute(
+            "DELETE FROM giveaway_entries WHERE giveaway_id=?1 AND user_id=?2",
+            params![id, user_id],
+        )? > 0;
+        if !removed {
+            tx.execute(
+                "INSERT INTO giveaway_entries(giveaway_id,user_id) VALUES(?1,?2)",
+                params![id, user_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(Some(!removed))
     }
 
     pub fn giveaway_entries(&self, id: i64) -> Result<Vec<String>> {
@@ -5612,10 +5642,18 @@ impl Store {
         }).optional()?)
     }
 
-    pub fn vote_poll(&self, id: i64, user_id: &str, choice: usize) -> Result<()> {
+    pub fn vote_poll(&self, id: i64, user_id: &str, choice: usize) -> Result<bool> {
+        let Ok(choice) = i64::try_from(choice) else {
+            return Ok(false);
+        };
         let conn = self.conn.lock().expect("store mutex poisoned");
-        conn.execute("INSERT INTO poll_votes(poll_id,user_id,choice) VALUES(?1,?2,?3) ON CONFLICT(poll_id,user_id) DO UPDATE SET choice=excluded.choice", params![id, user_id, choice as i64])?;
-        Ok(())
+        Ok(conn.execute(
+            "INSERT INTO poll_votes(poll_id,user_id,choice)
+             SELECT id,?2,?3 FROM polls
+             WHERE id=?1 AND closed=0 AND end_at>?4 AND ?3<json_array_length(options)
+             ON CONFLICT(poll_id,user_id) DO UPDATE SET choice=excluded.choice",
+            params![id, user_id, choice, Utc::now().timestamp_millis()],
+        )? > 0)
     }
 
     pub fn poll_counts(&self, id: i64, choices: usize) -> Result<Vec<i64>> {
@@ -5814,6 +5852,137 @@ fn parse_dt(value: &str) -> Result<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn giveaway_entries_cannot_change_after_close() {
+        let store = Store::open(":memory:").unwrap();
+        let id = store
+            .create_giveaway("g", "c", "Prize", 1, i64::MAX, None, "host")
+            .unwrap();
+        assert!(store.add_giveaway_entry(id, "first").unwrap());
+        // A handler may have read the open record before another worker closes it.
+        assert!(store.end_giveaway(id).unwrap());
+        assert!(!store.add_giveaway_entry(id, "late").unwrap());
+        store.remove_giveaway_entry(id, "first").unwrap();
+        assert_eq!(store.giveaway_entries(id).unwrap(), vec!["first"]);
+    }
+
+    #[test]
+    fn giveaway_entries_cannot_change_after_deadline_or_for_missing_event() {
+        let store = Store::open(":memory:").unwrap();
+        let id = store
+            .create_giveaway("g", "c", "Prize", 1, 0, None, "host")
+            .unwrap();
+        assert!(!store.add_giveaway_entry(id, "late").unwrap());
+        assert!(!store.add_giveaway_entry(id + 1, "missing").unwrap());
+        assert!(store.giveaway_entries(id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn poll_votes_cannot_change_after_close() {
+        let store = Store::open(":memory:").unwrap();
+        let id = store
+            .create_poll("g", "c", "Choose", &["A".into(), "B".into()], i64::MAX)
+            .unwrap();
+        store.vote_poll(id, "first", 0).unwrap();
+        assert!(store.close_poll(id).unwrap());
+        store.vote_poll(id, "first", 1).unwrap();
+        store.vote_poll(id, "late", 1).unwrap();
+        assert_eq!(store.poll_counts(id, 2).unwrap(), vec![1, 0]);
+    }
+
+    #[test]
+    fn poll_votes_reject_expired_missing_and_invalid_choices() {
+        let store = Store::open(":memory:").unwrap();
+        let expired = store
+            .create_poll("g", "c", "Choose", &["A".into(), "B".into()], 0)
+            .unwrap();
+        store.vote_poll(expired, "late", 0).unwrap();
+        assert_eq!(store.poll_counts(expired, 2).unwrap(), vec![0, 0]);
+        let open = store
+            .create_poll("g", "c", "Choose", &["A".into(), "B".into()], i64::MAX)
+            .unwrap();
+        store.vote_poll(open, "first", 0).unwrap();
+        store.vote_poll(open, "first", 2).unwrap();
+        store.vote_poll(open, "huge", usize::MAX).unwrap();
+        store.vote_poll(open + 1, "missing", 0).unwrap();
+        assert_eq!(store.poll_counts(open, 2).unwrap(), vec![1, 0]);
+        assert_eq!(store.poll_counts(open + 1, 2).unwrap(), vec![0, 0]);
+    }
+
+    #[test]
+    fn giveaway_toggle_is_atomic_and_reports_closed_events() {
+        let store = Store::open(":memory:").unwrap();
+        let id = store
+            .create_giveaway("g", "c", "Prize", 1, i64::MAX, None, "host")
+            .unwrap();
+        assert_eq!(
+            store.toggle_giveaway_entry(id, "member").unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            store.toggle_giveaway_entry(id, "member").unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            store.toggle_giveaway_entry(id, "member").unwrap(),
+            Some(true)
+        );
+        store.end_giveaway(id).unwrap();
+        assert_eq!(store.toggle_giveaway_entry(id, "member").unwrap(), None);
+        assert_eq!(store.toggle_giveaway_entry(id, "late").unwrap(), None);
+        assert_eq!(store.giveaway_entries(id).unwrap(), vec!["member"]);
+        let expired = store
+            .create_giveaway("g", "c", "Prize", 1, 0, None, "host")
+            .unwrap();
+        assert_eq!(store.toggle_giveaway_entry(expired, "late").unwrap(), None);
+        assert_eq!(
+            store.toggle_giveaway_entry(expired + 1, "missing").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn simultaneous_giveaway_toggles_do_not_lose_clicks() {
+        let store = Store::open(":memory:").unwrap();
+        let id = store
+            .create_giveaway("g", "c", "Prize", 1, i64::MAX, None, "host")
+            .unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.toggle_giveaway_entry(id, "member").unwrap()
+                })
+            })
+            .collect();
+        let joined = handles
+            .into_iter()
+            .filter_map(|handle| handle.join().unwrap())
+            .filter(|joined| *joined)
+            .count();
+        assert_eq!(joined, 8);
+        assert!(store.giveaway_entries(id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn open_poll_allows_vote_changes_but_rejects_invalid_writes() {
+        let store = Store::open(":memory:").unwrap();
+        let id = store
+            .create_poll("g", "c", "Choose", &["A".into(), "B".into()], i64::MAX)
+            .unwrap();
+        assert!(store.vote_poll(id, "member", 0).unwrap());
+        assert!(store.vote_poll(id, "member", 1).unwrap());
+        assert_eq!(store.poll_counts(id, 2).unwrap(), vec![0, 1]);
+        assert!(!store.vote_poll(id, "member", 2).unwrap());
+        assert!(!store.vote_poll(id, "member", usize::MAX).unwrap());
+        store.close_poll(id).unwrap();
+        assert!(!store.vote_poll(id, "member", 0).unwrap());
+        assert_eq!(store.poll_counts(id, 2).unwrap(), vec![0, 1]);
+    }
     use helper_contracts::{EntitlementSnapshot, Plan, SessionClaims};
 
     #[test]
@@ -5994,6 +6163,51 @@ mod tests {
             store.load_entitlement("u").unwrap().unwrap().plan,
             Plan::Plus
         );
+    }
+
+    #[test]
+    fn ticket_claim_cannot_replace_another_staff_member() {
+        let store = Store::open(":memory:").unwrap();
+        store.open_ticket("guild", "opener", "channel").unwrap();
+        assert!(store.claim_ticket("channel", "first-staff").unwrap());
+        assert!(store.claim_ticket("channel", "first-staff").unwrap());
+        assert!(!store.claim_ticket("channel", "second-staff").unwrap());
+        assert_eq!(
+            store
+                .ticket_by_channel("channel")
+                .unwrap()
+                .unwrap()
+                .claimed_by
+                .as_deref(),
+            Some("first-staff")
+        );
+        store.close_ticket("channel").unwrap();
+        assert!(!store.claim_ticket("channel", "first-staff").unwrap());
+        assert!(!store.claim_ticket("missing", "first-staff").unwrap());
+    }
+
+    #[test]
+    fn simultaneous_ticket_claims_have_one_owner() {
+        let store = Store::open(":memory:").unwrap();
+        store.open_ticket("guild", "opener", "channel").unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|index| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store
+                        .claim_ticket("channel", &format!("staff-{index}"))
+                        .unwrap()
+                })
+            })
+            .collect();
+        let winners = handles
+            .into_iter()
+            .filter_map(|handle| handle.join().unwrap().then_some(()))
+            .count();
+        assert_eq!(winners, 1);
     }
 
     #[test]
@@ -7139,7 +7353,7 @@ mod tests {
         );
 
         let giveaway = store
-            .create_giveaway("g", "10", "Prize", 2, 100, None, "u")
+            .create_giveaway("g", "10", "Prize", 2, i64::MAX, None, "u")
             .unwrap();
         assert!(store.add_giveaway_entry(giveaway, "winner").unwrap());
         assert!(!store.add_giveaway_entry(giveaway, "winner").unwrap());
@@ -7147,7 +7361,7 @@ mod tests {
         assert!(store.end_giveaway(giveaway).unwrap());
 
         let poll = store
-            .create_poll("g", "10", "Choose", &["A".into(), "B".into()], 100)
+            .create_poll("g", "10", "Choose", &["A".into(), "B".into()], i64::MAX)
             .unwrap();
         store.vote_poll(poll, "voter", 1).unwrap();
         assert_eq!(store.poll_counts(poll, 2).unwrap(), vec![0, 1]);

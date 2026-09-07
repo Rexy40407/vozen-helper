@@ -28,6 +28,7 @@ use helper_modules::{
     InstagramClient, KickClient, RssClient, SiweVerifier, StripeConnectClient, TikTokClient,
     TikTokOAuthClient, TokenCipher, TwitchClient, YouTubeClient, env_flag_is_true,
     first_env_flag_is_true, format_rss_message, format_twitch_message, format_youtube_message,
+    tiktok_runtime_allowed,
 };
 use helper_store::{
     BlueskySubscriptionRecord, BlueskySubscriptionWrite, InstagramSubscriptionRecord,
@@ -5536,6 +5537,118 @@ fn add_dependency_issue(
     });
 }
 
+fn role_hierarchy_issues(
+    guild_id: &str,
+    bot_role_ids: &[String],
+    roles: &[serde_json::Value],
+    configured_roles: &BTreeSet<(String, String)>,
+) -> Vec<ValidationIssue> {
+    let mut issues = Vec::new();
+    let bot_top_position = roles
+        .iter()
+        .filter(|role| {
+            role.get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| {
+                    id != guild_id && bot_role_ids.iter().any(|bot_role| bot_role == id)
+                })
+        })
+        .filter_map(|role| role.get("position").and_then(serde_json::Value::as_i64))
+        .max()
+        .unwrap_or(0);
+    for (path, id) in configured_roles {
+        let field = path.split(['.', '[']).next().unwrap_or(path);
+        // These roles are references used for authorization/exemptions. They
+        // are never assigned by the bot, so hierarchy must not block them.
+        if matches!(field, "staffRole" | "requiredRole" | "ignoredRoles") {
+            continue;
+        }
+        let Some(role) = roles
+            .iter()
+            .find(|role| role.get("id").and_then(serde_json::Value::as_str) == Some(id))
+        else {
+            continue;
+        };
+        let managed = role
+            .get("managed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let position = role
+            .get("position")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        if managed || id == guild_id || position >= bot_top_position {
+            add_dependency_issue(
+                &mut issues,
+                format!("{path}.hierarchy"),
+                "role_not_manageable",
+                format!(
+                    "The selected role ({id}) must be unmanaged and below the Helper bot's highest role."
+                ),
+                "error",
+            );
+        }
+    }
+    issues
+}
+
+fn channel_dependency_issues(
+    guild_id: &str,
+    snapshot: &DiscordGuildSnapshot,
+    base_permissions: u64,
+    dependencies: &[String],
+    configured_channels: &BTreeSet<(String, String)>,
+) -> Vec<ValidationIssue> {
+    let mut issues = Vec::new();
+    let Some(bot_user_id) = snapshot.bot_user_id.as_deref() else {
+        return issues;
+    };
+    for (path, id) in configured_channels {
+        // Exclusions still need to exist in this guild, but the bot need not
+        // read or send anything there. Destination permissions apply elsewhere.
+        if path
+            .split(['.', '[', ']'])
+            .any(|part| part == "ignoredChannels")
+        {
+            continue;
+        }
+        let Some(channel) = snapshot
+            .channels
+            .iter()
+            .find(|channel| channel.get("id").and_then(serde_json::Value::as_str) == Some(id))
+        else {
+            continue;
+        };
+        let Some(overwrites) = channel.get("permission_overwrites") else {
+            continue;
+        };
+        let Some(effective) = channel_bot_permissions(
+            base_permissions,
+            guild_id,
+            bot_user_id,
+            &snapshot.bot_role_ids,
+            overwrites,
+        ) else {
+            continue;
+        };
+        for dependency in dependencies {
+            let Some((bit, label)) = dependency_permission(dependency) else {
+                continue;
+            };
+            if !permission_bitfield_has(effective, bit) {
+                add_dependency_issue(
+                    &mut issues,
+                    format!("permissions.channel.{path}.{dependency}"),
+                    "missing_channel_permission",
+                    format!("The Helper bot lacks {label} in the selected channel ({id})."),
+                    "error",
+                );
+            }
+        }
+    }
+    issues
+}
+
 async fn generic_feature_preflight(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -5781,48 +5894,12 @@ async fn generic_feature_preflight(
         }
     }
     if request.enabled && needs_role_management && snapshot.roles_ready && bot_context_available {
-        let bot_top_position = snapshot
-            .roles
-            .iter()
-            .filter(|role| {
-                role.get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|id| {
-                        id != claims.guild_id
-                            && snapshot.bot_role_ids.iter().any(|bot_role| bot_role == id)
-                    })
-            })
-            .filter_map(|role| role.get("position").and_then(serde_json::Value::as_i64))
-            .max()
-            .unwrap_or(0);
-        for (path, id) in &configured_roles {
-            let Some(role) = snapshot.roles.iter().find(|role| {
-                role.get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|role_id| role_id == id)
-            }) else {
-                continue;
-            };
-            let managed = role
-                .get("managed")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let position = role
-                .get("position")
-                .and_then(serde_json::Value::as_i64)
-                .unwrap_or(0);
-            if managed || id == &claims.guild_id || position >= bot_top_position {
-                add_dependency_issue(
-                    &mut issues,
-                    format!("{path}.hierarchy"),
-                    "role_not_manageable",
-                    format!(
-                        "The selected role ({id}) must be unmanaged and below the Helper bot's highest role."
-                    ),
-                    "error",
-                );
-            }
-        }
+        issues.extend(role_hierarchy_issues(
+            &claims.guild_id,
+            &snapshot.bot_role_ids,
+            &snapshot.roles,
+            &configured_roles,
+        ));
     }
 
     // Base guild permissions are not enough when a configured destination
@@ -5833,48 +5910,15 @@ async fn generic_feature_preflight(
     if request.enabled
         && snapshot.channels_ready
         && bot_context_available
-        && let (Some(descriptor), Some(bot_user_id), Some(base_permissions)) = (
-            descriptor.as_ref(),
-            snapshot.bot_user_id.as_deref(),
-            bot_permissions,
-        )
+        && let (Some(descriptor), Some(base_permissions)) = (descriptor.as_ref(), bot_permissions)
     {
-        for (path, id) in &configured_channels {
-            let Some(channel) = snapshot.channels.iter().find(|channel| {
-                channel
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|channel_id| channel_id == id)
-            }) else {
-                continue;
-            };
-            let Some(overwrites) = channel.get("permission_overwrites") else {
-                continue;
-            };
-            let Some(effective) = channel_bot_permissions(
-                base_permissions,
-                &claims.guild_id,
-                bot_user_id,
-                &snapshot.bot_role_ids,
-                overwrites,
-            ) else {
-                continue;
-            };
-            for dependency in &descriptor.dependencies {
-                let Some((bit, label)) = dependency_permission(dependency) else {
-                    continue;
-                };
-                if !permission_bitfield_has(effective, bit) {
-                    add_dependency_issue(
-                        &mut issues,
-                        format!("permissions.channel.{path}.{dependency}"),
-                        "missing_channel_permission",
-                        format!("The Helper bot lacks {label} in the selected channel ({id})."),
-                        "error",
-                    );
-                }
-            }
-        }
+        issues.extend(channel_dependency_issues(
+            &claims.guild_id,
+            &snapshot,
+            base_permissions,
+            &descriptor.dependencies,
+            &configured_channels,
+        ));
     }
     if request.enabled
         && (!snapshot.channels_ready || !snapshot.roles_ready)
@@ -8368,10 +8412,12 @@ fn provider_runtime_ready(state: &ApiState, key: &str) -> bool {
             .as_ref()
             .is_some_and(TwitchClient::is_configured),
         "web3.gas_tracker" => !state.gas.configured_networks().is_empty(),
-        "social.tiktok" => {
-            (state.tiktok.is_some() && tiktok_approved())
-                || (TikTokOAuthClient::from_env().is_some() && tiktok_sandbox_enabled())
-        }
+        "social.tiktok" => tiktok_runtime_allowed(
+            tiktok_approved(),
+            tiktok_sandbox_enabled(),
+            TikTokOAuthClient::from_env().is_some(),
+            state.tiktok.is_some(),
+        ),
         "social.instagram" => {
             state
                 .instagram
@@ -8476,10 +8522,12 @@ fn provider_dependencies_ready(state: &ApiState, key: &str) -> bool {
         // allow-listed HTTPS RPC endpoint.  Do not report a configured card as
         // operational when the worker would have no network to poll.
         "web3.gas_tracker" => !state.gas.configured_networks().is_empty(),
-        "social.tiktok" => {
-            (state.tiktok.is_some() && tiktok_approved())
-                || (TikTokOAuthClient::from_env().is_some() && tiktok_sandbox_enabled())
-        }
+        "social.tiktok" => tiktok_runtime_allowed(
+            tiktok_approved(),
+            tiktok_sandbox_enabled(),
+            TikTokOAuthClient::from_env().is_some(),
+            state.tiktok.is_some(),
+        ),
         "social.instagram" => {
             state
                 .instagram
@@ -9849,76 +9897,41 @@ async fn update_feature_config(
     if feature_definition(&update.key).is_none() {
         return Err(client_error(StatusCode::BAD_REQUEST, "unknown_feature"));
     }
-    if update.enabled {
-        require_feature_premium(&state, &claims, &update.key).await?;
-    }
-    // Provider-backed integrations are promoted dynamically once their
-    // official client and approval gate are ready.  Use the same decision as
-    // the catalogue/detail endpoints here; consulting only the static
-    // maturity would make a fully configured provider impossible to publish.
-    if !feature_configurable_for(&state, &update.key) {
-        return Err(client_error(
-            StatusCode::NOT_IMPLEMENTED,
-            "feature_not_available",
-        ));
-    }
-    let config_json = state
+    let current = state
         .store
         .get_feature_setting(&claims.guild_id, &update.key)
-        .ok()
-        .flatten()
-        .map(|value| value.config_json)
-        .or_else(|| {
-            state
-                .store
-                .get_setting(&claims.guild_id, &feature_config_key(&update.key))
-                .ok()
-                .flatten()
-        })
-        .unwrap_or_else(|| "{}".into());
-    let enabled_value = if update.enabled { "true" } else { "false" };
-    let mut projections = vec![
-        (feature_key(&update.key), enabled_value.to_string()),
-        (feature_config_key(&update.key), config_json.clone()),
-    ];
-    if let Ok(config) = serde_json::from_str::<serde_json::Value>(&config_json) {
-        projections.extend(runtime_projection_pairs(&update.key, &config));
-    }
-    if let Some(runtime_key) = runtime_feature_key(&update.key) {
-        projections.push((runtime_key.to_string(), enabled_value.to_string()));
-    }
-    let record = state
-        .store
-        .publish_feature_setting(
-            &claims.guild_id,
-            &update.key,
-            update.enabled,
-            &config_json,
-            update.expected_revision,
-            &claims.user_id,
-            &projections,
-        )
-        .map_err(|error| {
-            if error.to_string().starts_with("feature_revision_conflict:") {
-                client_error(StatusCode::CONFLICT, "feature_revision_conflict")
-            } else {
-                client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
-            }
-        })?;
-    record_setup_for_enabled_feature(
-        &state.store,
-        &claims.guild_id,
-        record.enabled,
-        Utc::now().timestamp_millis(),
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
+    let observed_revision = current.as_ref().map(|record| record.revision).unwrap_or(0);
+    let config_json = match current {
+        Some(record) => Some(record.config_json),
+        None => state
+            .store
+            .get_setting(&claims.guild_id, &feature_config_key(&update.key))
+            .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?,
+    };
+    let config = match config_json {
+        Some(raw) => serde_json::from_str(&raw).map_err(|_| {
+            client_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid_stored_config")
+        })?,
+        None => feature_defaults(&update.key).unwrap_or_else(|| serde_json::json!({})),
+    };
+    // A toggle is a publish too: use the same validation, permissions and
+    // atomic provider subscription updates as the full configuration route.
+    // Bind the read to its revision even for old clients without a revision,
+    // so a concurrent edit cannot be overwritten with the config read here.
+    let Json(mut body) = update_feature_detail(
+        State(state),
+        headers,
+        Path(update.key),
+        Json(FeatureDetailUpdate {
+            enabled: update.enabled,
+            config,
+            expected_revision: Some(update.expected_revision.unwrap_or(observed_revision)),
+        }),
     )
-    .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?;
-    Ok(Json(serde_json::json!({
-        "ok": true,
-        "guildId": claims.guild_id,
-        "key": update.key,
-        "enabled": record.enabled,
-        "revision": record.revision,
-    })))
+    .await?;
+    body["ok"] = serde_json::Value::Bool(true);
+    Ok(Json(body))
 }
 
 #[derive(Debug, Deserialize)]
@@ -11752,6 +11765,42 @@ mod tests {
     }
 
     #[test]
+    fn preflight_does_not_require_assignable_support_or_filter_roles() {
+        let roles = vec![
+            serde_json::json!({"id":"guild", "position":0}),
+            serde_json::json!({"id":"bot-role", "position":5}),
+            serde_json::json!({"id":"admin-role", "position":10}),
+            serde_json::json!({"id":"managed-role", "position":2, "managed":true}),
+        ];
+        let references = BTreeSet::from([
+            ("staffRole".into(), "admin-role".into()),
+            ("requiredRole".into(), "managed-role".into()),
+            ("ignoredRoles[0]".into(), "admin-role".into()),
+        ]);
+        assert!(
+            role_hierarchy_issues("guild", &["bot-role".into()], &roles, &references).is_empty()
+        );
+        for (path, id) in [
+            ("autoRole", "admin-role"),
+            ("verifiedRole", "managed-role"),
+            ("levelRoles[0]", "admin-role"),
+            ("roleIds[0]", "guild"),
+        ] {
+            assert_eq!(
+                role_hierarchy_issues(
+                    "guild",
+                    &["bot-role".into()],
+                    &roles,
+                    &BTreeSet::from([(path.into(), id.into())])
+                )
+                .len(),
+                1,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
     fn preflight_collects_array_resources_and_level_reward_roles() {
         let config = serde_json::json!({
             "roleIds": ["111111111111111111", "222222222222222222"],
@@ -11768,6 +11817,45 @@ mod tests {
         assert!(roles.contains(&("roleIds[1]".into(), "222222222222222222".into())));
         assert!(roles.contains(&("levelRoles[0]".into(), "444444444444444444".into())));
         assert!(roles.contains(&("levelRoles[1]".into(), "555555555555555555".into())));
+    }
+
+    #[test]
+    fn preflight_ignored_channels_do_not_require_delivery_permissions() {
+        let snapshot = DiscordGuildSnapshot {
+            bot_user_id: Some("bot".into()),
+            bot_role_ids: vec!["bot-role".into()],
+            channels: vec![serde_json::json!({
+                "id": "123",
+                "permission_overwrites": [{"id":"guild", "type":0, "allow":"0", "deny":"2048"}]
+            })],
+            ..Default::default()
+        };
+        let dependencies = vec!["send_messages".into()];
+        for path in ["ignoredChannels[0]", "rules[0].ignoredChannels[1]"] {
+            assert!(
+                channel_dependency_issues(
+                    "guild",
+                    &snapshot,
+                    2048,
+                    &dependencies,
+                    &BTreeSet::from([(path.into(), "123".into())]),
+                )
+                .is_empty(),
+                "{path} is an exclusion, not a destination"
+            );
+        }
+        // The very same channel still needs permission when used for delivery.
+        for path in ["channelId", "logChannel", "targetChannelId"] {
+            let issues = channel_dependency_issues(
+                "guild",
+                &snapshot,
+                2048,
+                &dependencies,
+                &BTreeSet::from([(path.into(), "123".into())]),
+            );
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0].code, "missing_channel_permission");
+        }
     }
 
     #[tokio::test]
@@ -11941,6 +12029,12 @@ mod tests {
         let session = claims("guild-a");
         let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
         store.save_session(&session).unwrap();
+        store
+            .replace_session_guilds(
+                session.session_id,
+                &[("guild-a".into(), "Alpha".into(), Some("0".into()))],
+            )
+            .unwrap();
         // Simulate a rolling-deploy/legacy row that says a blocked provider
         // is enabled.  The catalogue must surface the dependency failure
         // rather than reporting the feature as merely disabled.
@@ -12094,13 +12188,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+        assert!(
             store
                 .get_setting("guild-a", "feature.community.levels")
                 .unwrap()
-                .as_deref(),
-            Some("true")
+                .is_none()
         );
 
         let response = router(state(store.clone()))
@@ -12140,13 +12233,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+        assert!(
             store
                 .get_setting("guild-a", "feature.management.workflows")
                 .unwrap()
-                .as_deref(),
-            Some("true")
+                .is_none()
         );
 
         let response = router(state(store.clone()))
@@ -12338,6 +12430,45 @@ mod tests {
         assert!(preview.contains("alice"));
         assert!(!preview.contains("999"));
         assert!(preview.contains("Excluded 1 member"));
+    }
+
+    #[tokio::test]
+    async fn feature_toggle_cannot_bypass_publish_preflight() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        store
+            .replace_session_guilds(
+                session.session_id,
+                &[("guild-a".into(), "Alpha".into(), Some("0".into()))],
+            )
+            .unwrap();
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config/features")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"key":"support.tickets","enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+        assert!(
+            store
+                .get_feature_setting("guild-a", "support.tickets")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get_setting("guild-a", "feature.support.tickets")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
