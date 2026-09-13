@@ -8437,6 +8437,14 @@ impl Handler {
                 let title = setting_string(&self.store, &guild_text, "support.ticket.panel_title")
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or_else(|| "Need support?".to_string());
+                let panel_channel = setting_string(&self.store, &guild_text, "support.ticket.panel_channel_id")
+                    .and_then(|id| id.parse::<u64>().ok())
+                    .filter(|id| *id > 0)
+                    .map(serenity::all::ChannelId::new)
+                    .unwrap_or(command.channel_id);
+                if !matches!(panel_channel.to_channel(&ctx.http).await?, serenity::all::Channel::Guild(ref channel) if channel.guild_id == guild_id) {
+                    return respond(ctx, command, "Choose a ticket panel channel in this server.").await;
+                }
                 let description = setting_string(
                     &self.store,
                     &guild_text,
@@ -8446,8 +8454,7 @@ impl Handler {
                 .unwrap_or_else(|| {
                     "Open a private ticket and the support team will help you.".to_string()
                 });
-                let message = command
-                    .channel_id
+                let message = panel_channel
                     .send_message(
                         &ctx.http,
                         serenity::all::CreateMessage::new()
@@ -8469,12 +8476,12 @@ impl Handler {
                     &guild_text,
                     &format!("support.panel.{}", message.id),
                     &serde_json::json!({
-                        "channel_id": command.channel_id,
+                        "channel_id": panel_channel,
                         "message_id": message.id
                     })
                     .to_string(),
                 )?;
-                format!("Ticket panel created in <#{}>.", command.channel_id)
+                format!("Ticket panel created in <#{}>.", panel_channel)
             }
             "ticket-update" => {
                 let Some(_guild_id) = command.guild_id else {

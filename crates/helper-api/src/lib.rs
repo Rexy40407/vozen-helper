@@ -2,6 +2,8 @@
 
 #![recursion_limit = "256"]
 
+mod ticket_panel;
+
 use anyhow::Result;
 use axum::{
     Form, Json, Router,
@@ -58,6 +60,7 @@ const HELPER_INSTALL_PERMISSIONS: &str = "84992";
 const SESSION_RESPONSE_HEADER: &str = "x-vozen-session";
 const SESSION_MAX_HOURS: i64 = 8;
 const IDLE_MINUTES: i64 = 30;
+static TICKET_PANEL_SAVE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -8949,6 +8952,11 @@ async fn update_feature_detail(
     Json(update): Json<FeatureDetailUpdate>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_mutation_auth(&state, &headers)?;
+    let _ticket_save_guard = if key == "support.tickets" {
+        Some(TICKET_PANEL_SAVE_LOCK.lock().await)
+    } else {
+        None
+    };
     let Some(_definition) = feature_definition(&key) else {
         return Err(client_error(StatusCode::BAD_REQUEST, "unknown_feature"));
     };
@@ -9218,6 +9226,21 @@ async fn update_feature_detail(
     };
     let discord_apply = if key == "management.nickname" {
         serde_json::json!({"applied": true})
+    } else if key == "support.tickets" && record.enabled {
+        let plan = effective_plan(&state, &claims).await;
+        match ticket_panel::publish(
+            &state.store,
+            &state.discord_token,
+            &claims.guild_id,
+            &update.config,
+            quota_limit(&plan, "panels"),
+            DISCORD_API_BASE,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => serde_json::json!({"applied": false, "code": "ticket_panel_publish_failed"}),
+        }
     } else {
         serde_json::json!(null)
     };

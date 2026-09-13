@@ -5274,6 +5274,7 @@ impl FeatureAdapter for TicketsAdapter {
                     "title": "Support workflow",
                     "description": "Choose the real category, support role, transcript channel and SLA used by ticket interactions.",
                     "fields": [
+                        {"key":"panelChannel","label":"Ticket panel channel","kind":"channel","help":"The public channel for the Open ticket button. Saving publishes or updates the panel in this channel; private tickets are created in the category below. Existing panels in other channels are kept."},
                         {"key":"categoryId","label":"Ticket category","kind":"category","help":"New ticket channels are created inside this category."},
                         {"key":"staffRole","label":"Staff role to notify","kind":"role","help":"The opening message @mentions this role. Its members can view, claim, close and reopen tickets. Make the role mentionable or allow the bot to mention roles. Personal Discord notification settings still apply."},
                         {"key":"transcriptChannel","label":"Transcript channel","kind":"channel","help":"Closed ticket transcripts are sent here."},
@@ -5284,7 +5285,7 @@ impl FeatureAdapter for TicketsAdapter {
                     ]
                 }]
             }),
-            defaults: serde_json::json!({"categoryId":"","staffRole":"","transcriptChannel":"","maxOpen":1,"panelTitle":"Need support?","panelDescription":"Open a private ticket and the support team will help you." ,"closeAfterHours":1}),
+            defaults: serde_json::json!({"panelChannel":"","categoryId":"","staffRole":"","transcriptChannel":"","maxOpen":1,"panelTitle":"Need support?","panelDescription":"Open a private ticket and the support team will help you." ,"closeAfterHours":1}),
             dependencies: vec![
                 "manage_channels".into(),
                 "send_messages".into(),
@@ -5303,7 +5304,12 @@ impl FeatureAdapter for TicketsAdapter {
             }];
         };
         let mut issues = Vec::new();
-        for field in ["categoryId", "staffRole", "transcriptChannel"] {
+        for field in [
+            "panelChannel",
+            "categoryId",
+            "staffRole",
+            "transcriptChannel",
+        ] {
             if let Some(value) = object.get(field)
                 && !(value
                     .as_str()
@@ -5400,6 +5406,7 @@ impl FeatureAdapter for TicketsAdapter {
             pairs.push(("support.ticket.max_open".into(), value.to_string()));
         }
         for (field, setting) in [
+            ("panelChannel", "support.ticket.panel_channel_id"),
             ("panelTitle", "support.ticket.panel_title"),
             ("panelDescription", "support.ticket.panel_description"),
         ] {
@@ -12052,6 +12059,24 @@ mod tests {
         let tickets = feature_adapter("support.tickets").expect("tickets adapter registered");
         assert_eq!(tickets.descriptor().source, "tickets_adapter_v1");
         let descriptor = tickets.descriptor();
+        assert!(
+            descriptor.schema["sections"][0]["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field["key"] == "panelChannel" && field["kind"] == "channel")
+        );
+        assert!(
+            tickets
+                .validate(&serde_json::json!({"panelChannel":"not-an-id"}))
+                .iter()
+                .any(|issue| issue.path == "panelChannel")
+        );
+        assert!(
+            tickets
+                .validate(&serde_json::json!({"panelChannel":"123"}))
+                .is_empty()
+        );
         let staff_field = descriptor.schema["sections"][0]["fields"]
             .as_array()
             .unwrap()

@@ -4044,6 +4044,33 @@ impl Store {
         )? > 0)
     }
 
+    /// Locate a panel created by the legacy slash command without touching
+    /// unrelated messages or using references from another guild.
+    pub fn ticket_panel_message(&self, guild_id: &str, channel_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut statement = conn.prepare("SELECT key,value FROM settings WHERE guild_id=?1 AND key LIKE 'support.panel.%' ORDER BY key")?;
+        for row in statement.query_map([guild_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (key, raw) = row?;
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                continue;
+            };
+            let matches = value["channel_id"].as_str() == Some(channel_id)
+                || value["channel_id"]
+                    .as_u64()
+                    .is_some_and(|id| id.to_string() == channel_id);
+            if matches
+                && let Some(id) = key
+                    .strip_prefix("support.panel.")
+                    .filter(|id| id.parse::<u64>().is_ok_and(|id| id > 0))
+            {
+                return Ok(Some(id.to_string()));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn count_settings_prefix(&self, guild_id: &str, prefix: &str) -> Result<u64> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let pattern = format!("{prefix}%");
