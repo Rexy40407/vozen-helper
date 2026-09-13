@@ -9255,10 +9255,7 @@ impl Handler {
                     &serde_json::json!({"channel_id": channel.id.to_string()}).to_string(),
                 )?;
                 let content = ticket_opening_message(component.user.id, staff_role_id);
-                let mut allowed_mentions = CreateAllowedMentions::new().users([component.user.id]);
-                if let Some(role_id) = staff_role_id {
-                    allowed_mentions = allowed_mentions.roles([role_id]);
-                }
+                let allowed_mentions = ticket_opening_mentions(component.user.id, staff_role_id);
                 channel
                     .id
                     .send_message(
@@ -11756,10 +11753,25 @@ fn ticket_opening_message(
     opener_id: serenity::all::UserId,
     staff_role_id: Option<RoleId>,
 ) -> String {
-    let staff_notice = staff_role_id
-        .map(|role_id| format!("\n<@&{role_id}>, a new ticket needs your attention."))
-        .unwrap_or_default();
-    format!("Hello <@{opener_id}>. Tell us what you need.{staff_notice}")
+    match staff_role_id {
+        Some(role_id) => format!(
+            "Hello <@{opener_id}>! I've called <@&{role_id}> to help you.\nTell us what you need and the support team will reply here."
+        ),
+        None => format!("Hello <@{opener_id}>! Tell us what you need."),
+    }
+}
+
+fn ticket_opening_mentions(
+    opener_id: serenity::all::UserId,
+    staff_role_id: Option<RoleId>,
+) -> CreateAllowedMentions {
+    CreateAllowedMentions::new()
+        .everyone(false)
+        .all_roles(false)
+        .all_users(false)
+        .users([opener_id])
+        .roles(staff_role_id)
+        .replied_user(false)
 }
 
 fn ticket_member_is_staff(
@@ -13073,10 +13085,27 @@ mod tests {
         );
         assert!(message.contains("<@7>"));
         assert!(message.contains("<@&9>"));
+        assert!(message.contains("I've called"));
+        assert!(!message.contains("@everyone"));
 
         let message_without_staff = ticket_opening_message(serenity::all::UserId::new(7), None);
         assert!(message_without_staff.contains("<@7>"));
         assert!(!message_without_staff.contains("<@&"));
+        assert!(!message_without_staff.contains("I've called"));
+        let mentions = serde_json::to_value(super::ticket_opening_mentions(
+            serenity::all::UserId::new(7),
+            Some(serenity::all::RoleId::new(9)),
+        ))
+        .unwrap();
+        assert_eq!(mentions["users"], serde_json::json!(["7"]));
+        assert_eq!(mentions["roles"], serde_json::json!(["9"]));
+        assert_eq!(mentions["parse"], serde_json::json!([]));
+        let no_staff = serde_json::to_value(super::ticket_opening_mentions(
+            serenity::all::UserId::new(7),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(no_staff["roles"], serde_json::json!([]));
     }
 
     #[test]

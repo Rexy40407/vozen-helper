@@ -5275,7 +5275,7 @@ impl FeatureAdapter for TicketsAdapter {
                     "description": "Choose the real category, support role, transcript channel and SLA used by ticket interactions.",
                     "fields": [
                         {"key":"categoryId","label":"Ticket category","kind":"category","help":"New ticket channels are created inside this category."},
-                        {"key":"staffRole","label":"Support team role","kind":"role","help":"This role can claim, close and reopen tickets."},
+                        {"key":"staffRole","label":"Staff role to notify","kind":"role","help":"The opening message @mentions this role. Its members can view, claim, close and reopen tickets. Make the role mentionable or allow the bot to mention roles. Personal Discord notification settings still apply."},
                         {"key":"transcriptChannel","label":"Transcript channel","kind":"channel","help":"Closed ticket transcripts are sent here."},
                         {"key":"maxOpen","label":"Open tickets per member","kind":"number","min":1,"max":10,"help":"Limit the number of simultaneous tickets one member can open."},
                         {"key":"panelTitle","label":"Panel title","kind":"text","min":1,"max":100},
@@ -12051,6 +12051,15 @@ mod tests {
     fn existing_discord_modules_have_runtime_owned_panel_contracts() {
         let tickets = feature_adapter("support.tickets").expect("tickets adapter registered");
         assert_eq!(tickets.descriptor().source, "tickets_adapter_v1");
+        let descriptor = tickets.descriptor();
+        let staff_field = descriptor.schema["sections"][0]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["key"] == "staffRole")
+            .unwrap();
+        assert_eq!(staff_field["label"], "Staff role to notify");
+        assert!(staff_field["help"].as_str().unwrap().contains("@mentions"));
         assert!(
             tickets
                 .validate(&serde_json::json!({"closeAfterHours": 0}))

@@ -5537,6 +5537,40 @@ fn add_dependency_issue(
     });
 }
 
+fn ticket_staff_notification_issues(
+    guild_id: &str,
+    config: &serde_json::Value,
+    roles: &[serde_json::Value],
+    bot_permissions: u64,
+) -> Vec<ValidationIssue> {
+    let mut issues = Vec::new();
+    let role_id = config
+        .get("staffRole")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if role_id.is_empty() {
+        add_dependency_issue(&mut issues, "staffRole".into(), "staff_role_missing",
+            "No staff role is selected. Tickets will open without notifying a team. Choose the staff role to notify.".into(), "warning");
+    } else if role_id == guild_id {
+        add_dependency_issue(
+            &mut issues,
+            "staffRole".into(),
+            "everyone_not_allowed",
+            "Choose a staff role other than @everyone to keep tickets private.".into(),
+            "error",
+        );
+    } else if let Some(role) = roles
+        .iter()
+        .find(|role| role["id"].as_str() == Some(role_id))
+        && !role["mentionable"].as_bool().unwrap_or(false)
+        && !permission_bitfield_has(bot_permissions, 17)
+    {
+        add_dependency_issue(&mut issues, "staffRole".into(), "staff_role_not_mentionable",
+            "The selected staff role cannot receive role pings from the Helper. Make the role mentionable in Discord or grant the Helper permission to mention roles. Members' personal notification settings still apply.".into(), "warning");
+    }
+    issues
+}
+
 fn role_hierarchy_issues(
     guild_id: &str,
     bot_role_ids: &[String],
@@ -5838,6 +5872,16 @@ async fn generic_feature_preflight(
                 "error",
             );
         }
+    }
+
+    if request.enabled && key == "support.tickets" && snapshot.roles_ready && bot_context_available
+    {
+        issues.extend(ticket_staff_notification_issues(
+            &claims.guild_id,
+            &request.config,
+            &snapshot.roles,
+            bot_permissions.unwrap_or(0),
+        ));
     }
 
     // A role can exist and still be unusable: Discord only lets the bot
@@ -11478,6 +11522,38 @@ pub async fn serve(bind_addr: &str, state: ApiState) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ticket_staff_notification_preflight_checks_role_and_mention_permission() {
+        let roles = vec![serde_json::json!({"id":"9","mentionable":false,"position":100})];
+        let config = serde_json::json!({"staffRole":"9"});
+        let issues = ticket_staff_notification_issues("1", &config, &roles, 0);
+        assert_eq!(issues[0].code, "staff_role_not_mentionable");
+        assert_eq!(issues[0].severity, "warning");
+        assert!(ticket_staff_notification_issues("1", &config, &roles, 1 << 17).is_empty());
+        assert!(ticket_staff_notification_issues("1", &config, &roles, 1 << 3).is_empty());
+        let mentionable = vec![serde_json::json!({"id":"9","mentionable":true})];
+        assert!(ticket_staff_notification_issues("1", &config, &mentionable, 0).is_empty());
+        assert_eq!(
+            ticket_staff_notification_issues(
+                "1",
+                &serde_json::json!({"staffRole":"1"}),
+                &roles,
+                u64::MAX
+            )[0]
+            .severity,
+            "error"
+        );
+        assert_eq!(
+            ticket_staff_notification_issues("1", &serde_json::json!({"staffRole":""}), &roles, 0)
+                [0]
+            .code,
+            "staff_role_missing"
+        );
+        assert_eq!(
+            ticket_staff_notification_issues("1", &serde_json::json!({}), &roles, 0)[0].code,
+            "staff_role_missing"
+        );
+    }
     use axum::{
         body::{Body, to_bytes},
         http::Request,
