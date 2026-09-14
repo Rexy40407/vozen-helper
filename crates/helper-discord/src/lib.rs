@@ -2484,7 +2484,11 @@ impl EventHandler for Handler {
                 let _ = new_member.add_role(&ctx.http, RoleId::new(role_id)).await;
             }
         }
-        let welcome_claimed = feature_enabled(&self.store, &guild_text, "support.welcome", None)
+        let (welcome_enabled, welcome) = self
+            .store
+            .welcome_configuration(&guild_text)
+            .unwrap_or((false, serde_json::json!({})));
+        let welcome_claimed = welcome_enabled
             && self
                 .store
                 .claim_welcome_delivery(
@@ -2497,182 +2501,122 @@ impl EventHandler for Handler {
                 .unwrap_or(false);
         if welcome_claimed {
             let member_mention = format!("<@{}>", new_member.user.id);
-            let delay_seconds =
-                setting_u64(&self.store, &guild_text, "support.welcome.delay_seconds", 0).min(300);
-            if delay_seconds > 0 {
-                tokio::time::sleep(Duration::from_secs(delay_seconds)).await;
+            let delay = welcome["delaySeconds"].as_u64().unwrap_or(0).min(300);
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_secs(delay)).await;
             }
-            if let Some(role_id) =
-                setting_u64_optional(&self.store, &guild_text, "support.welcome.auto_role")
+            if let Some(role) = welcome["autoRole"]
+                .as_str()
+                .and_then(|id| id.parse::<u64>().ok())
+                .filter(|id| *id > 0)
             {
-                let _ = new_member.add_role(&ctx.http, RoleId::new(role_id)).await;
+                let _ = new_member.add_role(&ctx.http, RoleId::new(role)).await;
             }
-            let message_template =
-                setting_string(&self.store, &guild_text, "support.welcome.message")
-                    .map(|message| {
-                        template_message(
-                            &self.store,
-                            &guild_text,
-                            "support.welcome.template_id",
-                            "welcome",
-                            message,
-                        )
-                    })
-                    .unwrap_or_else(|| "👋 Welcome to the server, {member}!".to_string())
-                    .replace("{member}", &member_mention)
-                    .replace("{server}", "this server");
-            let message = render_member_message(&message_template, &member_mention, "this server");
-            let fallback_channel = guild_id
-                .to_partial_guild(&ctx.http)
-                .await
-                .ok()
-                .and_then(|guild| guild.system_channel_id);
-            let channel =
-                setting_u64_optional(&self.store, &guild_text, "support.welcome.channel_id")
-                    .map(ChannelId::new)
-                    .or(fallback_channel);
-            if let Some(channel_id) = channel {
-                let _ = channel_id.say(&ctx.http, message).await;
-            }
-            if setting_bool(&self.store, &guild_text, "support.welcome.send_dm", false) {
-                let dm_template =
-                    setting_string(&self.store, &guild_text, "support.welcome.dm_message")
-                        .map(|message| {
-                            template_message(
-                                &self.store,
-                                &guild_text,
-                                "support.welcome.template_id",
-                                "dm",
-                                message,
-                            )
-                        })
-                        .unwrap_or_else(|| "Hello {member}, welcome to the server!".to_string())
-                        .replace("{member}", &member_mention)
-                        .replace("{server}", "this server");
-                let dm = render_member_message(&dm_template, &member_mention, "this server");
-                let _ = new_member
-                    .user
-                    .direct_message(&ctx.http, serenity::all::CreateMessage::new().content(dm))
-                    .await;
-            }
-        }
-        let guided_welcome_claimed =
-            feature_enabled(&self.store, &guild_text, "support.welcome_channel", None)
-                && self
-                    .store
-                    .claim_welcome_delivery(
-                        &guild_text,
-                        &new_member.user.id.to_string(),
-                        "guided_channel",
-                        chrono::Utc::now().timestamp(),
-                        600,
-                    )
-                    .unwrap_or(false);
-        if guided_welcome_claimed
-            && let Some(channel_id) = setting_u64_optional(
+            let guild = guild_id.to_partial_guild(&ctx.http).await.ok();
+            let server_name = guild
+                .as_ref()
+                .map(|g| g.name.as_str())
+                .unwrap_or("this server");
+            let channel = welcome["channel"]
+                .as_str()
+                .and_then(|id| id.parse::<u64>().ok())
+                .filter(|id| *id > 0)
+                .map(ChannelId::new)
+                .or_else(|| guild.as_ref().and_then(|g| g.system_channel_id));
+            let public_text = unified_welcome_text(
                 &self.store,
                 &guild_text,
-                "support.welcome_channel.channel_id",
-            )
-        {
-            let member_mention = format!("<@{}>", new_member.user.id);
-            let guide = setting_string(
-                &self.store,
-                &guild_text,
-                "support.welcome_channel.message",
-            )
-            .unwrap_or_else(|| {
-                "Welcome {member}! Start with the rules, introduce yourself and check the server channels.".to_string()
-            });
-            let guide_template = template_message(
-                &self.store,
-                &guild_text,
-                "support.welcome_channel.template_id",
-                "welcomeChannel",
-                guide,
+                &welcome,
+                "welcome",
+                "Welcome {member} to {server}!",
             );
-            let configured_steps =
-                setting_string(&self.store, &guild_text, "support.welcome_channel.steps")
-                    .unwrap_or_else(|| "rules,introductions,channels".to_string());
-            let steps = configured_steps
-                .split(',')
-                .map(str::trim)
-                .filter(|step| !step.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            let decision = evaluate_welcome_channel(
+            let guided = welcome["guideEnabled"].as_bool().unwrap_or_else(|| {
+                setting_bool(
+                    &self.store,
+                    &guild_text,
+                    "support.welcome.guide_enabled",
+                    false,
+                )
+            });
+            let guide = evaluate_welcome_channel(
                 &serde_json::json!({
-                    "channelId": channel_id.to_string(),
-                    "message": guide_template,
-                    "steps": steps,
+                    "channelId": channel.map(|id| id.to_string()).unwrap_or_default(),
+                    "message": public_text, "steps": welcome.get("steps").cloned().unwrap_or(serde_json::json!(["rules","introductions","channels"]))
                 }),
                 &member_mention,
-                "this server",
+                server_name,
             );
-            if !decision.allowed {
+            if let Some(channel_id) = channel {
+                let mut message = CreateMessage::new()
+                    .content(render_member_message(
+                        &public_text,
+                        &member_mention,
+                        server_name,
+                    ))
+                    .allowed_mentions(
+                        CreateAllowedMentions::new()
+                            .everyone(false)
+                            .empty_roles()
+                            .users(vec![new_member.user.id]),
+                    );
+                if guided && guide.allowed {
+                    let buttons = guide
+                        .steps
+                        .iter()
+                        .map(|step| {
+                            let label = match step.as_str() {
+                                "rules" => "Read the rules",
+                                "introductions" => "Introduce yourself",
+                                "channels" => "Explore channels",
+                                "help" => "Get help",
+                                _ => "Continue",
+                            };
+                            CreateButton::new(format!("welcome:step:{guild_text}:{step}"))
+                                .label(label)
+                                .style(ButtonStyle::Secondary)
+                        })
+                        .collect::<Vec<_>>();
+                    if !buttons.is_empty() {
+                        message = message.components(vec![CreateActionRow::Buttons(buttons)]);
+                    }
+                }
+                let delivery = channel_id.send_message(&ctx.http, message).await;
                 let _ = self.store.record_activity(
                     &guild_text,
-                    "welcome_channel_delivery_failed",
+                    if delivery.is_ok() {
+                        "welcome_delivery"
+                    } else {
+                        "welcome_delivery_failed"
+                    },
                     &new_member.user.id.to_string(),
                     Some(&new_member.user.name),
                     Some(&channel_id.to_string()),
-                    &serde_json::json!({
-                        "channelId": channel_id,
-                        "outcome": "invalid_configuration",
-                        "reason": decision.reason_code,
-                    })
-                    .to_string(),
+                    &serde_json::json!({"guided":guided,"sent":delivery.is_ok()}).to_string(),
                 );
-                return;
             }
-            let buttons = decision
-                .steps
-                .iter()
-                .map(|step| {
-                    let label = match step.as_str() {
-                        "rules" => "Read the rules",
-                        "introductions" => "Introduce yourself",
-                        "channels" => "Explore channels",
-                        "help" => "Get help",
-                        _ => "Continue",
-                    };
-                    CreateButton::new(format!("welcome:step:{guild_text}:{step}"))
-                        .label(label)
-                        .style(ButtonStyle::Secondary)
-                })
-                .collect::<Vec<_>>();
-            let mut message = CreateMessage::new().content(decision.message);
-            if !buttons.is_empty() {
-                message = message.components(vec![CreateActionRow::Buttons(buttons)]);
+            if welcome["sendDm"].as_bool().unwrap_or(false) {
+                let text = unified_welcome_text(
+                    &self.store,
+                    &guild_text,
+                    &welcome,
+                    "dm",
+                    "Hello {member}, welcome to {server}!",
+                );
+                let _ = new_member
+                    .user
+                    .direct_message(
+                        &ctx.http,
+                        CreateMessage::new()
+                            .content(render_member_message(&text, &member_mention, server_name))
+                            .allowed_mentions(
+                                CreateAllowedMentions::new()
+                                    .everyone(false)
+                                    .empty_roles()
+                                    .empty_users(),
+                            ),
+                    )
+                    .await;
             }
-            let delivery = ChannelId::new(channel_id)
-                .send_message(&ctx.http, message)
-                .await;
-            let (kind, detail) = match delivery {
-                Ok(sent) => (
-                    "welcome_channel_delivery",
-                    serde_json::json!({
-                        "channelId": channel_id,
-                        "messageId": sent.id.to_string(),
-                        "outcome": "sent"
-                    }),
-                ),
-                Err(_) => (
-                    "welcome_channel_delivery_failed",
-                    serde_json::json!({
-                        "channelId": channel_id,
-                        "outcome": "failed"
-                    }),
-                ),
-            };
-            let _ = self.store.record_activity(
-                &guild_text,
-                kind,
-                &new_member.user.id.to_string(),
-                Some(&new_member.user.name),
-                None,
-                &detail.to_string(),
-            );
         }
     }
 
@@ -2710,35 +2654,43 @@ impl EventHandler for Handler {
                     .await;
             }
         }
-        if feature_enabled(&self.store, &guild_text, "support.welcome", None) {
-            let farewell_template =
-                setting_string(&self.store, &guild_text, "support.welcome.farewell_message")
-                    .map(|message| {
-                        template_message(
-                            &self.store,
-                            &guild_text,
-                            "support.welcome.template_id",
-                            "farewell",
-                            message,
-                        )
-                    })
-                    .unwrap_or_else(|| "Goodbye {member}. We hope to see you again!".to_string())
-                    .replace("{member}", &user.name)
-                    .replace("{server}", "this server");
-            let farewell = render_member_message(&farewell_template, &user.name, "this server");
-            let channel = setting_u64_optional(
+        let (welcome_enabled, welcome) = self
+            .store
+            .welcome_configuration(&guild_text)
+            .unwrap_or((false, serde_json::json!({})));
+        if welcome_enabled && welcome["farewellMessage"].as_str() != Some("") {
+            let text = unified_welcome_text(
                 &self.store,
                 &guild_text,
-                "support.welcome.farewell_channel_id",
-            )
-            .map(ChannelId::new);
-            let fallback_channel = guild_id
-                .to_partial_guild(&ctx.http)
-                .await
-                .ok()
-                .and_then(|guild| guild.system_channel_id);
-            if let Some(channel_id) = channel.or(fallback_channel) {
-                let _ = channel_id.say(&ctx.http, farewell).await;
+                &welcome,
+                "farewell",
+                "Goodbye {member}. We hope to see you again!",
+            );
+            let guild = guild_id.to_partial_guild(&ctx.http).await.ok();
+            let server_name = guild
+                .as_ref()
+                .map(|g| g.name.as_str())
+                .unwrap_or("this server");
+            let channel = welcome["farewellChannel"]
+                .as_str()
+                .and_then(|id| id.parse::<u64>().ok())
+                .filter(|id| *id > 0)
+                .map(ChannelId::new)
+                .or_else(|| guild.as_ref().and_then(|g| g.system_channel_id));
+            if let Some(channel_id) = channel {
+                let _ = channel_id
+                    .send_message(
+                        &ctx.http,
+                        CreateMessage::new()
+                            .content(render_member_message(&text, &user.name, server_name))
+                            .allowed_mentions(
+                                CreateAllowedMentions::new()
+                                    .everyone(false)
+                                    .empty_roles()
+                                    .empty_users(),
+                            ),
+                    )
+                    .await;
             }
         }
         if let Ok(deleted) = self
@@ -9103,12 +9055,11 @@ impl Handler {
                 return respond_component(ctx, component, "This welcome guide is no longer valid.")
                     .await;
             }
-            if !feature_enabled(
-                &self.store,
-                &guild_id.to_string(),
-                "support.welcome_channel",
-                None,
-            ) {
+            let (enabled, welcome) = self
+                .store
+                .welcome_configuration(&guild_id.to_string())
+                .unwrap_or((false, serde_json::json!({})));
+            if !enabled || welcome["guideEnabled"].as_bool() != Some(true) {
                 return respond_component(
                     ctx,
                     component,
@@ -9117,15 +9068,14 @@ impl Handler {
                 .await;
             }
             let setting = match step {
-                "rules" => "support.welcome_channel.rules_channel",
-                "introductions" => "support.welcome_channel.introductions_channel",
-                "channels" => "support.welcome_channel.channels_channel",
+                "rules" => "rulesChannel",
+                "introductions" => "introductionsChannel",
+                "channels" => "channelsChannel",
                 "help" => "",
                 _ => unreachable!(),
             };
-            let destination = (!setting.is_empty())
-                .then(|| setting_string(&self.store, &guild_id.to_string(), setting))
-                .flatten()
+            let destination = welcome[setting]
+                .as_str()
                 .and_then(|value| value.parse::<u64>().ok())
                 .map(|id| format!(" <#{}>", id))
                 .unwrap_or_default();
@@ -11380,6 +11330,12 @@ async fn refresh_invite_snapshots(
 }
 
 fn feature_enabled(store: &Store, guild_id: &str, key: &str, legacy_key: Option<&str>) -> bool {
+    if key == "support.welcome" {
+        return store
+            .welcome_configuration(guild_id)
+            .map(|value| value.0)
+            .unwrap_or(false);
+    }
     // A legacy or manually inserted setting must not bypass the canonical
     // lifecycle.  In particular, provider features marked blocked stay off
     // until their official credentials/approvals are available.
@@ -11720,39 +11676,40 @@ fn setting_string(store: &Store, guild_id: &str, key: &str) -> Option<String> {
 /// into Discord. Templates are opt-in through the templates feature and only
 /// bounded string fields are accepted. Missing or malformed templates fall
 /// back to the feature's own configured message.
-fn template_message(
+fn unified_welcome_text(
     store: &Store,
-    guild_id: &str,
-    template_setting_key: &str,
+    guild: &str,
+    config: &serde_json::Value,
     slot: &str,
-    fallback: String,
+    fallback: &str,
 ) -> String {
-    // A template reference is only active when the Templates feature is
-    // enabled for this guild.  Without this guard, disabling the feature in
-    // the panel would leave previously selected templates affecting welcome
-    // and provider messages, which makes the toggle misleading.
-    // The revisioned feature toggle is the primary source of truth.  The
-    // projection is checked as a compatibility guard as well, so a stale or
-    // manually edited projection can never leave an old template active after
-    // the owner disables the feature in the panel.
-    if !feature_enabled(store, guild_id, "management.templates", None)
-        || !setting_bool(store, guild_id, "management.templates.enabled", true)
+    let field = match slot {
+        "dm" => "dmMessage",
+        "farewell" => "farewellMessage",
+        _ => "message",
+    };
+    let fallback = config[field].as_str().unwrap_or(fallback).to_string();
+    if !feature_enabled(store, guild, "management.templates", None)
+        || !setting_bool(store, guild, "management.templates.enabled", true)
     {
         return fallback;
     }
-    let Some(template_id) = setting_string(store, guild_id, template_setting_key)
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let Some(id) = config["templateId"].as_str().filter(|id| !id.is_empty()) else {
         return fallback;
     };
-    let raw = setting_string(store, guild_id, &format!("studio.template.{template_id}"));
-    let Some(raw) = raw else { return fallback };
-    let Ok(template) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    let template = store
+        .get_setting(guild, &format!("studio.template.{id}"))
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    let Some(template) = template else {
         return fallback;
     };
-    // Keep the gateway and API simulation on the same bounded renderer. This
-    // prevents a template that previews safely from behaving differently in
-    // Discord after publication.
+    let fallback = if slot == "welcome" {
+        render_bounded_template_message(&template, "welcomeChannel", &fallback)
+    } else {
+        fallback
+    };
     render_bounded_template_message(&template, slot, &fallback)
 }
 
@@ -12750,8 +12707,8 @@ mod tests {
         parse_reminder_delay, parse_scheduled_event_window, permission_passport_message,
         reminder_repeat_interval_ms, render_custom_command, rss_retry_seconds,
         scheduled_action_feature, shadow_mode_enabled, should_cleanup_temp_channel,
-        should_clear_anti_spam_timeout, template_message, ticket_member_is_staff,
-        ticket_opening_message,
+        should_clear_anti_spam_timeout, ticket_member_is_staff, ticket_opening_message,
+        unified_welcome_text,
     };
     use chrono::TimeZone;
     use helper_store::Store;
@@ -13180,6 +13137,11 @@ mod tests {
             // the complete provider path instead of demanding a dead string
             // lookup in the gateway crate.
             let dedicated_provider_consumer = match *key {
+                "support.welcome" | "support.welcome_channel" => {
+                    source.contains(".welcome_configuration(")
+                        && include_str!("../../helper-store/src/welcome.rs")
+                            .contains("fn welcome_variant(")
+                }
                 "social.youtube" => {
                     api_source.contains("publish_youtube_feature_setting")
                         && store_source.contains("due_youtube_subscriptions")
@@ -13597,12 +13559,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            template_message(
+            unified_welcome_text(
                 &store,
                 "guild",
-                "support.welcome.template_id",
+                &serde_json::json!({"templateId":"welcome-1"}),
                 "welcome",
-                "fallback".into()
+                "fallback"
             ),
             "Hello {member}, @\u{200b}everyone"
         );
@@ -13612,12 +13574,12 @@ mod tests {
             .set_setting("guild", "management.templates.enabled", "false")
             .unwrap();
         assert_eq!(
-            template_message(
+            unified_welcome_text(
                 &store,
                 "guild",
-                "support.welcome.template_id",
+                &serde_json::json!({"templateId":"welcome-1"}),
                 "welcome",
-                "fallback".into()
+                "fallback"
             ),
             "fallback"
         );
@@ -13632,12 +13594,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            template_message(
+            unified_welcome_text(
                 &store,
                 "guild",
-                "support.welcome.template_id",
+                &serde_json::json!({"templateId":"welcome-1"}),
                 "welcome",
-                "fallback".into()
+                "fallback"
             ),
             "fallback"
         );
@@ -13645,12 +13607,12 @@ mod tests {
             .set_setting("guild", "feature.management.templates", "false")
             .unwrap();
         assert_eq!(
-            template_message(
+            unified_welcome_text(
                 &store,
                 "guild",
-                "support.welcome.template_id",
+                &serde_json::json!({"templateId":"welcome-1"}),
                 "welcome",
-                "fallback".into()
+                "fallback"
             ),
             "fallback"
         );

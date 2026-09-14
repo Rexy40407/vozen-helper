@@ -1,6 +1,7 @@
 //! SQLite persistence with an intentionally small, auditable surface.
 
 mod growth_lifecycle;
+mod welcome;
 pub use growth_lifecycle::{GrowthDailyMetric, GrowthOverview, growth_source};
 mod topgg_sync;
 pub use topgg_sync::{TopggSyncDetail, TopggSyncStatus};
@@ -2077,6 +2078,9 @@ impl Store {
         }
         let next_revision = current_revision.saturating_add(1);
         let now = Utc::now().timestamp_millis();
+        if key == "support.welcome" {
+            tx.execute("INSERT INTO settings(guild_id,key,value,updated_at) VALUES(?1,'support.welcome.unified','true',?2) ON CONFLICT(guild_id,key) DO UPDATE SET value='true',updated_at=excluded.updated_at", params![guild_id, now])?;
+        }
         tx.execute(
             "INSERT INTO feature_settings(guild_id,key,enabled,config_json,revision,updated_at,updated_by) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(guild_id,key) DO UPDATE SET enabled=excluded.enabled,config_json=excluded.config_json,revision=excluded.revision,updated_at=excluded.updated_at,updated_by=excluded.updated_by",
             params![guild_id, key, if enabled { 1_i64 } else { 0_i64 }, config_json, i64::try_from(next_revision).unwrap_or(i64::MAX), now, updated_by],

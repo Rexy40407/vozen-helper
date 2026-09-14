@@ -5465,6 +5465,11 @@ impl FeatureAdapter for WelcomeAdapter {
                         {"key":"message","label":"Public message","kind":"textarea","maxLength":2000,"help":"Variables: {member} and {server}."},
                         {"key":"delaySeconds","label":"Delay before sending (seconds)","kind":"number","min":0,"max":300,"advanced":true},
                         {"key":"sendDm","label":"Send a direct message","kind":"toggle"},
+                        {"key":"guideEnabled","label":"Add orientation buttons","kind":"toggle","help":"Add rules, introductions, channels and help buttons to the same welcome message."},
+                        {"key":"steps","label":"Guided steps","kind":"tags","max":4,"help":"Choose from rules, introductions, channels and help.","advanced":true},
+                        {"key":"rulesChannel","label":"Rules channel (optional)","kind":"channel","advanced":true},
+                        {"key":"introductionsChannel","label":"Introductions channel (optional)","kind":"channel","advanced":true},
+                        {"key":"channelsChannel","label":"Channels guide (optional)","kind":"channel","advanced":true},
                         {"key":"dmMessage","label":"Direct message","kind":"textarea","maxLength":2000,"advanced":true},
                         {"key":"autoRole","label":"Automatic role","kind":"role","advanced":true},
                         {"key":"farewellChannel","label":"Farewell channel","kind":"channel","advanced":true},
@@ -5473,7 +5478,7 @@ impl FeatureAdapter for WelcomeAdapter {
                     ]
                 }]
             }),
-            defaults: serde_json::json!({"channel":"","message":"Welcome {member} to {server}!","delaySeconds":0,"sendDm":false,"dmMessage":"Hello {member}, welcome to {server}!","autoRole":"","farewellChannel":"","farewellMessage":"Goodbye {member}. We hope to see you again!","templateId":""}),
+            defaults: serde_json::json!({"channel":"","message":"Welcome {member} to {server}!","delaySeconds":0,"sendDm":false,"dmMessage":"Hello {member}, welcome to {server}!","autoRole":"","farewellChannel":"","farewellMessage":"Goodbye {member}. We hope to see you again!","templateId":"","guideEnabled":false,"steps":["rules","introductions","channels"],"rulesChannel":"","introductionsChannel":"","channelsChannel":""}),
             dependencies: vec![
                 "guild_members_intent".into(),
                 "send_messages".into(),
@@ -5505,6 +5510,28 @@ impl FeatureAdapter for WelcomeAdapter {
                     severity: "error".into(),
                 });
             }
+        }
+        issues.extend(
+            WelcomeChannelAdapter
+                .validate(config)
+                .into_iter()
+                .filter(|issue| {
+                    matches!(
+                        issue.path.as_str(),
+                        "steps" | "rulesChannel" | "introductionsChannel" | "channelsChannel"
+                    )
+                }),
+        );
+        if object
+            .get("guideEnabled")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "guideEnabled".into(),
+                code: "boolean_required".into(),
+                message: "Orientation buttons must be enabled or disabled.".into(),
+                severity: "error".into(),
+            });
         }
         for field in ["message", "dmMessage", "farewellMessage"] {
             if object.get(field).is_some_and(|value| {
@@ -5569,6 +5596,15 @@ impl FeatureAdapter for WelcomeAdapter {
             ("farewellChannel", "support.welcome.farewell_channel_id"),
             ("farewellMessage", "support.welcome.farewell_message"),
             ("templateId", "support.welcome.template_id"),
+            ("rulesChannel", "support.welcome_channel.rules_channel"),
+            (
+                "introductionsChannel",
+                "support.welcome_channel.introductions_channel",
+            ),
+            (
+                "channelsChannel",
+                "support.welcome_channel.channels_channel",
+            ),
         ] {
             if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
                 pairs.push((key.into(), value.into()));
@@ -5576,6 +5612,22 @@ impl FeatureAdapter for WelcomeAdapter {
         }
         if let Some(value) = object.get("sendDm").and_then(serde_json::Value::as_bool) {
             pairs.push(("support.welcome.send_dm".into(), value.to_string()));
+        }
+        if let Some(value) = object
+            .get("guideEnabled")
+            .and_then(serde_json::Value::as_bool)
+        {
+            pairs.push(("support.welcome.guide_enabled".into(), value.to_string()));
+        }
+        if let Some(steps) = object.get("steps").and_then(serde_json::Value::as_array) {
+            pairs.push((
+                "support.welcome_channel.steps".into(),
+                steps
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ));
         }
         if let Some(value) = object
             .get("delaySeconds")
@@ -5602,6 +5654,9 @@ impl FeatureAdapter for WelcomeAdapter {
         let mut effects = vec![format!(
             "Send the welcome message `{rendered}` after {delay} second(s)."
         )];
+        if config["guideEnabled"].as_bool() == Some(true) {
+            effects.push("Attach orientation buttons to that same message; do not send a second public welcome.".into());
+        }
         if config
             .get("sendDm")
             .and_then(serde_json::Value::as_bool)
@@ -12872,6 +12927,38 @@ mod tests {
             &serde_json::json!({"memberMention": "<@42>"}),
         );
         assert!(preview[0].contains("step button(s)"));
+    }
+
+    #[test]
+    fn unified_welcome_guide_is_optional_and_uses_one_public_message() {
+        let adapter = feature_adapter("support.welcome").unwrap();
+        let mut config = adapter.descriptor().defaults;
+        assert_eq!(config["guideEnabled"], false);
+        config["guideEnabled"] = serde_json::json!(true);
+        assert!(adapter.validate(&config).is_empty());
+        let effects = adapter.simulate(&config, &serde_json::json!({}));
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| effect.starts_with("Send the welcome message"))
+                .count(),
+            1
+        );
+        assert!(effects.iter().any(|effect| effect.contains("same message")));
+        config["steps"] = serde_json::json!(["rules", "rules"]);
+        assert!(
+            adapter
+                .validate(&config)
+                .iter()
+                .any(|issue| issue.path == "steps")
+        );
+        config["guideEnabled"] = serde_json::json!("yes");
+        assert!(
+            adapter
+                .validate(&config)
+                .iter()
+                .any(|issue| issue.path == "guideEnabled")
+        );
     }
 
     #[test]

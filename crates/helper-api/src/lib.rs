@@ -5693,6 +5693,12 @@ async fn generic_feature_preflight(
     request: FeaturePreflightRequest,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_auth(&state, &headers)?;
+    if key == "support.welcome_channel" {
+        return Err(client_error(
+            StatusCode::GONE,
+            "feature_merged_into_support.welcome",
+        ));
+    }
     let guild = state
         .store
         .session_guilds(claims.session_id)
@@ -7871,6 +7877,7 @@ async fn feature_config(
     let premium_enabled = guild_has_premium(&state, &claims).await;
     let rows = FEATURE_DEFINITIONS
         .iter()
+        .filter(|definition| definition.0 != "support.welcome_channel")
         .map(
             |(key, label, description, category, capability, available)| {
                 let maturity = effective_feature_maturity(&state, key);
@@ -7964,6 +7971,13 @@ fn feature_definition(
 }
 
 fn feature_enabled(state: &ApiState, guild_id: &str, key: &str) -> bool {
+    if key == "support.welcome" {
+        return state
+            .store
+            .welcome_configuration(guild_id)
+            .map(|value| value.0)
+            .unwrap_or(false);
+    }
     // Keep runtime/API checks aligned with the lifecycle registry. A legacy
     // true flag cannot activate a blocked provider or an unknown feature.
     if !feature_configurable_for(state, key) {
@@ -8728,6 +8742,11 @@ async fn feature_detail(
     Path(key): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let claims = require_auth(&state, &headers)?;
+    let key = if key == "support.welcome_channel" {
+        "support.welcome".to_string()
+    } else {
+        key
+    };
     if feature_definition(&key).is_none() {
         return Err(client_error(StatusCode::NOT_FOUND, "unknown_feature"));
     }
@@ -8779,6 +8798,15 @@ async fn feature_detail(
         })
         .unwrap_or_else(|| serde_json::json!({}));
     let maturity = effective_feature_maturity(&state, &key);
+    let config = if key == "support.welcome" {
+        state
+            .store
+            .welcome_configuration(&claims.guild_id)
+            .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+            .1
+    } else {
+        config
+    };
     let mut issues = validate_feature_config(&key, &config);
     issues.extend(lifecycle_issues(&key, maturity));
     let revision = stored.as_ref().map(|value| value.revision).unwrap_or(0);
@@ -9981,6 +10009,15 @@ async fn update_feature_config(
             client_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid_stored_config")
         })?,
         None => feature_defaults(&update.key).unwrap_or_else(|| serde_json::json!({})),
+    };
+    let config = if update.key == "support.welcome" {
+        state
+            .store
+            .welcome_configuration(&claims.guild_id)
+            .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+            .1
+    } else {
+        config
     };
     // A toggle is a publish too: use the same validation, permissions and
     // atomic provider subscription updates as the full configuration route.
@@ -12164,7 +12201,14 @@ mod tests {
         let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["guildId"], "guild-a");
-        assert_eq!(body["features"].as_array().unwrap().len(), 47);
+        assert_eq!(body["features"].as_array().unwrap().len(), 46);
+        assert!(
+            !body["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|feature| feature["key"] == "support.welcome_channel")
+        );
         // Every adapter-backed feature is discoverable.  Provider credentials
         // and approvals affect activation/health, not whether the setup page
         // exists in the catalogue.
@@ -12174,9 +12218,8 @@ mod tests {
             .iter()
             .filter(|item| item["available"].as_bool() == Some(true))
             .count();
-        // All 47 catalogue entries have a real adapter or an explicit legacy
-        // descriptor, so none should disappear behind a stale frontend list.
-        assert_eq!(available_count, 47, "available_count={available_count}");
+        // The legacy welcome guide is now part of the one welcome entry.
+        assert_eq!(available_count, 46, "available_count={available_count}");
         let configurable_count = body["features"]
             .as_array()
             .unwrap()
@@ -12184,7 +12227,7 @@ mod tests {
             .filter(|item| item["configurable"].as_bool() == Some(true))
             .count();
         assert_eq!(
-            configurable_count, 47,
+            configurable_count, 46,
             "configurable_count={configurable_count}"
         );
         let mut keys = body["features"]
@@ -12195,7 +12238,7 @@ mod tests {
             .collect::<Vec<_>>();
         keys.sort_unstable();
         keys.dedup();
-        assert_eq!(keys.len(), 47);
+        assert_eq!(keys.len(), 46);
         let maturity_count = |value: &str| {
             body["features"]
                 .as_array()
@@ -12204,7 +12247,7 @@ mod tests {
                 .filter(|item| item["maturity"] == value)
                 .count()
         };
-        assert_eq!(maturity_count("operational"), 39);
+        assert_eq!(maturity_count("operational"), 38);
         assert_eq!(maturity_count("beta"), 3);
         assert_eq!(maturity_count("blocked"), 5);
         assert_eq!(maturity_count("planned"), 0);
@@ -12397,7 +12440,14 @@ mod tests {
             let body: serde_json::Value =
                 serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
                     .unwrap();
-            assert_eq!(body["key"], *key);
+            assert_eq!(
+                body["key"],
+                if *key == "support.welcome_channel" {
+                    "support.welcome"
+                } else {
+                    *key
+                }
+            );
             assert_eq!(body["configurable"], true, "{key} must remain discoverable");
             assert!(body["schema"].is_object(), "{key} has no schema");
             assert!(body["defaults"].is_object(), "{key} has no defaults");
@@ -12415,6 +12465,77 @@ mod tests {
                 assert_eq!(body["premiumUnlocked"], true);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn unified_welcome_alias_reads_legacy_but_rejects_legacy_writes() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        store
+            .replace_session_guilds(
+                session.session_id,
+                &[("guild-a".into(), "Alpha".into(), Some("8".into()))],
+            )
+            .unwrap();
+        store
+            .set_setting("guild-a", "feature.support.welcome_channel", "true")
+            .unwrap();
+        store
+            .set_setting(
+                "guild-a",
+                "feature.config.support.welcome_channel",
+                r#"{"channelId":"123","message":"Hello Alpha","steps":["help"]}"#,
+            )
+            .unwrap();
+        store
+            .set_setting(
+                "guild-b",
+                "feature.config.support.welcome_channel",
+                r#"{"channelId":"999","message":"Private Beta"}"#,
+            )
+            .unwrap();
+        let app = router(state(store.clone()));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/config/features/support.welcome_channel")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                .unwrap();
+        assert_eq!(body["key"], "support.welcome");
+        assert_eq!(body["enabled"], true);
+        assert_eq!(body["config"]["channel"], "123");
+        assert_eq!(body["config"]["message"], "Hello Alpha");
+        assert_eq!(body["config"]["guideEnabled"], true);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config/features/support.welcome_channel")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"enabled":false,"config":{}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::GONE);
+        assert!(
+            store
+                .get_feature_setting("guild-a", "support.welcome_channel")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
