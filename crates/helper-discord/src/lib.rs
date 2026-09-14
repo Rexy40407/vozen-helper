@@ -3481,7 +3481,57 @@ impl EventHandler for Handler {
                             )
                             .map(ChannelId::new)
                             .unwrap_or(message.channel_id);
-                            let _ = channel.say(&ctx.http, text).await;
+                            let mut announcement =
+                                CreateMessage::new().content(&text).allowed_mentions(
+                                    CreateAllowedMentions::new().users([message.author.id]),
+                                );
+                            if setting_bool(
+                                &self.store,
+                                &guild_text,
+                                "community.levels.banner_enabled",
+                                false,
+                            ) && matches!(
+                                self.effective_plan(&user_text, Some(&guild_text)).await,
+                                Plan::Premium { .. }
+                            ) {
+                                let card = rank_card::parse_config(
+                                    self.store
+                                        .get_setting(&guild_text, "community.rank_card")
+                                        .ok()
+                                        .flatten(),
+                                );
+                                if let Some(bytes) = card
+                                    .background_preset
+                                    .as_deref()
+                                    .and_then(rank_card::preset_png)
+                                {
+                                    let colour = u32::from_str_radix(
+                                        card.primary_color.trim_start_matches('#'),
+                                        16,
+                                    )
+                                    .unwrap_or(0x8EE5D2);
+                                    announcement = announcement
+                                        .add_file(CreateAttachment::bytes(
+                                            bytes,
+                                            "level-up-banner.png",
+                                        ))
+                                        .embed(
+                                            CreateEmbed::new()
+                                                .title(format!(
+                                                    "{} · Level {}",
+                                                    message.author.name, after_level
+                                                ))
+                                                .description(format!("{} XP", after))
+                                                .thumbnail(message.author.face())
+                                                .colour(Colour::new(colour))
+                                                .image("attachment://level-up-banner.png"),
+                                        );
+                                }
+                            }
+                            if let Err(error) = channel.send_message(&ctx.http, announcement).await
+                            {
+                                warn!(%guild_id, %error, "failed to send level-up announcement");
+                            }
                         }
                     }
                 }
@@ -5808,11 +5858,11 @@ impl Handler {
         let Some(guild_id) = command.guild_id else {
             return respond(ctx, command, "Este comando só pode ser usado num servidor.").await;
         };
-        if !feature_enabled(&self.store, &guild_id.to_string(), "studio.rank_card", None) {
+        if !feature_enabled(&self.store, &guild_id.to_string(), "community.levels", None) {
             return respond(
                 ctx,
                 command,
-                "O XP card está desativado neste servidor. Ativa-o no painel primeiro.",
+                "Levels & XP is disabled in this server. Enable it in the dashboard first.",
             )
             .await;
         }

@@ -5707,7 +5707,61 @@ async fn generic_feature_preflight(
         .find(|guild| guild.guild_id == claims.guild_id)
         .ok_or_else(|| client_error(StatusCode::FORBIDDEN, "guild_not_managed"))?;
 
-    let descriptor = feature_adapter(&key).map(|adapter| adapter.descriptor());
+    if key == "community.levels"
+        && ((request.enabled
+            && request
+                .config
+                .get("bannerEnabled")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true))
+            || request.config.get("rankCard").is_some())
+    {
+        require_feature_premium(&state, &claims, "studio.rank_card").await?;
+    }
+    let mut descriptor = feature_adapter(&key).map(|adapter| adapter.descriptor());
+    if key == "community.levels"
+        && let Some(card) = request.config.get("rankCard")
+    {
+        let card = serde_json::from_value::<RankCardConfig>(card.clone())
+            .map_err(|_| client_error(StatusCode::BAD_REQUEST, "invalid_rank_card"))?;
+        if !valid_rank_card_config(&card) {
+            return Err(client_error(StatusCode::BAD_REQUEST, "invalid_rank_card"));
+        }
+    }
+    if key == "community.levels"
+        && request.enabled
+        && request
+            .config
+            .get("bannerEnabled")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        let card = request
+            .config
+            .get("rankCard")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<RankCardConfig>(value).ok())
+            .unwrap_or_else(|| {
+                parse_rank_card(
+                    state
+                        .store
+                        .get_setting(&claims.guild_id, RANK_CARD_SETTING)
+                        .ok()
+                        .flatten(),
+                )
+            });
+        if card.background_preset.is_none() {
+            return Err(client_error(
+                StatusCode::BAD_REQUEST,
+                "level_banner_required",
+            ));
+        }
+        if let Some(adapter) = descriptor.as_mut() {
+            adapter
+                .dependencies
+                .extend(["attach_files".into(), "embed_links".into()]);
+        }
+    }
     // Disabling a feature must not require a complete replacement config. A
     // historical revision may intentionally contain `{}` (or a provider
     // credential may have been removed since it was last enabled). Keep the
@@ -12465,6 +12519,77 @@ mod tests {
                 assert_eq!(body["premiumUnlocked"], true);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn levels_banner_requires_premium_and_projects_card_atomically() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        store
+            .replace_session_guilds(
+                session.session_id,
+                &[("guild-a".into(), "Alpha".into(), Some("8".into()))],
+            )
+            .unwrap();
+        let card = RankCardConfig {
+            background_preset: Some("neon-rain".into()),
+            ..Default::default()
+        };
+        let payload = serde_json::json!({"enabled": false, "config": {"bannerEnabled": true, "rankCard": card}});
+        for premium in [false, true] {
+            if premium {
+                grant_premium(&store, &session);
+            }
+            let response = router(state(store.clone()))
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/config/features/community.levels")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(payload.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if premium {
+                    StatusCode::OK
+                } else {
+                    StatusCode::FORBIDDEN
+                }
+            );
+            assert_eq!(
+                store
+                    .get_setting("guild-a", "community.rank_card")
+                    .unwrap()
+                    .is_some(),
+                premium
+            );
+            assert!(
+                store
+                    .get_setting("guild-b", "community.rank_card")
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            store
+                .get_setting("guild-a", "community.levels.banner_enabled")
+                .unwrap()
+                .as_deref(),
+            Some("true")
+        );
+        assert!(
+            store
+                .get_setting("guild-a", "community.rank_card")
+                .unwrap()
+                .unwrap()
+                .contains("neon-rain")
+        );
     }
 
     #[tokio::test]

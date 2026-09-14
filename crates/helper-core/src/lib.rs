@@ -7900,6 +7900,7 @@ impl FeatureAdapter for LevelsAdapter {
                     "title": "XP progression",
                     "description": "Tune message XP and level-up announcements.",
                     "fields": [
+                        {"key":"bannerEnabled","label":"Show a banner when a member levels up","kind":"toggle","help":"Requires Premium for this server."},
                         {"key":"xpMin","label":"Minimum XP per message","kind":"number","min":1,"max":1000},
                         {"key":"xpMax","label":"Maximum XP per message","kind":"number","min":1,"max":2000},
                         {"key":"cooldownSeconds","label":"XP cooldown (seconds)","kind":"number","min":0,"max":3600},
@@ -7914,6 +7915,7 @@ impl FeatureAdapter for LevelsAdapter {
                 }]
             }),
             defaults: serde_json::json!({
+                "bannerEnabled": false,
                 "xpMin": 15,
                 "xpMax": 30,
                 "cooldownSeconds": 60,
@@ -7939,6 +7941,23 @@ impl FeatureAdapter for LevelsAdapter {
             }];
         };
         let mut issues = Vec::new();
+        if object
+            .get("bannerEnabled")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            issues.push(ValidationIssue {
+                path: "bannerEnabled".into(),
+                code: "boolean_required".into(),
+                message: "Choose whether to show level-up banners.".into(),
+                severity: "error".into(),
+            });
+        }
+        if let Some(card) = object.get("rankCard") {
+            issues.extend(RankCardAdapter.validate(card).into_iter().map(|mut issue| {
+                issue.path = format!("rankCard.{}", issue.path);
+                issue
+            }));
+        }
         for (field, min, max) in [
             ("xpMin", 1_i64, 1_000_i64),
             ("xpMax", 1, 2_000),
@@ -8100,6 +8119,15 @@ impl FeatureAdapter for LevelsAdapter {
             return Vec::new();
         };
         let mut pairs = Vec::new();
+        if let Some(value) = object
+            .get("bannerEnabled")
+            .and_then(serde_json::Value::as_bool)
+        {
+            pairs.push(("community.levels.banner_enabled".into(), value.to_string()));
+        }
+        if let Some(card) = object.get("rankCard") {
+            pairs.push(("community.rank_card".into(), card.to_string()));
+        }
         for (field, setting) in [
             ("xpMin", "community.levels.xp_min"),
             ("xpMax", "community.levels.xp_max"),

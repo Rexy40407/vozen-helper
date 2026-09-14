@@ -39,7 +39,7 @@ fn progress_width(xp: i64) -> f32 {
     (xp.rem_euclid(100) as f32 / 100.0) * 560.0
 }
 
-fn preset_data_uri(preset: &str) -> Option<String> {
+pub fn preset_png(preset: &str) -> Option<&'static [u8]> {
     let bytes: &[u8] = match preset {
         "aurora-lake" => {
             include_bytes!("../../../assets/rank-card-banners/banner-01-aurora-lake.png")
@@ -71,7 +71,11 @@ fn preset_data_uri(preset: &str) -> Option<String> {
         }
         _ => return None,
     };
-    Some(format!("data:image/png;base64,{}", STANDARD.encode(bytes)))
+    Some(bytes)
+}
+
+fn preset_data_uri(preset: &str) -> Option<String> {
+    preset_png(preset).map(|bytes| format!("data:image/png;base64,{}", STANDARD.encode(bytes)))
 }
 
 /// Produces a self-contained SVG so Discord can display the rank card without
