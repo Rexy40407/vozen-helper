@@ -240,6 +240,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/tickets", get(tickets))
         .route("/api/stats", get(stats))
         .route("/api/quotas", get(quotas))
+        .route(
+            "/api/premium/server",
+            get(premium_server_status).post(premium_server_activate),
+        )
         .route("/api/modules", get(modules))
         .route(
             "/api/config/features",
@@ -11465,6 +11469,108 @@ async fn delete_workflow(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+async fn premium_server_status(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Json<helper_modules::PremiumSeats>, (StatusCode, Json<ApiError>)> {
+    let claims = require_auth(&state, &headers)?;
+    premium_request_limit(&claims.user_id)?;
+    let client = state
+        .entitlements
+        .as_ref()
+        .ok_or_else(|| client_error(StatusCode::SERVICE_UNAVAILABLE, "premium_unavailable"))?;
+    client
+        .premium_seats(&claims.user_id, &claims.guild_id, false)
+        .await
+        .map(Json)
+        .map_err(|_| client_error(StatusCode::SERVICE_UNAVAILABLE, "premium_unavailable"))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PremiumActivationRequest {
+    guild_id: String,
+}
+
+async fn premium_server_activate(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(input): Json<PremiumActivationRequest>,
+) -> Result<Json<helper_modules::PremiumSeats>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    premium_request_limit(&claims.user_id)?;
+    // Bind the confirmation to the server the person saw, even if another tab changed session.
+    if input.guild_id != claims.guild_id {
+        return Err(client_error(StatusCode::CONFLICT, "guild_changed"));
+    }
+    let central = state
+        .entitlements
+        .as_ref()
+        .ok_or_else(|| client_error(StatusCode::SERVICE_UNAVAILABLE, "premium_unavailable"))?;
+    // Recheck current Discord permissions rather than trusting the login-time guild list.
+    let http = Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|_| client_error(StatusCode::SERVICE_UNAVAILABLE, "discord_unavailable"))?;
+    let auth = format!("Bot {}", state.discord_token);
+    let guild = discord_json(&http, &auth, &format!("/guilds/{}", claims.guild_id))
+        .await
+        .map_err(|_| client_error(StatusCode::SERVICE_UNAVAILABLE, "discord_unavailable"))?;
+    if guild.get("owner_id").and_then(serde_json::Value::as_str) != Some(claims.user_id.as_str()) {
+        let member = discord_json(
+            &http,
+            &auth,
+            &format!("/guilds/{}/members/{}", claims.guild_id, claims.user_id),
+        )
+        .await
+        .map_err(|_| client_error(StatusCode::FORBIDDEN, "guild_not_managed"))?;
+        let roles = discord_json(&http, &auth, &format!("/guilds/{}/roles", claims.guild_id))
+            .await
+            .map_err(|_| client_error(StatusCode::SERVICE_UNAVAILABLE, "discord_unavailable"))?;
+        let member_roles: Vec<String> = member
+            .get("roles")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        let permissions = roles
+            .as_array()
+            .and_then(|roles| effective_bot_permissions(&claims.guild_id, roles, &member_roles))
+            .unwrap_or(0);
+        if permissions & (8 | 32) == 0 {
+            return Err(client_error(StatusCode::FORBIDDEN, "guild_not_managed"));
+        }
+    }
+    central
+        .premium_seats(&claims.user_id, &claims.guild_id, true)
+        .await
+        .map(Json)
+        .map_err(|_| client_error(StatusCode::CONFLICT, "premium_activation_failed"))
+}
+
+fn premium_request_limit(user: &str) -> Result<(), (StatusCode, Json<ApiError>)> {
+    static REQUESTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (i64, u32)>>,
+    > = std::sync::OnceLock::new();
+    let now = Utc::now().timestamp();
+    let mut requests = REQUESTS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| client_error(StatusCode::SERVICE_UNAVAILABLE, "premium_unavailable"))?;
+    requests.retain(|_, (start, _)| now.saturating_sub(*start) < 60);
+    if requests.len() >= 4096 && !requests.contains_key(user) {
+        return Err(client_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited"));
+    }
+    let (_, count) = requests.entry(user.to_owned()).or_insert((now, 0));
+    if *count >= 10 {
+        return Err(client_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited"));
+    }
+    *count += 1;
+    Ok(())
+}
+
 fn require_auth(
     state: &ApiState,
     headers: &HeaderMap,
@@ -12590,6 +12696,42 @@ mod tests {
                 .unwrap()
                 .contains("neon-rain")
         );
+    }
+
+    #[tokio::test]
+    async fn premium_activation_requires_auth_origin_and_matching_guild() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        store.save_session(&session).unwrap();
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        for (auth, guild, expected) in [
+            ("none", "guild-a", StatusCode::UNAUTHORIZED),
+            ("cookie", "guild-a", StatusCode::FORBIDDEN),
+            ("bearer", "guild-b", StatusCode::CONFLICT),
+            ("bearer", "guild-a", StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/api/premium/server")
+                .header(header::CONTENT_TYPE, "application/json");
+            if auth == "cookie" {
+                request = request.header(header::COOKIE, format!("vh_session={token}"));
+            }
+            if auth == "bearer" {
+                request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+            }
+            let response = router(state(store.clone()))
+                .oneshot(
+                    request
+                        .body(Body::from(
+                            serde_json::json!({"guild_id":guild}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{auth}/{guild}");
+        }
     }
 
     #[tokio::test]

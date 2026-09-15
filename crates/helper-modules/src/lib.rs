@@ -3156,7 +3156,54 @@ struct CentralResponse {
     version: i64,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PremiumSeats {
+    pub guild_premium: bool,
+    pub pass_active: bool,
+    pub seats: i64,
+    pub used: i64,
+}
+
 impl EntitlementClient {
+    pub async fn premium_seats(
+        &self,
+        user: &str,
+        guild: &str,
+        activate: bool,
+    ) -> anyhow::Result<PremiumSeats> {
+        let endpoint = self
+            .endpoint
+            .strip_suffix("/resolve")
+            .ok_or_else(|| anyhow::anyhow!("invalid entitlement endpoint"))?;
+        let body = serde_json::json!({"subject_id": user, "guild_id": guild, "operation": if activate { "activate" } else { "status" }});
+        let bytes = serde_json::to_vec(&body)?;
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let body_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(&bytes));
+        let mut mac = HmacSha256::new_from_slice(self.secret.as_bytes())?;
+        mac.update(format!("{timestamp}\n{nonce}\n{body_hash}").as_bytes());
+        let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        let response = self
+            .http
+            .post(format!("{endpoint}/seats"))
+            .header("x-vozen-timestamp", timestamp.to_string())
+            .header("x-vozen-nonce", nonce)
+            .header("x-vozen-signature", format!("v1={signature}"))
+            .json(&body)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!("premium activation unavailable or subscription changed");
+        }
+        let result: PremiumSeats = bounded_provider_json(response).await?;
+        if activate {
+            self.cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("cache unavailable"))?
+                .remove(&Self::cache_key(user, Some(guild)));
+        }
+        Ok(result)
+    }
     pub fn new(endpoint: Option<String>, secret: Option<String>) -> Option<Self> {
         Some(Self {
             endpoint: endpoint?,
