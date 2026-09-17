@@ -152,9 +152,41 @@ pub fn parse_config(raw: Option<String>) -> RankCardConfig {
         .unwrap_or_default()
 }
 
+pub fn config_for_plan(raw: Option<String>, premium: bool) -> RankCardConfig {
+    if premium {
+        parse_config(raw)
+    } else {
+        RankCardConfig::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn free_card_ignores_saved_premium_customization() {
+        let saved = Some(
+            serde_json::to_string(&RankCardConfig {
+                background_preset: Some("neon-rain".into()),
+                primary_color: "#FF0000".into(),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        let free = config_for_plan(saved.clone(), false);
+        assert_eq!(free.primary_color, RankCardConfig::default().primary_color);
+        assert!(free.background_preset.is_none());
+        assert!(free.background_url.is_none());
+        let custom = RankCardConfig {
+            background_preset: Some("neon-rain".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            config_for_plan(Some(serde_json::to_string(&custom).unwrap()), true).background_preset,
+            custom.background_preset
+        );
+    }
 
     #[test]
     fn renders_escaped_user_data_and_configured_colours() {

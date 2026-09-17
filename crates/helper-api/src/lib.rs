@@ -5711,15 +5711,7 @@ async fn generic_feature_preflight(
         .find(|guild| guild.guild_id == claims.guild_id)
         .ok_or_else(|| client_error(StatusCode::FORBIDDEN, "guild_not_managed"))?;
 
-    if key == "community.levels"
-        && ((request.enabled
-            && request
-                .config
-                .get("bannerEnabled")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true))
-            || request.config.get("rankCard").is_some())
-    {
+    if key == "community.levels" && request.config.get("rankCard").is_some() {
         require_feature_premium(&state, &claims, "studio.rank_card").await?;
     }
     let mut descriptor = feature_adapter(&key).map(|adapter| adapter.descriptor());
@@ -5739,32 +5731,11 @@ async fn generic_feature_preflight(
             .get("bannerEnabled")
             .and_then(serde_json::Value::as_bool)
             == Some(true)
+        && let Some(adapter) = descriptor.as_mut()
     {
-        let card = request
-            .config
-            .get("rankCard")
-            .cloned()
-            .and_then(|value| serde_json::from_value::<RankCardConfig>(value).ok())
-            .unwrap_or_else(|| {
-                parse_rank_card(
-                    state
-                        .store
-                        .get_setting(&claims.guild_id, RANK_CARD_SETTING)
-                        .ok()
-                        .flatten(),
-                )
-            });
-        if card.background_preset.is_none() {
-            return Err(client_error(
-                StatusCode::BAD_REQUEST,
-                "level_banner_required",
-            ));
-        }
-        if let Some(adapter) = descriptor.as_mut() {
-            adapter
-                .dependencies
-                .extend(["attach_files".into(), "embed_links".into()]);
-        }
+        adapter
+            .dependencies
+            .extend(["attach_files".into(), "embed_links".into()]);
     }
     // Disabling a feature must not require a complete replacement config. A
     // historical revision may intentionally contain `{}` (or a provider
@@ -12628,7 +12599,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn levels_banner_requires_premium_and_projects_card_atomically() {
+    async fn levels_customization_requires_premium_and_projects_card_atomically() {
         let store = Store::open(":memory:").unwrap();
         let session = claims("guild-a");
         let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
@@ -12643,6 +12614,29 @@ mod tests {
             background_preset: Some("neon-rain".into()),
             ..Default::default()
         };
+        // Free servers can save the default card toggle without supplying any
+        // custom style. The same endpoint must still reject custom card data.
+        let response = router(state(store.clone()))
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/config/features/community.levels")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"enabled":false,"config":{"bannerEnabled":true}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            store
+                .get_setting("guild-a", "community.rank_card")
+                .unwrap()
+                .is_none()
+        );
         let payload = serde_json::json!({"enabled": false, "config": {"bannerEnabled": true, "rankCard": card}});
         for premium in [false, true] {
             if premium {

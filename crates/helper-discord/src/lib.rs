@@ -3490,43 +3490,43 @@ impl EventHandler for Handler {
                                 &guild_text,
                                 "community.levels.banner_enabled",
                                 false,
-                            ) && matches!(
-                                self.effective_plan(&user_text, Some(&guild_text)).await,
-                                Plan::Premium { .. }
                             ) {
-                                let card = rank_card::parse_config(
+                                let premium = matches!(
+                                    self.effective_plan(&user_text, Some(&guild_text)).await,
+                                    Plan::Premium { .. }
+                                );
+                                let card = rank_card::config_for_plan(
                                     self.store
                                         .get_setting(&guild_text, "community.rank_card")
                                         .ok()
                                         .flatten(),
+                                    premium,
                                 );
+                                let colour = u32::from_str_radix(
+                                    card.primary_color.trim_start_matches('#'),
+                                    16,
+                                )
+                                .unwrap_or(0x8EE5D2);
+                                let mut embed = CreateEmbed::new()
+                                    .title(format!(
+                                        "{} · Level {}",
+                                        message.author.name, after_level
+                                    ))
+                                    .description(format!("{} XP", after))
+                                    .thumbnail(message.author.face())
+                                    .colour(Colour::new(colour));
                                 if let Some(bytes) = card
                                     .background_preset
                                     .as_deref()
                                     .and_then(rank_card::preset_png)
                                 {
-                                    let colour = u32::from_str_radix(
-                                        card.primary_color.trim_start_matches('#'),
-                                        16,
-                                    )
-                                    .unwrap_or(0x8EE5D2);
-                                    announcement = announcement
-                                        .add_file(CreateAttachment::bytes(
-                                            bytes,
-                                            "level-up-banner.png",
-                                        ))
-                                        .embed(
-                                            CreateEmbed::new()
-                                                .title(format!(
-                                                    "{} · Level {}",
-                                                    message.author.name, after_level
-                                                ))
-                                                .description(format!("{} XP", after))
-                                                .thumbnail(message.author.face())
-                                                .colour(Colour::new(colour))
-                                                .image("attachment://level-up-banner.png"),
-                                        );
+                                    announcement = announcement.add_file(CreateAttachment::bytes(
+                                        bytes,
+                                        "level-up-banner.png",
+                                    ));
+                                    embed = embed.image("attachment://level-up-banner.png");
                                 }
+                                announcement = announcement.embed(embed);
                             }
                             if let Err(error) = channel.send_message(&ctx.http, announcement).await
                             {
@@ -5885,8 +5885,14 @@ impl Handler {
         let xp = self.store.level_for(&guild_text, &user_text)?;
         let level = (xp / 100) + 1;
         let rank = self.store.level_rank(&guild_text, &user_text)?;
-        let config =
-            rank_card::parse_config(self.store.get_setting(&guild_text, "community.rank_card")?);
+        let premium = matches!(
+            self.effective_plan(&user_text, Some(&guild_text)).await,
+            Plan::Premium { .. }
+        );
+        let config = rank_card::config_for_plan(
+            self.store.get_setting(&guild_text, "community.rank_card")?,
+            premium,
+        );
         let avatar_url = profile.face();
         let svg =
             rank_card::render_rank_card(&config, &profile.name, Some(&avatar_url), rank, level, xp);

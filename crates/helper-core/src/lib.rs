@@ -7900,7 +7900,7 @@ impl FeatureAdapter for LevelsAdapter {
                     "title": "XP progression",
                     "description": "Tune message XP and level-up announcements.",
                     "fields": [
-                        {"key":"bannerEnabled","label":"Show a banner when a member levels up","kind":"toggle","help":"Requires Premium for this server."},
+                        {"key":"bannerEnabled","label":"Show a card when a member levels up","kind":"toggle","help":"The default card is free. Background images and customization require Premium."},
                         {"key":"xpMin","label":"Minimum XP per message","kind":"number","min":1,"max":1000},
                         {"key":"xpMax","label":"Maximum XP per message","kind":"number","min":1,"max":2000},
                         {"key":"cooldownSeconds","label":"XP cooldown (seconds)","kind":"number","min":0,"max":3600},
