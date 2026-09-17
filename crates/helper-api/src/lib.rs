@@ -12929,7 +12929,7 @@ mod tests {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(serde_json::json!({
                     "config": {"channelId": "123456789012345678", "nameTemplate": "📊 Members: {members}"},
-                    "channelId": "123456789012345678", "statsMembers": 42
+                    "channel_id": "123456789012345678", "statsMembers": 42
                 }).to_string())).unwrap()
         ).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
