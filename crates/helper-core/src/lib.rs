@@ -48,6 +48,10 @@ impl Config {
         bind_addr
             .parse::<std::net::SocketAddr>()
             .context("HELPER_BIND_ADDR must be host:port")?;
+        let (entitlement_url, entitlement_secret) = resolve_entitlement_settings(
+            optional_env("VOZEN_ENTITLEMENT_URL"),
+            optional_env("VOZEN_ENTITLEMENT_SECRET"),
+        )?;
         Ok(Self {
             discord_token: required("DISCORD_TOKEN")?,
             discord_application_id,
@@ -67,8 +71,8 @@ impl Config {
             allow_legacy_session: env::var("HELPER_ALLOW_LEGACY_SESSION")
                 .is_ok_and(|value| value.eq_ignore_ascii_case("true")),
             session_secret: required("HELPER_SESSION_SECRET")?,
-            entitlement_url: env::var("VOZEN_ENTITLEMENT_URL").ok(),
-            entitlement_secret: env::var("VOZEN_ENTITLEMENT_SECRET").ok(),
+            entitlement_url,
+            entitlement_secret,
             topgg_token: optional_env("HELPER_TOPGG_TOKEN"),
             environment: env::var("NODE_ENV").unwrap_or_else(|_| "production".into()),
             api_only: env::var("HELPER_API_ONLY")
@@ -103,6 +107,22 @@ fn optional_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+/// The entitlement client is authenticated.  Accepting only half of its
+/// configuration silently disabled server Premium and made paid features look
+/// locked, so treat URL and shared secret as one atomic setting.
+fn resolve_entitlement_settings(
+    url: Option<String>,
+    secret: Option<String>,
+) -> Result<(Option<String>, Option<String>)> {
+    match (url, secret) {
+        (None, None) => Ok((None, None)),
+        (Some(url), Some(secret)) => Ok((Some(url), Some(secret))),
+        _ => anyhow::bail!(
+            "VOZEN_ENTITLEMENT_URL and VOZEN_ENTITLEMENT_SECRET must be configured together"
+        ),
+    }
 }
 
 fn trusted_vozen_oauth_client_id() -> Option<String> {
@@ -11147,6 +11167,23 @@ pub fn parse_ip(value: &str) -> Result<IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entitlement_settings_must_be_configured_as_a_pair() {
+        assert!(resolve_entitlement_settings(None, None).is_ok());
+        assert!(
+            resolve_entitlement_settings(
+                Some("http://127.0.0.1:3011/internal/v1/entitlements/resolve".into()),
+                Some("service-secret".into()),
+            )
+            .is_ok()
+        );
+        assert!(
+            resolve_entitlement_settings(Some("http://127.0.0.1:3011/resolve".into()), None)
+                .is_err()
+        );
+        assert!(resolve_entitlement_settings(None, Some("service-secret".into())).is_err());
+    }
 
     #[test]
     fn every_adapter_handles_null_unicode_and_numeric_boundary_inputs() {

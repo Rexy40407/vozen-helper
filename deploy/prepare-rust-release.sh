@@ -27,6 +27,8 @@ vozen_oauth_client_id="${VOZEN_ECOSYSTEM_OAUTH_CLIENT_ID:-1537738930722443364}"
 private_tracker_client_id="${HELPER_PRIVATE_TRACKER_CLIENT_ID:-$(read_existing_env_value HELPER_PRIVATE_TRACKER_CLIENT_ID)}"
 private_tracker_owner_id="${HELPER_PRIVATE_TRACKER_OWNER_ID:-$(read_existing_env_value HELPER_PRIVATE_TRACKER_OWNER_ID)}"
 topgg_token="${HELPER_TOPGG_TOKEN:-$(read_existing_env_value HELPER_TOPGG_TOKEN)}"
+entitlement_url="${VOZEN_ENTITLEMENT_URL:-$(read_existing_env_value VOZEN_ENTITLEMENT_URL)}"
+entitlement_secret="${VOZEN_ENTITLEMENT_SECRET:-$(read_existing_env_value VOZEN_ENTITLEMENT_SECRET)}"
 
 mkdir -p "$release" "$root/shared/data"
 tar -xzf /home/vozen/helper-release.tgz -C "$release"
@@ -75,10 +77,10 @@ fi
 if [[ -n "$topgg_token" ]]; then
   printf 'HELPER_TOPGG_TOKEN=%s\n' "$topgg_token" >> "$root/shared/.env"
 fi
-if [[ -n "${VOZEN_ENTITLEMENT_URL:-}" || -n "${VOZEN_ENTITLEMENT_SECRET:-}" ]]; then
-  : "${VOZEN_ENTITLEMENT_URL:?set both VOZEN_ENTITLEMENT_URL and VOZEN_ENTITLEMENT_SECRET}"
-  : "${VOZEN_ENTITLEMENT_SECRET:?set both VOZEN_ENTITLEMENT_URL and VOZEN_ENTITLEMENT_SECRET}"
-  printf 'VOZEN_ENTITLEMENT_URL=%s\nVOZEN_ENTITLEMENT_SECRET=%s\n' "$VOZEN_ENTITLEMENT_URL" "$VOZEN_ENTITLEMENT_SECRET" >> "$root/shared/.env"
+if [[ -n "$entitlement_url" || -n "$entitlement_secret" ]]; then
+  : "${entitlement_url:?set VOZEN_ENTITLEMENT_URL and VOZEN_ENTITLEMENT_SECRET together}"
+  : "${entitlement_secret:?set VOZEN_ENTITLEMENT_URL and VOZEN_ENTITLEMENT_SECRET together}"
+  printf 'VOZEN_ENTITLEMENT_URL=%s\nVOZEN_ENTITLEMENT_SECRET=%s\n' "$entitlement_url" "$entitlement_secret" >> "$root/shared/.env"
 fi
 chmod 600 "$root/shared/.env"
 chmod 755 "$release/bin/vozen-helper"
