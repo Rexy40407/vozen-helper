@@ -9450,6 +9450,8 @@ struct FeatureTestRequest {
     stats_joins: Option<i64>,
     #[serde(default, rename = "statsLeaves")]
     stats_leaves: Option<i64>,
+    #[serde(default, rename = "statsMembers")]
+    stats_members: Option<u64>,
     #[serde(default, rename = "privacyAction")]
     privacy_action: Option<String>,
     #[serde(default, rename = "inviteCount")]
@@ -9586,6 +9588,7 @@ async fn test_feature(
         "statsMessages": test.stats_messages,
         "statsJoins": test.stats_joins,
         "statsLeaves": test.stats_leaves,
+        "statsMembers": test.stats_members,
         "privacyAction": test.privacy_action.clone(),
         "inviteCount": test.invite_count,
         "emojiCount": test.emoji_count,
@@ -12911,6 +12914,46 @@ mod tests {
         assert!(preview.contains("alice"));
         assert!(!preview.contains("999"));
         assert!(preview.contains("Excluded 1 member"));
+    }
+
+    #[tokio::test]
+    async fn stats_member_counter_preview_uses_the_requested_fixture_without_mutation() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        let response = router(state(store.clone())).oneshot(
+            Request::builder().method("POST")
+                .uri("/api/config/features/insights.stats/simulate")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({
+                    "config": {"channelId": "123456789012345678", "nameTemplate": "📊 Members: {members}"},
+                    "channelId": "123456789012345678", "statsMembers": 42
+                }).to_string())).unwrap()
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap())
+                .unwrap();
+        assert!(
+            body["adapterEffects"][0]
+                .as_str()
+                .unwrap()
+                .contains("Members: 42")
+        );
+        assert!(
+            store
+                .get_feature_setting("guild-a", "insights.stats")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get_feature_setting("guild-b", "insights.stats")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

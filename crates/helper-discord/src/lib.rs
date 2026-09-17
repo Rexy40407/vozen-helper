@@ -12,7 +12,7 @@ use helper_core::{
     evaluate_emojis, evaluate_event, evaluate_giveaway, evaluate_help, evaluate_invite_tracker,
     evaluate_join_gate, evaluate_leaderboard, evaluate_levels, evaluate_moderation,
     evaluate_nickname, evaluate_poll, evaluate_privacy, evaluate_reminder, evaluate_role_panel,
-    evaluate_scam_with_roles, evaluate_search, evaluate_starboard, evaluate_stats,
+    evaluate_scam_with_roles, evaluate_search, evaluate_starboard, evaluate_stats_with_members,
     evaluate_suggestion, evaluate_temp_channel, evaluate_tickets, evaluate_welcome_channel,
     evaluate_workflow, feature_is_configurable, feature_maturity, leaderboard_policy_from_json,
     parse_utc_offset_minutes, quota_limit, render_bounded_template_message, render_member_message,
@@ -4813,6 +4813,16 @@ async fn run_stats_channel_worker(http: Arc<serenity::http::Http>, store: Store)
             let Some(channel_id) = channel_id else {
                 continue;
             };
+            let template =
+                setting_string(&store, &setting.guild_id, "insights.stats.name_template")
+                    .or_else(|| {
+                        object
+                            .get("nameTemplate")
+                            .and_then(serde_json::Value::as_str)
+                            .map(ToOwned::to_owned)
+                    })
+                    .unwrap_or_else(|| "messages-{messages}".to_owned());
+            let needs_members = helper_core::member_counter::uses_member_count(&template);
             let refresh_minutes = setting_i64(
                 &store,
                 &setting.guild_id,
@@ -4821,8 +4831,11 @@ async fn run_stats_channel_worker(http: Arc<serenity::http::Http>, store: Store)
                     .get("intervalMinutes")
                     .and_then(serde_json::Value::as_i64)
                     .unwrap_or(15),
-            )
-            .clamp(5, 1_440);
+            );
+            let refresh_minutes = helper_core::member_counter::refresh_interval_minutes(
+                refresh_minutes,
+                needs_members,
+            );
             let last_refresh = setting_i64(
                 &store,
                 &setting.guild_id,
@@ -4834,6 +4847,33 @@ async fn run_stats_channel_worker(http: Arc<serenity::http::Http>, store: Store)
             {
                 continue;
             }
+            let channel = match serenity::all::ChannelId::new(channel_id)
+                .to_channel(&http)
+                .await
+            {
+                Ok(channel) => channel.guild(),
+                Err(error) => {
+                    tracing::warn!(%error, guild_id = %setting.guild_id, channel_id, "stats counter channel lookup failed");
+                    continue;
+                }
+            };
+            let Some(channel) =
+                channel.filter(|channel| channel.guild_id.to_string() == setting.guild_id)
+            else {
+                tracing::warn!(guild_id = %setting.guild_id, channel_id, "stats counter refused a channel outside its guild");
+                continue;
+            };
+            let members = if needs_members {
+                match channel.guild_id.to_partial_guild_with_counts(&http).await {
+                    Ok(guild) => guild.approximate_member_count,
+                    Err(error) => {
+                        tracing::warn!(%error, guild_id = %setting.guild_id, "stats member count lookup failed; keeping current name");
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             let window_days = setting_i64(
                 &store,
                 &setting.guild_id,
@@ -4854,37 +4894,37 @@ async fn run_stats_channel_worker(http: Arc<serenity::http::Http>, store: Store)
             let messages: i64 = stats.iter().map(|(_, messages, _, _)| messages).sum();
             let joins: i64 = stats.iter().map(|(_, _, joins, _)| joins).sum();
             let leaves: i64 = stats.iter().map(|(_, _, _, leaves)| leaves).sum();
-            let template =
-                setting_string(&store, &setting.guild_id, "insights.stats.name_template")
-                    .or_else(|| {
-                        object
-                            .get("nameTemplate")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToOwned::to_owned)
-                    })
-                    .unwrap_or_else(|| "messages-{messages}".to_owned());
             let stats_config = serde_json::json!({
                 "windowDays": window_days,
                 "channelId": channel_id.to_string(),
                 "nameTemplate": template,
             });
-            let decision = evaluate_stats(
+            let decision = evaluate_stats_with_members(
                 &stats_config,
                 Some(&channel_id.to_string()),
                 messages,
                 joins,
                 leaves,
+                members,
             );
             if !decision.allowed {
                 continue;
             }
-            if let Err(error) = serenity::all::ChannelId::new(channel_id)
-                .edit(&http, serenity::all::EditChannel::new().name(decision.name))
-                .await
+            if !feature_enabled(&store, &setting.guild_id, "insights.stats", None) {
+                continue;
+            }
+            if channel.name != decision.name
+                && let Err(error) = serenity::all::ChannelId::new(channel_id)
+                    .edit(
+                        &http,
+                        serenity::all::EditChannel::new().name(&decision.name),
+                    )
+                    .await
             {
                 tracing::warn!(%error, guild_id = %setting.guild_id, channel_id, "stats channel update failed");
                 continue;
             }
+            tracing::info!(guild_id = %setting.guild_id, channel_id, members, changed = channel.name != decision.name, "stats counter refreshed");
             let _ = store.set_setting(
                 &setting.guild_id,
                 "insights.stats.last_channel_refresh_at",

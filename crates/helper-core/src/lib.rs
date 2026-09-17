@@ -1,5 +1,7 @@
 //! Pure configuration and policy primitives. No Discord or HTTP side effects.
 
+pub mod member_counter;
+
 use anyhow::{Context, Result};
 use helper_contracts::{
     AntiSpamDecision, AntiSpamObservation, AntiSpamPolicy, FeatureAdapterDescriptor,
@@ -6820,6 +6822,18 @@ pub fn evaluate_stats(
     joins: i64,
     leaves: i64,
 ) -> StatsDecision {
+    evaluate_stats_with_members(config, channel_id, messages, joins, leaves, None)
+}
+
+/// A contagem de membros vem do Discord, não da soma de entradas e saídas.
+pub fn evaluate_stats_with_members(
+    config: &serde_json::Value,
+    channel_id: Option<&str>,
+    messages: i64,
+    joins: i64,
+    leaves: i64,
+    members: Option<u64>,
+) -> StatsDecision {
     let object = config.as_object();
     let window_days = object
         .and_then(|value| value.get("windowDays"))
@@ -6861,6 +6875,20 @@ pub fn evaluate_stats(
         .and_then(|value| value.get("nameTemplate"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or("messages-{messages}");
+    let Some(template) = member_counter::render_member_count(template, members) else {
+        return StatsDecision {
+            allowed: false,
+            channel_id: Some(channel_id),
+            window_days,
+            name: String::new(),
+            messages,
+            joins,
+            leaves,
+            reason_code: "member_count_unavailable",
+            explanation: "Discord member count is unavailable; keep the existing channel name."
+                .into(),
+        };
+    };
     let name = template
         .replace("{messages}", &messages.to_string())
         .replace("{joins}", &joins.to_string())
@@ -6911,9 +6939,9 @@ impl FeatureAdapter for StatsAdapter {
                     "fields": [
                         {"key":"windowDays","label":"Reporting window (days)","kind":"number","min":1,"max":30,"help":"Number of recent daily snapshots included."},
                         {"key":"public","label":"Show publicly","kind":"toggle","help":"When disabled, only the requesting member sees the summary."},
-                        {"key":"channelId","label":"Live counter channel (optional)","kind":"channel","help":"Rename one existing voice or text channel with the latest message count."},
-                        {"key":"intervalMinutes","label":"Counter refresh (minutes)","kind":"number","min":5,"max":1440,"advanced":true},
-                        {"key":"nameTemplate","label":"Channel name template","kind":"text","max":100,"help":"Use {messages}, {joins}, {leaves} and {days}."}
+                        {"key":"channelId","label":"Live counter channel (optional)","kind":"channel","help":"Automatically rename an existing channel with the current member total or activity counters. No webhook is needed."},
+                        {"key":"intervalMinutes","label":"Counter refresh (minutes)","kind":"number","min":5,"max":1440,"advanced":true,"help":"Member counters refresh at most once every 10 minutes to respect Discord limits."},
+                        {"key":"nameTemplate","label":"Channel name template","kind":"text","max":100,"help":"Use {members} (or {count}) for the current total, including bots. Also supports {messages}, {joins}, {leaves} and {days}. Example: 📊 Members: {members}"}
                     ]
                 }]
             }),
@@ -7063,7 +7091,13 @@ impl FeatureAdapter for StatsAdapter {
             .and_then(serde_json::Value::as_i64)
             .unwrap_or(3)
             .max(0);
-        let decision = evaluate_stats(config, channel, messages, joins, leaves);
+        let members = fixture
+            .get("statsMembers")
+            .or_else(|| fixture.get("stats_members"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(26);
+        let decision =
+            evaluate_stats_with_members(config, channel, messages, joins, leaves, Some(members));
         let mut effects = vec![if decision.allowed {
             format!(
                 "{} ({}, {} joins, {} leaves over {} days).",
@@ -13435,6 +13469,27 @@ mod tests {
         );
         assert!(effects[0].contains("40 coins"));
         assert!(effects[0].contains("50 coins"));
+    }
+
+    #[test]
+    fn stats_member_counter_uses_live_total_in_preview_and_runtime() {
+        let config = serde_json::json!({
+            "channelId": "123456789012345678", "nameTemplate": "📊 Members: {members}"
+        });
+        let decision = evaluate_stats_with_members(&config, None, 20, 4, 2, Some(26));
+        assert!(decision.allowed);
+        assert_eq!(decision.name, "📊 Members: 26");
+        assert!(!evaluate_stats_with_members(&config, None, 20, 4, 2, None).allowed);
+        let adapter = feature_adapter("insights.stats").expect("stats adapter");
+        assert!(adapter.validate(&config).is_empty());
+        assert!(
+            adapter.simulate(&config, &serde_json::json!({"statsMembers": 26}))[0]
+                .contains("Members: 26")
+        );
+        assert!(adapter.runtime_projection(&config).contains(&(
+            "insights.stats.name_template".into(),
+            "📊 Members: {members}".into()
+        )));
     }
 
     #[test]
