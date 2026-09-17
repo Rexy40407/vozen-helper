@@ -48,7 +48,9 @@ impl Config {
         bind_addr
             .parse::<std::net::SocketAddr>()
             .context("HELPER_BIND_ADDR must be host:port")?;
+        let environment = env::var("NODE_ENV").unwrap_or_else(|_| "production".into());
         let (entitlement_url, entitlement_secret) = resolve_entitlement_settings(
+            &environment,
             optional_env("VOZEN_ENTITLEMENT_URL"),
             optional_env("VOZEN_ENTITLEMENT_SECRET"),
         )?;
@@ -74,7 +76,7 @@ impl Config {
             entitlement_url,
             entitlement_secret,
             topgg_token: optional_env("HELPER_TOPGG_TOKEN"),
-            environment: env::var("NODE_ENV").unwrap_or_else(|_| "production".into()),
+            environment,
             api_only: env::var("HELPER_API_ONLY")
                 .is_ok_and(|value| value.eq_ignore_ascii_case("true")),
         })
@@ -113,12 +115,16 @@ fn optional_env(name: &str) -> Option<String> {
 /// configuration silently disabled server Premium and made paid features look
 /// locked, so treat URL and shared secret as one atomic setting.
 fn resolve_entitlement_settings(
+    environment: &str,
     url: Option<String>,
     secret: Option<String>,
 ) -> Result<(Option<String>, Option<String>)> {
     match (url, secret) {
-        (None, None) => Ok((None, None)),
+        (None, None) if !environment.eq_ignore_ascii_case("production") => Ok((None, None)),
         (Some(url), Some(secret)) => Ok((Some(url), Some(secret))),
+        (None, None) => anyhow::bail!(
+            "VOZEN_ENTITLEMENT_URL and VOZEN_ENTITLEMENT_SECRET are required in production"
+        ),
         _ => anyhow::bail!(
             "VOZEN_ENTITLEMENT_URL and VOZEN_ENTITLEMENT_SECRET must be configured together"
         ),
@@ -11170,19 +11176,28 @@ mod tests {
 
     #[test]
     fn entitlement_settings_must_be_configured_as_a_pair() {
-        assert!(resolve_entitlement_settings(None, None).is_ok());
+        assert!(resolve_entitlement_settings("development", None, None).is_ok());
         assert!(
             resolve_entitlement_settings(
+                "production",
                 Some("http://127.0.0.1:3011/internal/v1/entitlements/resolve".into()),
                 Some("service-secret".into()),
             )
             .is_ok()
         );
         assert!(
-            resolve_entitlement_settings(Some("http://127.0.0.1:3011/resolve".into()), None)
+            resolve_entitlement_settings(
+                "development",
+                Some("http://127.0.0.1:3011/resolve".into()),
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_entitlement_settings("development", None, Some("service-secret".into()))
                 .is_err()
         );
-        assert!(resolve_entitlement_settings(None, Some("service-secret".into())).is_err());
+        assert!(resolve_entitlement_settings("production", None, None).is_err());
     }
 
     #[test]
