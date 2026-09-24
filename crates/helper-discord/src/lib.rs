@@ -7367,9 +7367,6 @@ impl Handler {
                     return respond(ctx, command, "As sugestões estão desativadas neste servidor. Ativa-as no painel.").await;
                 }
                 let text = option_string(command, "text").unwrap_or_default().trim();
-                if !(3..=1_000).contains(&text.len()) {
-                    return respond(ctx, command, "A sugestão deve ter entre 3 e 1000 caracteres.").await;
-                }
                 let guild_text = guild_id.to_string();
                 let suggestion_config = serde_json::json!({
                     "channel": setting_string(&self.store, &guild_text, "community.suggestions.channel_id").unwrap_or_default(),
@@ -7424,7 +7421,6 @@ impl Handler {
                         return respond(ctx, command, "You need the configured role to submit a suggestion.").await;
                     }
                 }
-                let id = self.store.create_suggestion(&guild_text, &command.user.id.to_string(), &text)?;
                 let author = if anonymous {
                     "Anonymous".to_string()
                 } else {
@@ -7434,8 +7430,23 @@ impl Handler {
                     .parse::<u64>()
                     .map(ChannelId::new)
                     .unwrap_or(command.channel_id);
-                let message = target_channel.send_message(&ctx.http, serenity::all::CreateMessage::new()
-                    .content(format!("**Suggestion #{id}** by {author}\n{text}\n\nVote on this suggestion:"))
+                // The database ID is needed in the public panel. If publishing
+                // fails, remove the draft so it cannot trigger a false cooldown.
+                let id = self.store.create_suggestion_in_channel(
+                    &guild_text,
+                    &command.user.id.to_string(),
+                    &text,
+                    Some(&target_channel.to_string()),
+                )?;
+                let public_content = render_suggestion_message(id, &author, &text, "pending", 0, 0);
+                if !suggestion_message_fits(&public_content) {
+                    self.store.delete_unpublished_suggestion(&guild_text, id)?;
+                    return respond(ctx, command, "Suggestion is too long for a Discord message.").await;
+                }
+                let published = target_channel.send_message(&ctx.http, serenity::all::CreateMessage::new()
+                    .content(public_content)
+                    .allowed_mentions(CreateAllowedMentions::new()
+                        .everyone(false).empty_users().empty_roles().replied_user(false))
                     .components(vec![CreateActionRow::Buttons({
                         let mut buttons = vec![
                             CreateButton::new(format!("suggest:up:{id}"))
@@ -7450,8 +7461,19 @@ impl Handler {
                             );
                         }
                         buttons
-                    })])).await?;
-                self.store.set_suggestion_message(id, &message.id.to_string())?;
+                    })])).await;
+                let message = match published {
+                    Ok(message) => message,
+                    Err(_) => {
+                        self.store.delete_unpublished_suggestion(&guild_text, id)?;
+                        return respond(ctx, command, "Could not publish the suggestion in the configured channel.").await;
+                    }
+                };
+                if let Err(error) = self.store.set_suggestion_message(id, &message.id.to_string()) {
+                    let _ = target_channel.delete_message(&ctx.http, message.id).await;
+                    let _ = self.store.delete_unpublished_suggestion(&guild_text, id);
+                    return Err(error);
+                }
                 if let Some(staff_channel) = staff_channel_id.and_then(|value| value.parse::<u64>().ok())
                 {
                     let _ = ChannelId::new(staff_channel)
@@ -7486,10 +7508,43 @@ impl Handler {
                 if !matches!(status.as_str(), "pending" | "approved" | "denied" | "considered") {
                     return respond(ctx, command, "Estado inválido: pending, approved, denied ou considered.").await;
                 }
-                if self.store.set_suggestion_status(&guild_id.to_string(), id, &status)? {
-                    format!("Suggestion #{id} marked as {status}.")
+                let guild_text = guild_id.to_string();
+                let Some(suggestion) = self.store.suggestion(id)? else {
+                    return respond(ctx, command, "Suggestion not found in this server.").await;
+                };
+                if suggestion.guild_id != guild_text {
+                    return respond(ctx, command, "Suggestion not found in this server.").await;
+                }
+                self.store.set_suggestion_status(&guild_text, id, &status)?;
+                let channel_id = suggestion.channel_id
+                    .clone()
+                    .or_else(|| setting_string(&self.store, &guild_text, "community.suggestions.channel_id"))
+                    .and_then(|value| value.parse::<u64>().ok());
+                if let (Some(channel_id), Some(message_id)) = (
+                    channel_id,
+                    suggestion.message_id.as_deref().and_then(|value| value.parse::<u64>().ok()),
+                ) {
+                    let panel_channel = ChannelId::new(channel_id);
+                    if let Ok(panel) = panel_channel.message(&ctx.http, MessageId::new(message_id)).await {
+                        let author = suggestion_author_label(id, &suggestion.author_id, &panel.content);
+                        let (up, down) = self.store.suggestion_votes(id)?;
+                        let content = render_suggestion_message(id, &author, &suggestion.content, &status, up, down);
+                        if suggestion_message_fits(&content)
+                            && panel_channel.edit_message(&ctx.http, MessageId::new(message_id),
+                                serenity::all::EditMessage::new().content(content)
+                                    .allowed_mentions(CreateAllowedMentions::new()
+                                        .everyone(false).empty_users().empty_roles().replied_user(false)))
+                                .await.is_ok()
+                        {
+                            format!("Suggestion #{id} marked as {status}.")
+                        } else {
+                            format!("Suggestion #{id} marked as {status}, but the public panel could not be updated.")
+                        }
+                    } else {
+                        format!("Suggestion #{id} marked as {status}, but the public panel could not be found.")
+                    }
                 } else {
-                    "Suggestion not found in this server.".to_string()
+                    format!("Suggestion #{id} marked as {status}, but this older panel has no saved channel to update.")
                 }
             }
             "giveaway-start" | "gstart" => {
@@ -8828,29 +8883,45 @@ impl Handler {
             self.store
                 .vote_suggestion(id, &component.user.id.to_string(), vote)?;
             let (up, down) = self.store.suggestion_votes(id)?;
-            let author = if setting_bool(
-                &self.store,
-                &guild_id.to_string(),
-                "community.suggestions.anonymous",
-                false,
-            ) {
-                "Anonymous".to_string()
-            } else {
-                format!("<@{}>", suggestion.author_id)
-            };
-            let content = format!(
-                "**Suggestion #{}** by {}\n{}\n\nStatus: **{}** · Support: {} · Against: {}",
-                suggestion.id, author, suggestion.content, suggestion.status, up, down
+            let author = suggestion_author_label(
+                suggestion.id,
+                &suggestion.author_id,
+                &component.message.content,
             );
-            let _ = ctx
-                .http
-                .edit_message(
-                    component.channel_id,
-                    component.message.id,
-                    &serde_json::json!({"content": content}),
-                    Vec::new(),
+            let content = render_suggestion_message(
+                suggestion.id,
+                &author,
+                &suggestion.content,
+                &suggestion.status,
+                up,
+                down,
+            );
+            if !suggestion_message_fits(&content)
+                || component
+                    .channel_id
+                    .edit_message(
+                        &ctx.http,
+                        component.message.id,
+                        serenity::all::EditMessage::new()
+                            .content(content)
+                            .allowed_mentions(
+                                CreateAllowedMentions::new()
+                                    .everyone(false)
+                                    .empty_users()
+                                    .empty_roles()
+                                    .replied_user(false),
+                            ),
+                    )
+                    .await
+                    .is_err()
+            {
+                return respond_component(
+                    ctx,
+                    component,
+                    "Vote saved, but the public panel could not be updated.",
                 )
                 .await;
+            }
             return respond_component(ctx, component, "Voto registado.").await;
         }
         if let Some(raw_id) = component.data.custom_id.strip_prefix("giveaway:join:") {
@@ -12307,6 +12378,33 @@ fn starboard_reaction_count(
     }
 }
 
+fn suggestion_author_label(id: i64, author_id: &str, published_content: &str) -> String {
+    if published_content.starts_with(&format!("**Suggestion #{id}** by <@{author_id}>\n")) {
+        format!("<@{author_id}>")
+    } else {
+        // A changed setting must not reveal an author who was published anonymously.
+        "Anonymous".to_string()
+    }
+}
+
+fn render_suggestion_message(
+    id: i64,
+    author: &str,
+    text: &str,
+    status: &str,
+    up: i64,
+    down: i64,
+) -> String {
+    format!(
+        "**Suggestion #{id}** by {author}\n{text}\n\nStatus: **{status}** · Support: {up} · Against: {down}"
+    )
+}
+
+fn suggestion_message_fits(content: &str) -> bool {
+    // Leave room for longer status labels and growing vote counts on later edits.
+    content.encode_utf16().count() <= 1_900
+}
+
 /// Starboard mirrors user-authored content, so never allow arbitrary mentions
 /// from that content to ping a whole server. The original author mention is
 /// retained explicitly because it is part of the board's attribution.
@@ -12800,6 +12898,29 @@ fn approved_wallet_contract(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn suggestion_author_visibility_follows_the_published_message() {
+        assert_eq!(
+            super::suggestion_author_label(42, "99", "**Suggestion #42** by Anonymous\nText"),
+            "Anonymous"
+        );
+        assert_eq!(
+            super::suggestion_author_label(42, "99", "**Suggestion #42** by <@99>\nText"),
+            "<@99>"
+        );
+        assert_eq!(super::suggestion_author_label(42, "99", ""), "Anonymous");
+    }
+
+    #[test]
+    fn suggestion_message_rejects_emoji_text_over_discord_limit() {
+        let short =
+            super::render_suggestion_message(1, "Anonymous", &"🌟".repeat(500), "pending", 0, 0);
+        let long =
+            super::render_suggestion_message(1, "Anonymous", &"🌟".repeat(1_000), "pending", 0, 0);
+        assert!(super::suggestion_message_fits(&short));
+        assert!(!super::suggestion_message_fits(&long));
+    }
+
     #[test]
     fn starboard_mirror_keeps_source_link_with_long_unicode_text() {
         let link = "https://discord.com/channels/1/2/3";

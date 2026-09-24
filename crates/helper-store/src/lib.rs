@@ -767,6 +767,7 @@ pub struct SuggestionRecord {
     pub author_id: String,
     pub content: String,
     pub message_id: Option<String>,
+    pub channel_id: Option<String>,
     pub status: String,
     pub created_at: i64,
 }
@@ -979,6 +980,14 @@ impl Store {
         // guild/user claim so welcome messages remain idempotent without
         // permanently suppressing a genuine re-join.
         conn.execute_batch("CREATE TABLE IF NOT EXISTS welcome_delivery_claims (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, kind TEXT NOT NULL, claimed_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id,kind)); CREATE INDEX IF NOT EXISTS idx_welcome_delivery_claims_time ON welcome_delivery_claims(guild_id,claimed_at);")?;
+        let suggestion_channel_exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('suggestions') WHERE name='channel_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        if suggestion_channel_exists == 0 {
+            conn.execute("ALTER TABLE suggestions ADD COLUMN channel_id TEXT", [])?;
+        }
         for (column, definition) in [
             ("category", "TEXT NOT NULL DEFAULT 'general'"),
             ("priority", "TEXT NOT NULL DEFAULT 'normal'"),
@@ -5423,12 +5432,30 @@ impl Store {
     }
 
     pub fn create_suggestion(&self, guild_id: &str, author_id: &str, content: &str) -> Result<i64> {
+        self.create_suggestion_in_channel(guild_id, author_id, content, None)
+    }
+
+    pub fn create_suggestion_in_channel(
+        &self,
+        guild_id: &str,
+        author_id: &str,
+        content: &str,
+        channel_id: Option<&str>,
+    ) -> Result<i64> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
-            "INSERT INTO suggestions(guild_id,author_id,content,status,created_at) VALUES(?1,?2,?3,'pending',?4)",
-            params![guild_id, author_id, content, Utc::now().timestamp_millis()],
+            "INSERT INTO suggestions(guild_id,author_id,content,status,created_at,channel_id) VALUES(?1,?2,?3,'pending',?4,?5)",
+            params![guild_id, author_id, content, Utc::now().timestamp_millis(), channel_id],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    pub fn delete_unpublished_suggestion(&self, guild_id: &str, id: i64) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "DELETE FROM suggestions WHERE guild_id=?1 AND id=?2 AND message_id IS NULL",
+            params![guild_id, id],
+        )? > 0)
     }
 
     /// Return the creation time of the latest suggestion submitted by a
@@ -5462,11 +5489,11 @@ impl Store {
     pub fn suggestion(&self, id: i64) -> Result<Option<SuggestionRecord>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         Ok(conn.query_row(
-            "SELECT id,guild_id,author_id,content,message_id,status,created_at FROM suggestions WHERE id=?1",
+            "SELECT id,guild_id,author_id,content,message_id,status,created_at,channel_id FROM suggestions WHERE id=?1",
             [id],
             |row| Ok(SuggestionRecord {
                 id: row.get(0)?, guild_id: row.get(1)?, author_id: row.get(2)?,
-                content: row.get(3)?, message_id: row.get(4)?, status: row.get(5)?, created_at: row.get(6)?,
+                content: row.get(3)?, message_id: row.get(4)?, status: row.get(5)?, created_at: row.get(6)?, channel_id: row.get(7)?,
             }),
         ).optional()?)
     }
@@ -7316,6 +7343,80 @@ mod tests {
             store.count_settings_prefix("g2", "support.panel.").unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn suggestions_keep_the_published_channel_and_remove_failed_drafts() {
+        let store = Store::open(":memory:").unwrap();
+        let unpublished = store
+            .create_suggestion_in_channel("guild", "author", "First", Some("123"))
+            .unwrap();
+        assert_eq!(
+            store
+                .suggestion(unpublished)
+                .unwrap()
+                .unwrap()
+                .channel_id
+                .as_deref(),
+            Some("123")
+        );
+        assert!(
+            store
+                .delete_unpublished_suggestion("guild", unpublished)
+                .unwrap()
+        );
+        assert!(store.suggestion(unpublished).unwrap().is_none());
+        assert!(
+            store
+                .latest_suggestion_created_at("guild", "author")
+                .unwrap()
+                .is_none()
+        );
+
+        let published = store
+            .create_suggestion_in_channel("guild", "author", "Second", Some("456"))
+            .unwrap();
+        store.set_suggestion_message(published, "789").unwrap();
+        assert!(
+            !store
+                .delete_unpublished_suggestion("guild", published)
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .suggestion(published)
+                .unwrap()
+                .unwrap()
+                .channel_id
+                .as_deref(),
+            Some("456")
+        );
+    }
+
+    #[test]
+    fn migration_keeps_legacy_suggestions_and_adds_channel_id() {
+        let path = std::env::temp_dir().join(format!(
+            "vozen-helper-legacy-suggestions-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let legacy = Connection::open(&path).unwrap();
+        legacy.execute_batch(
+            "CREATE TABLE suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, author_id TEXT NOT NULL, content TEXT NOT NULL, message_id TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL); INSERT INTO suggestions(guild_id,author_id,content,created_at) VALUES('g','u','Legacy suggestion',1);",
+        ).unwrap();
+        drop(legacy);
+
+        let store = Store::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(store.suggestion(1).unwrap().unwrap().channel_id, None);
+        let id = store
+            .create_suggestion_in_channel("g", "u", "New suggestion", Some("123"))
+            .unwrap();
+        assert_eq!(
+            store.suggestion(id).unwrap().unwrap().channel_id.as_deref(),
+            Some("123")
+        );
+        drop(store);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

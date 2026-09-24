@@ -11172,6 +11172,15 @@ pub fn parse_ip(value: &str) -> Result<IpAddr> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn suggestion_length_counts_unicode_characters() {
+        let text = "é".repeat(1_000);
+        let decision =
+            super::evaluate_suggestion(&serde_json::json!({"channel": "123"}), &text, "123");
+        assert!(decision.allowed);
+        assert_eq!(decision.text.chars().count(), 1_000);
+    }
+
     use super::*;
 
     #[test]
