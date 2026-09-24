@@ -2997,7 +2997,7 @@ impl EventHandler for Handler {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let decision = evaluate_starboard(
+        let mut decision = evaluate_starboard(
             &policy,
             &StarboardObservation {
                 source_channel_id: reaction.channel_id.to_string(),
@@ -3010,6 +3010,18 @@ impl EventHandler for Handler {
         if decision.ignored {
             return;
         }
+        let normal_reactions = original
+            .reactions
+            .iter()
+            .find(|item| item.reaction_type == reaction.emoji)
+            .map(|item| item.count_details.normal)
+            .unwrap_or(users.len() as u64);
+        decision.count = decision.count.max(starboard_reaction_count(
+            normal_reactions,
+            users.iter().any(|user| user.id == original.author.id),
+            policy.allow_self_star,
+        ));
+        decision.should_publish = decision.count >= decision.threshold;
         let count = decision.count as i64;
         let link = format!(
             "https://discord.com/channels/{}/{}/{}",
@@ -5589,11 +5601,21 @@ impl Handler {
             setting_string(&self.store, &guild_text, "community.starboard.emoji")
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "⭐".to_string());
+        let reaction_emoji = if configured_emoji == "⭐"
+            && !original.reactions.iter().any(|item| {
+                item.reaction_type == serenity::all::ReactionType::Unicode(configured_emoji.clone())
+                    && item.count_details.normal > 0
+            }) {
+            "🌟"
+        } else {
+            configured_emoji.as_str()
+        };
+        let reaction_type = serenity::all::ReactionType::Unicode(reaction_emoji.to_string());
         let Ok(users) = channel_id
             .reaction_users(
                 &ctx.http,
                 message_id,
-                serenity::all::ReactionType::Unicode(configured_emoji.clone()),
+                reaction_type.clone(),
                 Some(100),
                 None,
             )
@@ -5613,7 +5635,7 @@ impl Handler {
             })
             .unwrap_or_default();
         let policy = starboard_policy_for_store(&self.store, &guild_text);
-        let decision = evaluate_starboard(
+        let mut decision = evaluate_starboard(
             &policy,
             &StarboardObservation {
                 source_channel_id: channel_id.to_string(),
@@ -5623,6 +5645,20 @@ impl Handler {
                 has_attachments: !original.attachments.is_empty(),
             },
         );
+        if !decision.ignored {
+            let normal_reactions = original
+                .reactions
+                .iter()
+                .find(|item| item.reaction_type == reaction_type)
+                .map(|item| item.count_details.normal)
+                .unwrap_or(users.len() as u64);
+            decision.count = decision.count.max(starboard_reaction_count(
+                normal_reactions,
+                users.iter().any(|user| user.id == original.author.id),
+                policy.allow_self_star,
+            ));
+            decision.should_publish = decision.count >= decision.threshold;
+        }
         let board = ChannelId::new(board_id);
         if !decision.should_publish {
             if let Ok(starboard_message_id) = entry.starboard_message_id.parse::<u64>() {
@@ -12192,24 +12228,83 @@ fn starboard_message_content(
     original: &serenity::all::Message,
     link: &str,
 ) -> String {
-    let mut content = format!(
-        "{emoji} **{count} stars** on <@{}>\n{}\n{}",
-        original.author.id, original.content, link
-    );
-    if policy.include_images {
-        let attachment_links = original
+    let attachments = if policy.include_images {
+        original
             .attachments
             .iter()
             .take(4)
             .map(|attachment| attachment.url.as_str())
             .collect::<Vec<_>>()
-            .join("\n");
-        if !attachment_links.is_empty() {
-            content.push('\n');
-            content.push_str(&attachment_links);
+    } else {
+        Vec::new()
+    };
+    render_starboard_content(
+        emoji,
+        count,
+        &original.author.id.to_string(),
+        &original.content,
+        &attachments,
+        link,
+    )
+}
+
+fn render_starboard_content(
+    emoji: &str,
+    count: i64,
+    author_id: &str,
+    original_content: &str,
+    attachments: &[&str],
+    link: &str,
+) -> String {
+    const MESSAGE_LIMIT: usize = 2_000;
+    let prefix = format!("{emoji} **{count} stars** on <@{author_id}>\n");
+    let source_link = format!("\n{link}");
+    let mut attachment_text = String::new();
+    let mut reserved = prefix.encode_utf16().count() + source_link.encode_utf16().count();
+    for attachment in attachments.iter().take(4) {
+        let length = 1 + attachment.encode_utf16().count();
+        if reserved + length <= MESSAGE_LIMIT {
+            attachment_text.push('\n');
+            attachment_text.push_str(attachment);
+            reserved += length;
         }
     }
-    content
+    let available = MESSAGE_LIMIT.saturating_sub(reserved);
+    let original_length = original_content.encode_utf16().count();
+    let budget = if original_length > available {
+        available.saturating_sub(1)
+    } else {
+        available
+    };
+    let mut excerpt = String::new();
+    let mut used = 0;
+    for character in original_content.chars() {
+        let length = character.len_utf16();
+        if used + length > budget {
+            break;
+        }
+        excerpt.push(character);
+        used += length;
+    }
+    if original_length > available && available > 0 {
+        excerpt.push('…');
+    }
+    format!("{prefix}{excerpt}{source_link}{attachment_text}")
+}
+
+fn starboard_reaction_count(
+    normal_reactions: u64,
+    author_in_first_page: bool,
+    allow_self_star: bool,
+) -> u64 {
+    if allow_self_star {
+        normal_reactions
+    } else if author_in_first_page || normal_reactions > 100 {
+        // Above 100, the first page cannot prove that the author did not react.
+        normal_reactions.saturating_sub(1)
+    } else {
+        normal_reactions
+    }
 }
 
 /// Starboard mirrors user-authored content, so never allow arbitrary mentions
@@ -12705,6 +12800,46 @@ fn approved_wallet_contract(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn starboard_mirror_keeps_source_link_with_long_unicode_text() {
+        let link = "https://discord.com/channels/1/2/3";
+        let mirror = super::render_starboard_content(
+            "⭐",
+            4,
+            "42",
+            &"🌟".repeat(1_500),
+            &["https://cdn.discord.test/image.png"],
+            link,
+        );
+        assert!(mirror.encode_utf16().count() <= 2_000);
+        assert!(mirror.contains(link));
+        assert!(mirror.contains("https://cdn.discord.test/image.png"));
+        assert!(mirror.contains('…'));
+    }
+
+    #[test]
+    fn starboard_mirror_omits_attachments_that_do_not_fit() {
+        let oversized_url = format!("https://cdn.discord.test/{}", "x".repeat(2_000));
+        let mirror = super::render_starboard_content(
+            "⭐",
+            3,
+            "42",
+            "Hello",
+            &[oversized_url.as_str()],
+            "https://discord.com/channels/1/2/3",
+        );
+        assert!(mirror.encode_utf16().count() <= 2_000);
+        assert!(mirror.contains("Hello"));
+        assert!(!mirror.contains(&oversized_url));
+    }
+
+    #[test]
+    fn starboard_reaction_count_reaches_the_maximum_threshold_with_101_votes() {
+        assert_eq!(super::starboard_reaction_count(101, true, false), 100);
+        assert_eq!(super::starboard_reaction_count(101, false, false), 100);
+        assert_eq!(super::starboard_reaction_count(101, false, true), 101);
+    }
+
     #[test]
     fn tiktok_runtime_accepts_creator_oauth_without_a_global_token() {
         assert!(super::tiktok_runtime_allowed(true, false, true, false));
