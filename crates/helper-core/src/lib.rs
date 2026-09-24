@@ -2106,9 +2106,18 @@ pub fn evaluate_giveaway(
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(24)
         .clamp(1, 168);
-    let duration_ms = duration_override_ms
-        .filter(|value| (60_000..=168 * 3_600_000).contains(value))
-        .unwrap_or(default_hours * 3_600_000);
+    if duration_override_ms.is_some_and(|value| !(60_000..=168 * 3_600_000).contains(&value)) {
+        return GiveawayDecision {
+            allowed: false,
+            prize: prize.into(),
+            winners: winners as u64,
+            duration_ms: 0,
+            required_role_id: None,
+            reason_code: "invalid_duration",
+            explanation: "Giveaway duration must be between 1 minute and 7 days.".into(),
+        };
+    }
+    let duration_ms = duration_override_ms.unwrap_or(default_hours * 3_600_000);
     let required_role = required_role_override
         .or_else(|| {
             object
@@ -12182,6 +12191,16 @@ mod tests {
             &serde_json::json!({"prize": "No role", "requiredRole": "not-a-role"}),
         );
         assert!(rejected[0].contains("invalid_required_role"));
+        let invalid_duration = evaluate_giveaway(
+            &serde_json::json!({"defaultDurationHours": 24}),
+            "Prize",
+            None,
+            Some(10_000),
+            None,
+        );
+        assert!(!invalid_duration.allowed);
+        assert_eq!(invalid_duration.reason_code, "invalid_duration");
+        assert_eq!(invalid_duration.duration_ms, 0);
 
         let events = feature_adapter("community.events").expect("events adapter");
         let event_preview = events.simulate(

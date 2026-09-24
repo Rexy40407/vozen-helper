@@ -974,6 +974,7 @@ impl Store {
         // The owner column is named `opener_id` there; changing it to `user_id`
         // would make an in-place Rust cutover fail on the live database.
         conn.execute_batch("CREATE TABLE IF NOT EXISTS tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, opener_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', claimed_by TEXT, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_tickets_owner ON tickets(guild_id,opener_id,status); CREATE TABLE IF NOT EXISTS suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, author_id TEXT NOT NULL, content TEXT NOT NULL, message_id TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS suggestion_votes (suggestion_id INTEGER NOT NULL, user_id TEXT NOT NULL, vote INTEGER NOT NULL, PRIMARY KEY(suggestion_id,user_id)); CREATE TABLE IF NOT EXISTS giveaways (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, prize TEXT NOT NULL, winners INTEGER NOT NULL DEFAULT 1, end_at INTEGER NOT NULL, ended INTEGER NOT NULL DEFAULT 0, required_role_id TEXT, host_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS giveaway_entries (giveaway_id INTEGER NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY(giveaway_id,user_id)); CREATE TABLE IF NOT EXISTS polls (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, question TEXT NOT NULL, options TEXT NOT NULL, end_at INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS poll_votes (poll_id INTEGER NOT NULL, user_id TEXT NOT NULL, choice INTEGER NOT NULL, PRIMARY KEY(poll_id,user_id)); CREATE TABLE IF NOT EXISTS workflows (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, name TEXT NOT NULL, trigger TEXT NOT NULL, condition TEXT NOT NULL DEFAULT '', action TEXT NOT NULL, payload TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS workflow_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id INTEGER NOT NULL, guild_id TEXT NOT NULL, source_id TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_workflows_trigger ON workflows(guild_id,trigger,enabled); CREATE TABLE IF NOT EXISTS quarantine (guild_id TEXT NOT NULL, user_id TEXT NOT NULL, role_ids TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, PRIMARY KEY(guild_id,user_id)); CREATE TABLE IF NOT EXISTS starboard (guild_id TEXT NOT NULL, original_message_id TEXT NOT NULL, starboard_message_id TEXT NOT NULL, star_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(guild_id,original_message_id));")?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS giveaway_results (giveaway_id INTEGER PRIMARY KEY, winners_json TEXT NOT NULL, announced INTEGER NOT NULL DEFAULT 0, claimed_at INTEGER);")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, correlation_id TEXT NOT NULL UNIQUE, guild_id TEXT NOT NULL, actor_id TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', before_json TEXT NOT NULL DEFAULT '{}', after_json TEXT NOT NULL DEFAULT '{}', outcome TEXT NOT NULL, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_audit_events_guild_time ON audit_events(guild_id, created_at DESC); CREATE TABLE IF NOT EXISTS feature_settings (guild_id TEXT NOT NULL, key TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, config_json TEXT NOT NULL DEFAULT '{}', revision INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL DEFAULT '', PRIMARY KEY(guild_id,key)); CREATE TABLE IF NOT EXISTS feature_revisions (guild_id TEXT NOT NULL, key TEXT NOT NULL, revision INTEGER NOT NULL, enabled INTEGER NOT NULL, config_json TEXT NOT NULL, updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL, PRIMARY KEY(guild_id,key,revision)); CREATE INDEX IF NOT EXISTS idx_feature_revisions_lookup ON feature_revisions(guild_id,key,revision DESC);")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS studio_template_revisions (guild_id TEXT NOT NULL, template_id TEXT NOT NULL, revision INTEGER NOT NULL, template_json TEXT NOT NULL, created_at INTEGER NOT NULL, created_by TEXT NOT NULL, PRIMARY KEY(guild_id,template_id,revision)); CREATE INDEX IF NOT EXISTS idx_studio_template_revisions_lookup ON studio_template_revisions(guild_id,template_id,revision DESC);")?;
         // Member-add events can be delivered more than once. Keep a short
@@ -5540,6 +5541,53 @@ impl Store {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Persist the giveaway and its end job together, before publishing the panel.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_scheduled_giveaway(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        prize: &str,
+        winners: i64,
+        end_at: i64,
+        required_role_id: Option<&str>,
+        host_id: &str,
+    ) -> Result<i64> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO giveaways(guild_id,channel_id,prize,winners,end_at,required_role_id,host_id,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![guild_id, channel_id, prize, winners.clamp(1, 20), end_at, required_role_id, host_id, Utc::now().timestamp_millis()],
+        )?;
+        let id = tx.last_insert_rowid();
+        let target_id = id.to_string();
+        let payload = serde_json::json!({"channel_id": channel_id, "giveaway_id": id}).to_string();
+        tx.execute(
+            "INSERT INTO scheduled_actions(guild_id,type,target_id,execute_at,payload,case_id) VALUES(?1,'giveaway_end',?2,?3,?4,NULL)",
+            params![guild_id, target_id, end_at, payload],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Roll back a draft only if no Discord panel was recorded for it.
+    pub fn delete_unpublished_giveaway(&self, guild_id: &str, id: i64) -> Result<bool> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let deleted = tx.execute(
+            "DELETE FROM giveaways WHERE id=?1 AND guild_id=?2 AND message_id IS NULL",
+            params![id, guild_id],
+        )? > 0;
+        if deleted {
+            tx.execute(
+                "DELETE FROM scheduled_actions WHERE guild_id=?1 AND type='giveaway_end' AND target_id=?2",
+                params![guild_id, id.to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(deleted)
+    }
+
     pub fn set_giveaway_message(&self, id: i64, message_id: &str) -> Result<()> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
@@ -5586,6 +5634,85 @@ impl Store {
     pub fn end_giveaway(&self, id: i64) -> Result<bool> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         Ok(conn.execute("UPDATE giveaways SET ended=1 WHERE id=?1 AND ended=0", [id])? > 0)
+    }
+
+    /// Freeze a draw once; retries reuse its winners until announcement succeeds.
+    pub fn prepare_giveaway_result(
+        &self,
+        guild_id: &str,
+        id: i64,
+    ) -> Result<Option<(Vec<String>, i64)>> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let claim_at = Utc::now().timestamp_millis();
+        let found: Option<(bool, i64)> = tx
+            .query_row(
+                "SELECT ended,winners FROM giveaways WHERE id=?1 AND guild_id=?2",
+                params![id, guild_id],
+                |row| Ok((row.get::<_, i64>(0)? != 0, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((ended, winner_count)) = found else {
+            return Ok(None);
+        };
+        let existing: Option<(String, bool)> = tx
+            .query_row(
+                "SELECT winners_json,announced FROM giveaway_results WHERE giveaway_id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
+            )
+            .optional()?;
+        if let Some((raw, announced)) = existing {
+            if announced {
+                return Ok(None);
+            }
+            let claimed = tx.execute(
+                "UPDATE giveaway_results SET claimed_at=?2 WHERE giveaway_id=?1 AND announced=0 AND (claimed_at IS NULL OR claimed_at<?3)",
+                params![id, claim_at, claim_at - 15 * 60_000],
+            )? > 0;
+            if !claimed {
+                anyhow::bail!("giveaway announcement already in progress");
+            }
+            tx.commit()?;
+            return Ok(Some((serde_json::from_str(&raw)?, claim_at)));
+        }
+        if ended {
+            return Ok(None);
+        }
+        let winners = {
+            let mut statement = tx.prepare(
+                "SELECT user_id FROM giveaway_entries WHERE giveaway_id=?1 ORDER BY RANDOM() LIMIT ?2",
+            )?;
+            let rows = statement.query_map(params![id, winner_count], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<String>>>()?
+        };
+        tx.execute("UPDATE giveaways SET ended=1 WHERE id=?1", [id])?;
+        tx.execute(
+            "INSERT INTO giveaway_results(giveaway_id,winners_json,claimed_at) VALUES(?1,?2,?3)",
+            params![id, serde_json::to_string(&winners)?, claim_at],
+        )?;
+        tx.commit()?;
+        Ok(Some((winners, claim_at)))
+    }
+
+    pub fn mark_giveaway_announced(&self, id: i64, claim_at: i64) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        if conn.execute(
+            "UPDATE giveaway_results SET announced=1,claimed_at=NULL WHERE giveaway_id=?1 AND claimed_at=?2 AND announced=0",
+            params![id, claim_at],
+        )? == 0 {
+            anyhow::bail!("giveaway announcement claim was lost");
+        }
+        Ok(())
+    }
+
+    pub fn release_giveaway_claim(&self, id: i64, claim_at: i64) -> Result<()> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "UPDATE giveaway_results SET claimed_at=NULL WHERE giveaway_id=?1 AND claimed_at=?2 AND announced=0",
+            params![id, claim_at],
+        )?;
+        Ok(())
     }
 
     pub fn add_giveaway_entry(&self, id: i64, user_id: &str) -> Result<bool> {
@@ -5910,6 +6037,52 @@ fn parse_dt(value: &str) -> Result<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn giveaway_draft_and_end_job_are_created_and_removed_together() {
+        let store = Store::open(":memory:").unwrap();
+        let id = store
+            .create_scheduled_giveaway("g", "c", "Prémio", 2, 123_456, None, "host")
+            .unwrap();
+        let due = store.due_scheduled_actions(123_456, 10).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].2, "giveaway_end");
+        assert_eq!(due[0].3, id.to_string());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&due[0].4).unwrap()["giveaway_id"],
+            id
+        );
+        assert!(store.delete_unpublished_giveaway("g", id).unwrap());
+        assert!(store.giveaway(id).unwrap().is_none());
+        assert!(store.due_scheduled_actions(123_456, 10).unwrap().is_empty());
+
+        let published = store
+            .create_scheduled_giveaway("g", "c", "Prémio", 2, 123_456, None, "host")
+            .unwrap();
+        store.set_giveaway_message(published, "123").unwrap();
+        assert!(!store.delete_unpublished_giveaway("g", published).unwrap());
+        assert!(store.giveaway(published).unwrap().is_some());
+        assert_eq!(store.due_scheduled_actions(123_456, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn giveaway_result_is_frozen_until_announcement() {
+        let store = Store::open(":memory:").unwrap();
+        let id = store
+            .create_scheduled_giveaway("g", "c", "Prize", 1, i64::MAX, None, "host")
+            .unwrap();
+        store.add_giveaway_entry(id, "first").unwrap();
+        assert_eq!(store.prepare_giveaway_result("other", id).unwrap(), None);
+        let (selected, first_claim) = store.prepare_giveaway_result("g", id).unwrap().unwrap();
+        assert_eq!(selected, vec!["first"]);
+        assert_eq!(store.toggle_giveaway_entry(id, "late").unwrap(), None);
+        assert!(store.prepare_giveaway_result("g", id).is_err());
+        store.release_giveaway_claim(id, first_claim).unwrap();
+        let (retry, retry_claim) = store.prepare_giveaway_result("g", id).unwrap().unwrap();
+        assert_eq!(retry, selected);
+        store.mark_giveaway_announced(id, retry_claim).unwrap();
+        assert_eq!(store.prepare_giveaway_result("g", id).unwrap(), None);
+    }
 
     #[test]
     fn giveaway_entries_cannot_change_after_close() {

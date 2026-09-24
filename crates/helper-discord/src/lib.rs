@@ -7564,7 +7564,7 @@ impl Handler {
                 }) else {
                     return respond(ctx, command, "Duração inválida. Usa 10m, 2h ou 1d.").await;
                 };
-                if prize.is_empty() || prize.len() > 200 {
+                if prize.is_empty() || prize.chars().count() > 200 {
                     return respond(ctx, command, "O prémio deve ter entre 1 e 200 caracteres.").await;
                 }
                 let winners = option_i64(command, "winners").unwrap_or_else(|| setting_u64(&self.store, &guild_id.to_string(), "community.giveaways.default_winners", 1) as i64).clamp(1, 20);
@@ -7591,12 +7591,25 @@ impl Handler {
                 let winners = decision.winners as i64;
                 let required_role = decision.required_role_id;
                 let end_at = chrono::Utc::now().timestamp_millis() + decision.duration_ms;
-                let id = self.store.create_giveaway(&guild_id.to_string(), &command.channel_id.to_string(), &prize, winners, end_at, required_role.as_deref(), &command.user.id.to_string())?;
-                let message = command.channel_id.send_message(&ctx.http, serenity::all::CreateMessage::new()
+                let guild_text = guild_id.to_string();
+                let id = self.store.create_scheduled_giveaway(&guild_text, &command.channel_id.to_string(), &prize, winners, end_at, required_role.as_deref(), &command.user.id.to_string())?;
+                let published = command.channel_id.send_message(&ctx.http, serenity::all::CreateMessage::new()
                     .content(format!("🎉 **Giveaway #{id}**\nPrize: **{prize}**\nWinners: **{winners}**\nEnds <t:{}:R>\nClick the button to join.", end_at / 1_000))
-                    .components(vec![CreateActionRow::Buttons(vec![CreateButton::new(format!("giveaway:join:{id}")).label("Join").style(ButtonStyle::Primary)])])).await?;
-                self.store.set_giveaway_message(id, &message.id.to_string())?;
-                self.store.schedule_typed(&guild_id.to_string(), "giveaway_end", &command.user.id.to_string(), end_at, &serde_json::json!({"channel_id": command.channel_id.to_string(), "giveaway_id": id}).to_string())?;
+                    .allowed_mentions(giveaway_allowed_mentions(&[]))
+                    .components(vec![CreateActionRow::Buttons(vec![CreateButton::new(format!("giveaway:join:{id}")).label("Join").style(ButtonStyle::Primary)])])).await;
+                let message = match published {
+                    Ok(message) => message,
+                    Err(error) => {
+                        self.store.delete_unpublished_giveaway(&guild_text, id)?;
+                        warn!(%guild_text, giveaway_id = id, %error, "could not publish giveaway panel");
+                        return respond(ctx, command, "Could not publish the giveaway in this channel.").await;
+                    }
+                };
+                if let Err(error) = self.store.set_giveaway_message(id, &message.id.to_string()) {
+                    let _ = command.channel_id.delete_message(&ctx.http, message.id).await;
+                    let _ = self.store.delete_unpublished_giveaway(&guild_text, id);
+                    return Err(error);
+                }
                 format!("Giveaway #{id} created.")
             }
             "giveaway-end" | "gend" => {
@@ -11161,17 +11174,11 @@ async fn finish_giveaway(
     let Some(giveaway) = store.giveaway(id)? else {
         return Ok(false);
     };
-    if giveaway.guild_id != guild_id || giveaway.ended || !store.end_giveaway(id)? {
+    if giveaway.guild_id != guild_id {
         return Ok(false);
     }
-    let winners = {
-        let mut entries = store.giveaway_entries(id)?;
-        let mut rng = rand::rng();
-        entries.shuffle(&mut rng);
-        entries
-            .into_iter()
-            .take(giveaway.winners as usize)
-            .collect::<Vec<_>>()
+    let Some((winners, claim_at)) = store.prepare_giveaway_result(guild_id, id)? else {
+        return Ok(false);
     };
     let result = if winners.is_empty() {
         format!("🎁 Giveaway #{} ended without participants.", giveaway.id)
@@ -11187,27 +11194,44 @@ async fn finish_giveaway(
                 .join(", ")
         )
     };
-    let mut edited = false;
+    let channel_id = giveaway
+        .channel_id
+        .parse::<u64>()
+        .map(ChannelId::new)
+        .map_err(|_| anyhow::anyhow!("invalid giveaway channel"))?;
+    let published = channel_id
+        .send_message(
+            http,
+            CreateMessage::new()
+                .content(result)
+                .allowed_mentions(giveaway_allowed_mentions(&winners)),
+        )
+        .await;
+    if let Err(error) = published {
+        store.release_giveaway_claim(id, claim_at)?;
+        return Err(error.into());
+    }
+    store.mark_giveaway_announced(id, claim_at)?;
+    // The public announcement is the recorded outcome. A missing or uneditable
+    // original panel does not cause another draw.
     if let Some(message_id) = giveaway
         .message_id
         .as_deref()
         .and_then(|raw| raw.parse::<u64>().ok())
-        && let Ok(channel) = giveaway.channel_id.parse::<u64>()
-    {
-        let channel_id = ChannelId::new(channel);
-        edited = channel_id
+        && let Err(error) = channel_id
             .edit_message(
                 http,
                 serenity::all::MessageId::new(message_id),
                 serenity::all::EditMessage::new()
-                    .content(result.clone())
+                    .content(format!(
+                        "🎉 Giveaway #{} ended. See the result below.",
+                        giveaway.id
+                    ))
                     .components(Vec::new()),
             )
             .await
-            .is_ok();
-    }
-    if !edited && let Ok(channel) = giveaway.channel_id.parse::<u64>() {
-        let _ = ChannelId::new(channel).say(http, result).await;
+    {
+        warn!(giveaway_id = id, %error, "could not close giveaway panel after announcement");
     }
     Ok(true)
 }
@@ -11230,17 +11254,18 @@ async fn reroll_giveaway(
     }
     entries.shuffle(&mut rand::rng());
     let winner = entries[0].clone();
-    if let Ok(channel) = giveaway.channel_id.parse::<u64>() {
-        ChannelId::new(channel)
-            .say(
-                http,
-                format!(
+    let channel = giveaway.channel_id.parse::<u64>().map(ChannelId::new)?;
+    channel
+        .send_message(
+            http,
+            CreateMessage::new()
+                .content(format!(
                     "🎲 Giveaway #{} reroll: new winner <@{}> received **{}**.",
                     giveaway.id, winner, giveaway.prize
-                ),
-            )
-            .await?;
-    }
+                ))
+                .allowed_mentions(giveaway_allowed_mentions(std::slice::from_ref(&winner))),
+        )
+        .await?;
     Ok(Some(winner))
 }
 
@@ -12414,6 +12439,19 @@ fn starboard_allowed_mentions(author_id: serenity::all::UserId) -> CreateAllowed
         .replied_user(false)
 }
 
+fn giveaway_allowed_mentions(winners: &[String]) -> CreateAllowedMentions {
+    let users = winners
+        .iter()
+        .filter_map(|winner| winner.parse::<u64>().ok())
+        .map(serenity::all::UserId::new)
+        .collect::<Vec<_>>();
+    CreateAllowedMentions::new()
+        .everyone(false)
+        .empty_roles()
+        .users(users)
+        .replied_user(false)
+}
+
 fn permission_passport_message() -> String {
     "**Permission Passport**\nBase: `View Channels`, `Send Messages`, `Embed Links`, `Read Message History`, `Use Application Commands`.\nOptional security: `Manage Messages`, `Moderate Members`, `Kick Members`, `Ban Members`, `Manage Roles`.\nOptional support/events: `Manage Channels`, `Manage Threads`, `Create Private Threads`.\nGateway: `MESSAGE_CONTENT` and `GUILD_MEMBERS` must be enabled for the app at gateway startup; their data is processed only by configured modules that need it.\nEvery extra permission has a module and an explicit consequence; use the dashboard to compare granted permissions with the required ones.".to_string()
 }
@@ -12898,6 +12936,23 @@ fn approved_wallet_contract(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn giveaway_mentions_only_the_selected_winners() {
+        let panel = serde_json::to_value(super::giveaway_allowed_mentions(&[])).unwrap();
+        assert_eq!(panel["parse"], serde_json::json!([]));
+        assert_eq!(panel["users"], serde_json::json!([]));
+        assert_eq!(panel["roles"], serde_json::json!([]));
+
+        let result = serde_json::to_value(super::giveaway_allowed_mentions(&[
+            "123".into(),
+            "not-a-user".into(),
+        ]))
+        .unwrap();
+        assert_eq!(result["parse"], serde_json::json!([]));
+        assert_eq!(result["users"], serde_json::json!(["123"]));
+        assert_eq!(result["roles"], serde_json::json!([]));
+    }
+
     #[test]
     fn suggestion_author_visibility_follows_the_published_message() {
         assert_eq!(
