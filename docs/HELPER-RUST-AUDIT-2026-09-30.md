@@ -49,7 +49,8 @@ As correcoes abaixo sao da inspecao local, nao de uma revisao concluida pelo Sol
   de reforcar as fixtures de sessao e resultados orfaos, a repeticao final
   foi parcialmente bloqueada pelo Windows Application Control, erro 4551,
   antes de executar alguns binarios. Nao equivale a uma falha de assertions;
-  as fixtures finais afetadas precisam de execucao num ambiente permitido.
+  as fixtures finais afetadas passaram posteriormente no runner Linux,
+  no CI `36651086533` e na release `36651086557` do commit `0b7d6b1`.
 - `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`: passou.
 - Formatacao verificada com o executavel `rustfmt` da toolchain 1.97.1,
   edition 2024, nos fontes Rust. O launcher `cargo fmt` foi bloqueado pelo
@@ -63,8 +64,11 @@ As correcoes abaixo sao da inspecao local, nao de uma revisao concluida pelo Sol
 
 - SSH para o VPS foi recusado por este ambiente: `Permission denied` ao
   conectar a porta 22. O pedido de permissao de rede nao concedeu acesso.
-  Nao foi possivel verificar o processo atual, criar backup remoto, publicar
-  uma release Linux ou fazer deploy. Um teste local nao prova estado de producao.
+  Nao foi possivel verificar o processo atual, criar backup remoto ou fazer
+  deploy. O alvo registado no Second Brain em 30 de setembro e
+  `ubuntu@146.59.147.110`; o IP Hetzner antigo nao deve ser usado.
+  A release Linux do commit `0b7d6b1` foi publicada pelo workflow
+  `36651086557`, mas isso nao prova que esteja ativa no VPS.
 - **Retencao nao ligada ao runtime:** `start_scheduler` existe em
   `helper-modules`, mas nao tem chamadas no workspace. `Serve` nao inicia
   essa rotina. A funcao tambem confirma jobs apenas depois de os registar em
@@ -77,3 +81,28 @@ As correcoes abaixo sao da inspecao local, nao de uma revisao concluida pelo Sol
 - A verificacao modulo a modulo nao terminou. Premium continua perto do fim
   e a integracao TikTok fica por ultimo. A limpeza de dados partilhada nao
   constitui uma auditoria dos providers Premium.
+
+## Dependencias e CI
+
+- O CI geral de `0b7d6b1` passou audit, formatacao, testes e Clippy Rust,
+  mas parou no audit npm: `undici 6.28.0` tinha um advisory high. Os checks
+  Node e panel seguintes ficaram por executar nesse run.
+- Override e lockfile elevados a `undici 6.28.1`, a correcao indicada em
+  https://github.com/nodejs/undici/security/advisories/GHSA-rfgv-xxqx-mfg5.
+  Como o registry esta bloqueado neste ambiente, o manifest foi confirmado
+  no tag oficial `v6.28.1` e a integridade no lockfile primario Apache:
+  https://github.com/apache/streampipes/blob/ee3f344914f04516cbbfb1755271dcb9965c86fe/ui/package-lock.json.
+  A instalacao deste pacote e o audit atual precisam de verificacao pelo CI.
+- Vitest e os pacotes associados elevados a `4.1.11`, usando metadata e
+  artefactos ja presentes na cache npm, para o advisory moderate
+  https://github.com/vitest-dev/vitest/security/advisories/GHSA-82fw-gwwq-j7x9.
+  Vite mantido em `7.3.6`; nao foi adotado Vite 8 incidentalmente.
+- Removido `minWorkers`, que deixou de integrar a configuracao Vitest 4,
+  e o shebang desnecessario do modulo de audit: os workflows invocam-no
+  com `node`, e o shebang causava `SyntaxError` ao importar nos testes.
+- Lint, typecheck e build Node passaram. **260 testes em 29 ficheiros
+  passaram** com `npm test -- --configLoader native`. O loader native
+  evitou um bloqueio de leitura do bundler de config neste ambiente Windows;
+  nao foram alteradas protecoes nem excluidos testes.
+- Nao foi reduzido o limiar do audit, nem usado `npm audit fix --force`.
+  O deploy continua condicionado a CI geral verde e acesso ao VPS.

@@ -9,6 +9,5 @@ export default defineConfig({
     exclude: ['site-publish/**', 'node_modules/**'],
     pool: 'forks',
     maxWorkers: 1,
-    minWorkers: 1,
   },
 });
