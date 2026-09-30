@@ -7673,7 +7673,10 @@ impl Handler {
                 let duration_override_ms = if poll_duration.trim().is_empty() {
                     None
                 } else {
-                    parse_duration(poll_duration)
+                    let Some(duration) = parse_duration(poll_duration) else {
+                        return respond(ctx, command, "Invalid duration. Use a value such as 10m, 2h or 1d.").await;
+                    };
+                    Some(duration)
                 };
                 let decision = evaluate_poll(
                     &poll_config,
@@ -7690,14 +7693,23 @@ impl Handler {
                 let delay = decision.duration_ms;
                 let end_at = chrono::Utc::now().timestamp_millis() + delay;
                 let poll_channel = decision.channel_id;
-                let id = self.store.create_poll(&guild_id.to_string(), &poll_channel, &question, &options, end_at)?;
-                let labels = options.iter().enumerate().map(|(index, value)| CreateButton::new(format!("poll:{id}:{index}")).label(format!("{}: {}", index + 1, truncate(value, 70))).style(ButtonStyle::Secondary)).collect::<Vec<_>>();
+                let guild_text = guild_id.to_string();
+                let id = self.store.create_scheduled_poll(&guild_text, &poll_channel, &question, &options, end_at)?;
                 let message_channel = poll_channel.parse::<u64>().map(ChannelId::new).unwrap_or(command.channel_id);
-                let message = message_channel.send_message(&ctx.http, serenity::all::CreateMessage::new()
-                    .content(format!("🗳️ **Poll #{id}: {question}**\n{}\nEnds <t:{}:R>", options.iter().enumerate().map(|(i, v)| format!("{}️⃣ {}", i + 1, v)).collect::<Vec<_>>().join("\n"), end_at / 1_000))
-                    .components(vec![CreateActionRow::Buttons(labels)])).await?;
-                self.store.set_poll_message(id, &message.id.to_string())?;
-                self.store.schedule_typed(&guild_id.to_string(), "poll_end", &command.user.id.to_string(), end_at, &serde_json::json!({"channel_id": command.channel_id.to_string(), "poll_id": id}).to_string())?;
+                let published = message_channel.send_message(&ctx.http, poll_open_message(id, &question, &options, end_at)).await;
+                let message = match published {
+                    Ok(message) => message,
+                    Err(error) => {
+                        self.store.delete_unpublished_poll(&guild_text, id)?;
+                        warn!(%guild_text, poll_id = id, %error, "could not publish poll panel");
+                        return respond(ctx, command, "Could not publish the poll in this channel.").await;
+                    }
+                };
+                if let Err(error) = self.store.set_poll_message(id, &message.id.to_string()) {
+                    let _ = message_channel.delete_message(&ctx.http, message.id).await;
+                    let _ = self.store.delete_unpublished_poll(&guild_text, id);
+                    return Err(error);
+                }
                 format!("Poll #{id} created.")
             }
             "quarantine" => {
@@ -7713,12 +7725,22 @@ impl Handler {
                 let member = guild_id.member(&ctx.http, target).await?;
                 let role_ids = member.roles.iter().map(|role| role.to_string()).collect::<Vec<_>>();
                 let reason = option_string(command, "reason").unwrap_or("Quarantine manual");
-                self.store.save_quarantine(&guild_id.to_string(), &target.to_string(), &role_ids, reason)?;
+                if !self.store.begin_quarantine(&guild_id.to_string(), &target.to_string(), &role_ids, reason)? {
+                    return respond(ctx, command, "This member already has saved quarantine roles. Use /unquarantine to restore them first.").await;
+                }
+                let mut failed = 0;
                 for role in &member.roles {
-                    let _ = member.remove_role(&ctx.http, *role).await;
+                    if let Err(error) = member.remove_role(&ctx.http, *role).await {
+                        failed += 1;
+                        warn!(%guild_id, %target, role_id = %role, %error, "could not remove quarantine role");
+                    }
                 }
                 let case_id = self.store.record_case(&guild_id.to_string(), "quarantine", &target.to_string(), &command.user.id.to_string(), reason, None)?;
-                format!("<@{}> quarantined as case #{case_id}. Roles were saved for restoration.", target)
+                if failed == 0 {
+                    format!("<@{}> quarantined as case #{case_id}. Roles were saved for restoration.", target)
+                } else {
+                    format!("Quarantine incomplete for <@{target}> (case #{case_id}): could not remove {failed} role(s). Original roles are saved; check the bot's permissions and role hierarchy.")
+                }
             }
             "unquarantine" => {
                 let Some(guild_id) = command.guild_id else {
@@ -7734,16 +7756,17 @@ impl Handler {
                     return respond(ctx, command, "Esse membro não está em quarantine.").await;
                 };
                 let member = guild_id.member(&ctx.http, target).await?;
-                let mut restored = 0;
-                for raw_role in record.role_ids {
-                    if let Ok(role_id) = raw_role.parse::<u64>()
-                        && member.add_role(&ctx.http, RoleId::new(role_id)).await.is_ok()
-                    {
-                        restored += 1;
-                    }
+                let role_member = &member;
+                let role_http = &ctx.http;
+                let (restored, pending) = restore_quarantine_roles(
+                    &self.store, &guild_id.to_string(), &target.to_string(), &record.role_ids, &record.reason,
+                    |role| async move { role_member.add_role(role_http, role).await.is_ok() },
+                ).await?;
+                if pending == 0 {
+                    format!("Quarantine removed from <@{}>; {} role(s) restored.", target, restored)
+                } else {
+                    format!("Quarantine partially restored for <@{target}>: {restored} role(s) restored, {pending} still pending. Pending roles are saved; check permissions and retry /unquarantine.")
                 }
-                self.store.clear_quarantine(&guild_id.to_string(), &target.to_string())?;
-                format!("Quarantine removed from <@{}>; {} role(s) restored.", target, restored)
             }
             "join-gate" => {
                 let Some(guild_id) = command.guild_id else {
@@ -11269,19 +11292,62 @@ async fn reroll_giveaway(
     Ok(Some(winner))
 }
 
-async fn finish_poll(
-    http: &serenity::http::Http,
+async fn restore_quarantine_roles<F, Fut>(
     store: &Store,
     guild_id: &str,
-    id: i64,
-) -> Result<bool> {
-    let Some(poll) = store.poll(id)? else {
-        return Ok(false);
-    };
-    if poll.guild_id != guild_id || poll.closed || !store.close_poll(id)? {
-        return Ok(false);
+    user_id: &str,
+    role_ids: &[String],
+    reason: &str,
+    mut restore: F,
+) -> Result<(usize, usize)>
+where
+    F: FnMut(RoleId) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let mut pending = Vec::new();
+    for raw_role in role_ids {
+        let restored = match raw_role.parse::<u64>().ok().filter(|id| *id != 0) {
+            Some(id) => restore(RoleId::new(id)).await,
+            None => false,
+        };
+        if !restored {
+            pending.push(raw_role.clone());
+        }
     }
-    let counts = store.poll_counts(id, poll.options.len())?;
+    if pending.is_empty() {
+        store.clear_quarantine(guild_id, user_id)?;
+    } else {
+        store.save_quarantine(guild_id, user_id, &pending, reason)?;
+    }
+    Ok((role_ids.len() - pending.len(), pending.len()))
+}
+
+fn poll_open_message(id: i64, question: &str, options: &[String], end_at: i64) -> CreateMessage {
+    let labels = options
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            CreateButton::new(format!("poll:{id}:{index}"))
+                .label(format!("{}: {}", index + 1, truncate(value, 70)))
+                .style(ButtonStyle::Secondary)
+        })
+        .collect::<Vec<_>>();
+    CreateMessage::new()
+        .content(format!(
+            "🗳️ **Poll #{id}: {question}**\n{}\nEnds <t:{}:R>",
+            options
+                .iter()
+                .enumerate()
+                .map(|(i, v)| format!("{}️⃣ {}", i + 1, v))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            end_at / 1_000
+        ))
+        .allowed_mentions(CreateAllowedMentions::new())
+        .components(vec![CreateActionRow::Buttons(labels)])
+}
+
+fn poll_result_message(poll: &helper_store::PollRecord, counts: &[i64]) -> EditMessage {
     let results = poll
         .options
         .iter()
@@ -11296,26 +11362,52 @@ async fn finish_poll(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let content = format!(
-        "🗳️ **Poll #{} encerrada: {}**\n{}",
-        poll.id, poll.question, results
-    );
-    if let Some(message_id) = poll
+    EditMessage::new()
+        .content(format!(
+            "🗳️ **Poll #{} encerrada: {}**\n{}",
+            poll.id, poll.question, results
+        ))
+        .allowed_mentions(CreateAllowedMentions::new())
+        .components(Vec::new())
+}
+
+async fn finish_poll(
+    http: &serenity::http::Http,
+    store: &Store,
+    guild_id: &str,
+    id: i64,
+) -> Result<bool> {
+    let Some(poll) = store.poll(id)? else {
+        return Ok(false);
+    };
+    if poll.guild_id != guild_id {
+        return Ok(false);
+    }
+    // Freeze votes first. A failed edit must leave the closing job retryable;
+    // retrying a closed poll edits the same message with the frozen counts.
+    if !poll.closed {
+        store.close_poll(id)?;
+    }
+    let counts = store.poll_counts(id, poll.options.len())?;
+    let message_id = poll
         .message_id
         .as_deref()
         .and_then(|raw| raw.parse::<u64>().ok())
-        && let Ok(channel) = poll.channel_id.parse::<u64>()
-    {
-        let _ = ChannelId::new(channel)
-            .edit_message(
-                http,
-                serenity::all::MessageId::new(message_id),
-                serenity::all::EditMessage::new()
-                    .content(content)
-                    .components(Vec::new()),
-            )
-            .await;
-    }
+        .filter(|id| *id != 0)
+        .ok_or_else(|| anyhow::anyhow!("poll panel message is missing or invalid"))?;
+    let channel = poll
+        .channel_id
+        .parse::<u64>()
+        .ok()
+        .filter(|id| *id != 0)
+        .ok_or_else(|| anyhow::anyhow!("poll channel is invalid"))?;
+    ChannelId::new(channel)
+        .edit_message(
+            http,
+            MessageId::new(message_id),
+            poll_result_message(&poll, &counts),
+        )
+        .await?;
     Ok(true)
 }
 
@@ -11453,7 +11545,7 @@ fn helper_locale_for_guild(store: &Store, guild_id: &str) -> Result<&'static str
 
 fn parse_duration(raw: &str) -> Option<i64> {
     let value = raw.trim();
-    let (number, unit) = value.split_at(value.len().checked_sub(1)?);
+    let (number, unit) = value.split_at_checked(value.len().checked_sub(1)?)?;
     let amount = number.parse::<i64>().ok()?.checked_mul(match unit {
         "s" => 1_000,
         "m" => 60_000,
@@ -12936,6 +13028,91 @@ fn approved_wallet_contract(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn failed_quarantine_restore_keeps_pending_roles_for_retry() {
+        let store = helper_store::Store::open(":memory:").unwrap();
+        let roles = vec!["10".into(), "20".into()];
+        store.begin_quarantine("g", "u", &roles, "reason").unwrap();
+        let result = super::restore_quarantine_roles(&store, "g", "u", &roles, "reason", |role| {
+            std::future::ready(role.get() == 10)
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, (1, 1));
+        let saved = store.get_quarantine("g", "u").unwrap().unwrap();
+        assert_eq!(saved.role_ids, vec!["20"]);
+        let result = super::restore_quarantine_roles(
+            &store,
+            "g",
+            "u",
+            &saved.role_ids,
+            &saved.reason,
+            |_| std::future::ready(true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, (1, 0));
+        assert!(store.get_quarantine("g", "u").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn invalid_quarantine_roles_remain_saved_without_discord_calls() {
+        let store = helper_store::Store::open(":memory:").unwrap();
+        let roles = vec!["0".into(), "invalid".into()];
+        store.begin_quarantine("g", "u", &roles, "reason").unwrap();
+        let mut calls = 0;
+        let result = super::restore_quarantine_roles(&store, "g", "u", &roles, "reason", |_| {
+            calls += 1;
+            std::future::ready(true)
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, (0, 2));
+        assert_eq!(calls, 0);
+        assert_eq!(
+            store.get_quarantine("g", "u").unwrap().unwrap().role_ids,
+            roles
+        );
+    }
+
+    #[tokio::test]
+    async fn unpublished_poll_results_keep_the_job_even_after_votes_close() {
+        let store = helper_store::Store::open(":memory:").unwrap();
+        store
+            .set_setting("g", "feature.management.polls", "true")
+            .unwrap();
+        let poll = store
+            .create_scheduled_poll("g", "10", "Question", &["Yes".into(), "No".into()], 0)
+            .unwrap();
+        let job = store.due_scheduled_actions(0, 1).unwrap().pop().unwrap();
+        let http = serenity::http::Http::new("test-only");
+        for _ in 0..2 {
+            assert!(
+                super::deliver_scheduled_action(
+                    &http, &store, job.0, "g", "poll_end", &job.3, &job.4
+                )
+                .await
+                .is_err()
+            );
+            assert!(store.poll(poll).unwrap().unwrap().closed);
+            assert_eq!(store.due_scheduled_actions(0, 1).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn poll_panels_and_results_do_not_expand_user_supplied_mentions() {
+        let options = ["@everyone".into(), "<@&123>".into()];
+        let store = helper_store::Store::open(":memory:").unwrap();
+        let id = store.create_poll("g", "10", "<@456>", &options, 0).unwrap();
+        let poll = store.poll(id).unwrap().unwrap();
+        let panel = serde_json::to_value(super::poll_open_message(id, &poll.question, &options, 0))
+            .unwrap();
+        let result = serde_json::to_value(super::poll_result_message(&poll, &[1, 2])).unwrap();
+        for message in [panel, result] {
+            assert_eq!(message["allowed_mentions"]["parse"], serde_json::json!([]));
+        }
+    }
+
     #[test]
     fn giveaway_mentions_only_the_selected_winners() {
         let panel = serde_json::to_value(super::giveaway_allowed_mentions(&[])).unwrap();
@@ -13624,6 +13801,18 @@ mod tests {
     fn duration_parser_is_bounded_and_explicit() {
         assert_eq!(parse_duration("10m"), Some(600_000));
         assert_eq!(parse_duration("2h"), Some(7_200_000));
+        assert_eq!(parse_duration(" 365d "), Some(31_536_000_000));
+        for invalid in [
+            "",
+            "é",
+            "10秒",
+            "10💥",
+            "-1m",
+            "366d",
+            "9223372036854775807d",
+        ] {
+            assert_eq!(parse_duration(invalid), None, "duration: {invalid}");
+        }
         assert_eq!(parse_duration("0m"), None);
         assert_eq!(parse_duration("10weeks"), None);
         assert_eq!(account_age_days(172800, 86400), 1);

@@ -4581,6 +4581,7 @@ impl Store {
             "DELETE FROM suggestion_votes WHERE suggestion_id IN (SELECT id FROM suggestions WHERE guild_id=?1)",
             "DELETE FROM suggestions WHERE guild_id=?1",
             "DELETE FROM giveaway_entries WHERE giveaway_id IN (SELECT id FROM giveaways WHERE guild_id=?1)",
+            "DELETE FROM giveaway_results WHERE giveaway_id IN (SELECT id FROM giveaways WHERE guild_id=?1)",
             "DELETE FROM giveaways WHERE guild_id=?1",
             "DELETE FROM poll_votes WHERE poll_id IN (SELECT id FROM polls WHERE guild_id=?1)",
             "DELETE FROM polls WHERE guild_id=?1",
@@ -4612,6 +4613,23 @@ impl Store {
             "DELETE FROM helper_growth_activity_day_v2 WHERE guild_id=?1",
             "DELETE FROM helper_growth_retention_record WHERE guild_id=?1",
             "DELETE FROM helper_growth_lifecycle WHERE guild_id=?1",
+            "DELETE FROM invite_snapshots WHERE guild_id=?1",
+            "DELETE FROM invite_attributions WHERE guild_id=?1",
+            "DELETE FROM siwe_nonces WHERE guild_id=?1",
+            "DELETE FROM feature_settings WHERE guild_id=?1",
+            "DELETE FROM feature_revisions WHERE guild_id=?1",
+            "DELETE FROM studio_template_revisions WHERE guild_id=?1",
+            "DELETE FROM event_registrations WHERE guild_id=?1",
+            "DELETE FROM twitch_subscriptions WHERE guild_id=?1",
+            "DELETE FROM youtube_subscriptions WHERE guild_id=?1",
+            "DELETE FROM rss_subscriptions WHERE guild_id=?1",
+            "DELETE FROM bluesky_subscriptions WHERE guild_id=?1",
+            "DELETE FROM reddit_subscriptions WHERE guild_id=?1",
+            "DELETE FROM x_subscriptions WHERE guild_id=?1",
+            "DELETE FROM tiktok_subscriptions WHERE guild_id=?1",
+            "DELETE FROM tiktok_grants WHERE guild_id=?1",
+            "DELETE FROM instagram_subscriptions WHERE guild_id=?1",
+            "DELETE FROM kick_subscriptions WHERE guild_id=?1",
             "DELETE FROM settings WHERE guild_id=?1",
         ] {
             tx.execute(statement, [guild_id])?;
@@ -4717,6 +4735,13 @@ impl Store {
             "giveaway_entries",
             tx.execute(
                 "DELETE FROM giveaway_entries WHERE giveaway_id IN (SELECT id FROM giveaways WHERE ended=1 AND end_at < ?1)",
+                [cutoff_90d],
+            )?,
+        );
+        remove(
+            "giveaway_results",
+            tx.execute(
+                "DELETE FROM giveaway_results WHERE giveaway_id IN (SELECT id FROM giveaways WHERE ended=1 AND end_at < ?1) OR NOT EXISTS (SELECT 1 FROM giveaways WHERE id=giveaway_results.giveaway_id)",
                 [cutoff_90d],
             )?,
         );
@@ -5579,6 +5604,8 @@ impl Store {
             params![id, guild_id],
         )? > 0;
         if deleted {
+            tx.execute("DELETE FROM giveaway_entries WHERE giveaway_id=?1", [id])?;
+            tx.execute("DELETE FROM giveaway_results WHERE giveaway_id=?1", [id])?;
             tx.execute(
                 "DELETE FROM scheduled_actions WHERE guild_id=?1 AND type='giveaway_end' AND target_id=?2",
                 params![guild_id, id.to_string()],
@@ -5819,6 +5846,47 @@ impl Store {
         Ok(())
     }
 
+    /// Create the poll and its closing job atomically, before sending the panel.
+    pub fn create_scheduled_poll(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        question: &str,
+        options: &[String],
+        end_at: i64,
+    ) -> Result<i64> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        tx.execute("INSERT INTO polls(guild_id,channel_id,question,options,end_at,created_at) VALUES(?1,?2,?3,?4,?5,?6)", params![guild_id, channel_id, question, serde_json::to_string(options)?, end_at, Utc::now().timestamp_millis()])?;
+        let id = tx.last_insert_rowid();
+        let payload = serde_json::json!({"channel_id": channel_id, "poll_id": id}).to_string();
+        tx.execute(
+            "INSERT INTO scheduled_actions(guild_id,type,target_id,execute_at,payload,case_id) VALUES(?1,'poll_end',?2,?3,?4,NULL)",
+            params![guild_id, id.to_string(), end_at, payload],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Remove only this guild's draft; published polls must remain intact.
+    pub fn delete_unpublished_poll(&self, guild_id: &str, id: i64) -> Result<bool> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let deleted = tx.execute(
+            "DELETE FROM polls WHERE id=?1 AND guild_id=?2 AND message_id IS NULL",
+            params![id, guild_id],
+        )? > 0;
+        if deleted {
+            tx.execute("DELETE FROM poll_votes WHERE poll_id=?1", [id])?;
+            tx.execute(
+                "DELETE FROM scheduled_actions WHERE guild_id=?1 AND type='poll_end' AND target_id=?2",
+                params![guild_id, id.to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(deleted)
+    }
+
     pub fn poll(&self, id: i64) -> Result<Option<PollRecord>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         Ok(conn.query_row("SELECT id,guild_id,channel_id,message_id,question,options,end_at,closed,created_at FROM polls WHERE id=?1", [id], |row| {
@@ -5997,6 +6065,21 @@ impl Store {
         Ok(conn.execute("INSERT INTO workflow_runs(workflow_id,guild_id,source_id,created_at) SELECT ?1,?2,?3,?4 WHERE NOT EXISTS (SELECT 1 FROM workflow_runs WHERE workflow_id=?1 AND guild_id=?2 AND source_id=?3)", params![workflow_id, guild_id, source_id, Utc::now().timestamp_millis()])? > 0)
     }
 
+    /// Capture the original roles once; repeated commands must not overwrite them.
+    pub fn begin_quarantine(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        role_ids: &[String],
+        reason: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        Ok(conn.execute(
+            "INSERT OR IGNORE INTO quarantine(guild_id,user_id,role_ids,reason,created_at) VALUES(?1,?2,?3,?4,?5)",
+            params![guild_id, user_id, serde_json::to_string(role_ids)?, reason, Utc::now().timestamp_millis()],
+        )? > 0)
+    }
+
     pub fn save_quarantine(
         &self,
         guild_id: &str,
@@ -6039,6 +6122,89 @@ mod tests {
     use super::*;
 
     #[test]
+    fn repeated_quarantine_keeps_the_original_roles_and_guild_scope() {
+        let store = Store::open(":memory:").unwrap();
+        assert!(
+            store
+                .begin_quarantine("g", "u", &["10".into(), "20".into()], "original")
+                .unwrap()
+        );
+        assert!(!store.begin_quarantine("g", "u", &[], "repeated").unwrap());
+        let saved = store.get_quarantine("g", "u").unwrap().unwrap();
+        assert_eq!(saved.role_ids, vec!["10", "20"]);
+        assert_eq!(saved.reason, "original");
+        assert!(
+            store
+                .begin_quarantine("other", "u", &["30".into()], "other")
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .get_quarantine("other", "u")
+                .unwrap()
+                .unwrap()
+                .role_ids,
+            vec!["30"]
+        );
+    }
+
+    #[test]
+    fn failed_closing_job_creation_rolls_back_the_event() {
+        let store = Store::open(":memory:").unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute_batch("CREATE TRIGGER reject_job BEFORE INSERT ON scheduled_actions BEGIN SELECT RAISE(ABORT,'test job failure'); END;").unwrap();
+        }
+        assert!(
+            store
+                .create_scheduled_poll("g", "10", "Question", &["Yes".into(), "No".into()], 0)
+                .is_err()
+        );
+        assert!(
+            store
+                .create_scheduled_giveaway("g", "10", "Prize", 1, 0, None, "host")
+                .is_err()
+        );
+        let conn = store.conn.lock().unwrap();
+        for table in ["polls", "giveaways", "scheduled_actions"] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn poll_draft_and_closing_job_have_one_lifecycle() {
+        let store = Store::open(":memory:").unwrap();
+        let choices = ["Yes".into(), "No".into()];
+        let draft = store
+            .create_scheduled_poll("g", "c", "Question", &choices, 123_456)
+            .unwrap();
+        let jobs = store.due_scheduled_actions(123_456, 10).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].2, "poll_end");
+        assert_eq!(jobs[0].3, draft.to_string());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&jobs[0].4).unwrap()["poll_id"],
+            draft
+        );
+        assert!(!store.delete_unpublished_poll("other", draft).unwrap());
+        assert!(store.poll(draft).unwrap().is_some());
+        assert!(store.delete_unpublished_poll("g", draft).unwrap());
+        assert!(store.poll(draft).unwrap().is_none());
+        assert!(store.due_scheduled_actions(123_456, 10).unwrap().is_empty());
+        let published = store
+            .create_scheduled_poll("g", "c", "Question", &choices, 123_456)
+            .unwrap();
+        store.set_poll_message(published, "123").unwrap();
+        assert!(!store.delete_unpublished_poll("g", published).unwrap());
+        assert_eq!(store.due_scheduled_actions(123_456, 10).unwrap().len(), 1);
+    }
+
+    #[test]
     fn giveaway_draft_and_end_job_are_created_and_removed_together() {
         let store = Store::open(":memory:").unwrap();
         let id = store
@@ -6052,9 +6218,25 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&due[0].4).unwrap()["giveaway_id"],
             id
         );
+        // The deadline worker may have frozen a result before a slow panel
+        // publication fails. Removing the draft must also remove that result.
+        store.prepare_giveaway_result("g", id).unwrap().unwrap();
         assert!(store.delete_unpublished_giveaway("g", id).unwrap());
         assert!(store.giveaway(id).unwrap().is_none());
         assert!(store.due_scheduled_actions(123_456, 10).unwrap().is_empty());
+        assert_eq!(
+            store
+                .conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM giveaway_results WHERE giveaway_id=?1",
+                    [id],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
 
         let published = store
             .create_scheduled_giveaway("g", "c", "Prémio", 2, 123_456, None, "host")
@@ -7767,6 +7949,159 @@ mod tests {
             store
                 .add_xp_event("g1", "u1", "", "message", 1, 103)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn guild_purge_removes_feature_history_feeds_and_draw_results() {
+        let store = Store::open(":memory:").unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute_batch("INSERT INTO helper_sessions(id,user_id,guild_id,issued_at,expires_at,last_seen_at) VALUES('session','member','g1','2026-09-30T00:00:00Z','2026-10-01T00:00:00Z','2026-09-30T00:00:00Z'); INSERT INTO helper_entitlements(subject_id,payload,fetched_at) VALUES('member','{}','2026-09-30T00:00:00Z');").unwrap();
+        }
+        let mut draws = Vec::new();
+        for guild in ["g1", "g2"] {
+            store
+                .publish_feature_setting(guild, "community.levels", true, "{}", None, "mod", &[])
+                .unwrap();
+            store
+                .create_rss_subscription(
+                    guild,
+                    "https://example.com/feed.xml",
+                    "10",
+                    "{title}",
+                    "",
+                    true,
+                    300,
+                    "mod",
+                )
+                .unwrap();
+            store.register_event(guild, "event", "member").unwrap();
+            let draw = store
+                .create_giveaway(
+                    guild,
+                    "10",
+                    "prize",
+                    1,
+                    Utc::now().timestamp_millis() + 60_000,
+                    None,
+                    "host",
+                )
+                .unwrap();
+            store.add_giveaway_entry(draw, "member").unwrap();
+            store.prepare_giveaway_result(guild, draw).unwrap().unwrap();
+            draws.push(draw);
+        }
+        store.purge_guild("g1").unwrap();
+        store.purge_guild("g1").unwrap();
+        assert!(
+            !store
+                .feature_settings("community.levels")
+                .unwrap()
+                .iter()
+                .any(|record| record.guild_id == "g1")
+        );
+        assert!(
+            store
+                .feature_revisions("g1", "community.levels", 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(store.rss_subscriptions("g1").unwrap().is_empty());
+        assert!(
+            store
+                .feature_settings("community.levels")
+                .unwrap()
+                .iter()
+                .any(|record| record.guild_id == "g2")
+        );
+        assert_eq!(store.rss_subscriptions("g2").unwrap().len(), 1);
+        let conn = store.conn.lock().unwrap();
+        for table in ["helper_sessions", "helper_entitlements"] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM giveaway_results WHERE giveaway_id=?1",
+                [draws[0]],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM giveaway_results WHERE giveaway_id=?1",
+                [draws[1]],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM event_registrations WHERE guild_id='g1'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM event_registrations WHERE guild_id='g2'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn retention_removes_expired_draw_results_without_orphans() {
+        let store = Store::open(":memory:").unwrap();
+        let now = Utc::now().timestamp_millis();
+        let mut draws = Vec::new();
+        for end_at in [now - Duration::days(91).num_milliseconds(), now] {
+            let draw = store
+                .create_giveaway("g", "10", "prize", 1, end_at, None, "host")
+                .unwrap();
+            store.prepare_giveaway_result("g", draw).unwrap().unwrap();
+            draws.push(draw);
+        }
+        store.conn.lock().unwrap().execute("INSERT INTO giveaway_results(giveaway_id,winners_json) VALUES(-1,'[\"legacy-orphan\"]')", []).unwrap();
+        let summary = store.prune_retention(now).unwrap();
+        assert_eq!(summary.deleted["giveaway_results"], 2);
+        let conn = store.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM giveaway_results", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM giveaway_results WHERE giveaway_id=?1",
+                [draws[0]],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM giveaway_results WHERE giveaway_id=?1",
+                [draws[1]],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
         );
     }
 

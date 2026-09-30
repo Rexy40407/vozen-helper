@@ -1887,9 +1887,18 @@ pub fn evaluate_poll(
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(24)
         .clamp(1, 168);
-    let duration_ms = duration_override_ms
-        .filter(|value| (60_000..=168 * 3_600_000).contains(value))
-        .unwrap_or(default_hours * 3_600_000);
+    if duration_override_ms.is_some_and(|value| !(60_000..=168 * 3_600_000).contains(&value)) {
+        return PollDecision {
+            allowed: false,
+            question: question.into(),
+            options,
+            channel_id,
+            duration_ms: 0,
+            reason_code: "invalid_duration",
+            explanation: "A poll must last between one minute and seven days.".into(),
+        };
+    }
+    let duration_ms = duration_override_ms.unwrap_or(default_hours * 3_600_000);
     PollDecision {
         allowed: true,
         question: question.into(),
@@ -12173,6 +12182,28 @@ mod tests {
             }),
         );
         assert!(rejected[0].contains("options_required"));
+        for duration in [0, 10_000, 168 * 3_600_000 + 1, i64::MAX] {
+            let decision = evaluate_poll(
+                &serde_json::json!({}),
+                "Question",
+                &["Yes".into(), "No".into()],
+                Some(duration),
+                "123",
+            );
+            assert!(!decision.allowed);
+            assert_eq!(decision.reason_code, "invalid_duration");
+        }
+        for duration in [60_000, 168 * 3_600_000] {
+            let decision = evaluate_poll(
+                &serde_json::json!({}),
+                "Question",
+                &["Yes".into(), "No".into()],
+                Some(duration),
+                "123",
+            );
+            assert!(decision.allowed);
+            assert_eq!(decision.duration_ms, duration);
+        }
 
         let giveaways = feature_adapter("community.giveaways").expect("giveaways adapter");
         let giveaway_preview = giveaways.simulate(
