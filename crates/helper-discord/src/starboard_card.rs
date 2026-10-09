@@ -74,10 +74,8 @@ fn lines(value: &str) -> Vec<String> {
     if lines.is_empty() {
         lines.push("Message with an attachment".into());
     }
-    if truncated {
-        if let Some(last) = lines.last_mut() {
-            *last = short(&format!("{last}…"), 43);
-        }
+    if truncated && let Some(last) = lines.last_mut() {
+        *last = short(&format!("{last}…"), 43);
     }
     lines
 }

@@ -3051,8 +3051,8 @@ impl EventHandler for Handler {
             .store
             .star_entry(&guild_id.to_string(), &reaction.message_id.to_string())
         {
-            if let Ok(message_id) = entry.starboard_message_id.parse::<u64>() {
-                if starboard_display::publish(
+            if let Ok(message_id) = entry.starboard_message_id.parse::<u64>()
+                && starboard_display::publish(
                     &ctx,
                     ChannelId::new(board_id),
                     Some(MessageId::new(message_id)),
@@ -3063,14 +3063,13 @@ impl EventHandler for Handler {
                 )
                 .await
                 .is_ok()
-                {
-                    let _ = self.store.upsert_star_entry(
-                        &guild_id.to_string(),
-                        &reaction.message_id.to_string(),
-                        &entry.starboard_message_id,
-                        count,
-                    );
-                }
+            {
+                let _ = self.store.upsert_star_entry(
+                    &guild_id.to_string(),
+                    &reaction.message_id.to_string(),
+                    &entry.starboard_message_id,
+                    count,
+                );
             }
         } else if let Ok(message) = starboard_display::publish(
             &ctx,
@@ -5686,8 +5685,8 @@ impl Handler {
         );
         let content =
             starboard_message_content(&policy, &configured_emoji, count, &original, &link);
-        if let Ok(starboard_message_id) = entry.starboard_message_id.parse::<u64>() {
-            if starboard_display::publish(
+        if let Ok(starboard_message_id) = entry.starboard_message_id.parse::<u64>()
+            && starboard_display::publish(
                 ctx,
                 board,
                 Some(MessageId::new(starboard_message_id)),
@@ -5698,14 +5697,13 @@ impl Handler {
             )
             .await
             .is_ok()
-            {
-                let _ = self.store.upsert_star_entry(
-                    &guild_text,
-                    &message_id.to_string(),
-                    &entry.starboard_message_id,
-                    count,
-                );
-            }
+        {
+            let _ = self.store.upsert_star_entry(
+                &guild_text,
+                &message_id.to_string(),
+                &entry.starboard_message_id,
+                count,
+            );
         }
     }
 
