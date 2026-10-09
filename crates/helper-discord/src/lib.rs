@@ -56,6 +56,8 @@ use std::{
 use tracing::{info, warn};
 
 mod rank_card;
+pub mod starboard_card;
+mod starboard_display;
 mod topgg_metrics;
 
 use crate::topgg_metrics::{
@@ -3050,30 +3052,36 @@ impl EventHandler for Handler {
             .star_entry(&guild_id.to_string(), &reaction.message_id.to_string())
         {
             if let Ok(message_id) = entry.starboard_message_id.parse::<u64>() {
-                let _ = serenity::all::ChannelId::new(board_id)
-                    .edit_message(
-                        &ctx.http,
-                        serenity::all::MessageId::new(message_id),
-                        serenity::all::EditMessage::new()
-                            .content(content)
-                            .allowed_mentions(starboard_allowed_mentions(original.author.id)),
-                    )
-                    .await;
-                let _ = self.store.upsert_star_entry(
-                    &guild_id.to_string(),
-                    &reaction.message_id.to_string(),
-                    &entry.starboard_message_id,
+                if starboard_display::publish(
+                    &ctx,
+                    ChannelId::new(board_id),
+                    Some(MessageId::new(message_id)),
+                    &original,
                     count,
-                );
+                    &link,
+                    &content,
+                )
+                .await
+                .is_ok()
+                {
+                    let _ = self.store.upsert_star_entry(
+                        &guild_id.to_string(),
+                        &reaction.message_id.to_string(),
+                        &entry.starboard_message_id,
+                        count,
+                    );
+                }
             }
-        } else if let Ok(message) = serenity::all::ChannelId::new(board_id)
-            .send_message(
-                &ctx.http,
-                serenity::all::CreateMessage::new()
-                    .content(content)
-                    .allowed_mentions(starboard_allowed_mentions(original.author.id)),
-            )
-            .await
+        } else if let Ok(message) = starboard_display::publish(
+            &ctx,
+            ChannelId::new(board_id),
+            None,
+            &original,
+            count,
+            &link,
+            &content,
+        )
+        .await
         {
             let _ = self.store.upsert_star_entry(
                 &guild_id.to_string(),
@@ -5679,21 +5687,25 @@ impl Handler {
         let content =
             starboard_message_content(&policy, &configured_emoji, count, &original, &link);
         if let Ok(starboard_message_id) = entry.starboard_message_id.parse::<u64>() {
-            let _ = board
-                .edit_message(
-                    &ctx.http,
-                    MessageId::new(starboard_message_id),
-                    serenity::all::EditMessage::new()
-                        .content(content)
-                        .allowed_mentions(starboard_allowed_mentions(original.author.id)),
-                )
-                .await;
-            let _ = self.store.upsert_star_entry(
-                &guild_text,
-                &message_id.to_string(),
-                &entry.starboard_message_id,
+            if starboard_display::publish(
+                ctx,
+                board,
+                Some(MessageId::new(starboard_message_id)),
+                &original,
                 count,
-            );
+                &link,
+                &content,
+            )
+            .await
+            .is_ok()
+            {
+                let _ = self.store.upsert_star_entry(
+                    &guild_text,
+                    &message_id.to_string(),
+                    &entry.starboard_message_id,
+                    count,
+                );
+            }
         }
     }
 
@@ -12445,7 +12457,8 @@ fn render_starboard_content(
     link: &str,
 ) -> String {
     const MESSAGE_LIMIT: usize = 2_000;
-    let prefix = format!("{emoji} **{count} stars** on <@{author_id}>\n");
+    let noun = if count == 1 { "star" } else { "stars" };
+    let prefix = format!("{emoji} **{count} {noun}** on <@{author_id}>\n");
     let source_link = format!("\n{link}");
     let mut attachment_text = String::new();
     let mut reserved = prefix.encode_utf16().count() + source_link.encode_utf16().count();
