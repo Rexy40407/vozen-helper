@@ -10,6 +10,21 @@ struct Visual {
     alt: String,
 }
 
+pub(super) struct Content {
+    pub caption: String,
+    pub fallback: String,
+}
+
+impl Content {
+    fn for_visual(&self, visual: Option<&Visual>) -> &str {
+        if visual.is_some() {
+            &self.caption
+        } else {
+            &self.fallback
+        }
+    }
+}
+
 fn safe_avatar_url(raw: &str) -> Option<reqwest::Url> {
     let mut url = reqwest::Url::parse(raw).ok()?;
     if url.scheme() != "https"
@@ -75,13 +90,13 @@ fn attachment(visual: &Visual) -> CreateAttachment {
 }
 
 fn create(
-    content: &str,
+    content: &Content,
     author: serenity::all::UserId,
     link: &str,
     visual: Option<&Visual>,
 ) -> CreateMessage {
     let message = CreateMessage::new()
-        .content(content)
+        .content(content.for_visual(visual))
         .embeds(vec![])
         .allowed_mentions(super::starboard_allowed_mentions(author));
     if let Some(visual) = visual {
@@ -94,13 +109,13 @@ fn create(
 }
 
 fn edit(
-    content: &str,
+    content: &Content,
     author: serenity::all::UserId,
     link: &str,
     visual: Option<&Visual>,
 ) -> EditMessage {
     let message = EditMessage::new()
-        .content(content)
+        .content(content.for_visual(visual))
         .embeds(vec![])
         .allowed_mentions(super::starboard_allowed_mentions(author))
         .attachments(EditAttachments::new());
@@ -137,7 +152,7 @@ pub(super) async fn publish(
     original: &Message,
     count: i64,
     link: &str,
-    content: &str,
+    content: &Content,
 ) -> serenity::Result<Message> {
     let author = original
         .member
@@ -172,7 +187,7 @@ pub(super) async fn publish(
     .await
     .ok()
     .flatten();
-    // Retain the bounded text, attribution and attachment links for accessibility.
+    // The card carries the excerpt and alt text; retain the full textual fallback.
     let result = if let Some(id) = existing {
         board
             .edit_message(
@@ -244,11 +259,16 @@ mod tests {
             png: vec![1, 2],
             alt: "Rexy: batata".into(),
         };
+        let content = Content {
+            caption: "compact caption".into(),
+            fallback: "full original text".into(),
+        };
         let create =
-            serde_json::to_value(create("safe text", UserId::new(1), LINK, Some(&visual))).unwrap();
+            serde_json::to_value(create(&content, UserId::new(1), LINK, Some(&visual))).unwrap();
         let edit =
-            serde_json::to_value(edit("safe text", UserId::new(1), LINK, Some(&visual))).unwrap();
+            serde_json::to_value(edit(&content, UserId::new(1), LINK, Some(&visual))).unwrap();
         for packet in [create, edit] {
+            assert_eq!(packet["content"], "compact caption");
             assert!(packet["embeds"].as_array().unwrap().is_empty());
             assert_eq!(packet["components"][0]["components"][0]["url"], LINK);
             assert_eq!(packet["attachments"].as_array().unwrap().len(), 1);
@@ -259,12 +279,32 @@ mod tests {
 
     #[test]
     fn text_fallback_removes_previous_card_without_losing_original_content() {
-        let packet =
-            serde_json::to_value(edit("@everyone safe text", UserId::new(1), LINK, None)).unwrap();
+        let content = Content {
+            caption: "compact caption".into(),
+            fallback: "@everyone safe text".into(),
+        };
+        let packet = serde_json::to_value(edit(&content, UserId::new(1), LINK, None)).unwrap();
         assert_eq!(packet["content"], "@everyone safe text");
         for key in ["attachments", "embeds", "components"] {
             assert!(packet[key].as_array().unwrap().is_empty());
         }
+        assert!(
+            packet["allowed_mentions"]["parse"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn text_only_create_preserves_the_full_fallback() {
+        let content = Content {
+            caption: "compact caption".into(),
+            fallback: "Full original text and source link".into(),
+        };
+        let packet = serde_json::to_value(create(&content, UserId::new(1), LINK, None)).unwrap();
+        assert_eq!(packet["content"], content.fallback);
+        assert!(packet["embeds"].as_array().unwrap().is_empty());
         assert!(
             packet["allowed_mentions"]["parse"]
                 .as_array()

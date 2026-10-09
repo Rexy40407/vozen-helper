@@ -12425,7 +12425,7 @@ fn starboard_message_content(
     count: i64,
     original: &serenity::all::Message,
     link: &str,
-) -> String {
+) -> starboard_display::Content {
     let attachments = if policy.include_images {
         original
             .attachments
@@ -12436,14 +12436,18 @@ fn starboard_message_content(
     } else {
         Vec::new()
     };
-    render_starboard_content(
-        emoji,
-        count,
-        &original.author.id.to_string(),
-        &original.content,
-        &attachments,
-        link,
-    )
+    let author_id = original.author.id.to_string();
+    starboard_display::Content {
+        caption: render_starboard_content(emoji, count, &author_id, "", &attachments, link),
+        fallback: render_starboard_content(
+            emoji,
+            count,
+            &author_id,
+            &original.content,
+            &attachments,
+            link,
+        ),
+    }
 }
 
 fn render_starboard_content(
@@ -12456,8 +12460,8 @@ fn render_starboard_content(
 ) -> String {
     const MESSAGE_LIMIT: usize = 2_000;
     let noun = if count == 1 { "star" } else { "stars" };
-    let prefix = format!("{emoji} **{count} {noun}** on <@{author_id}>\n");
-    let source_link = format!("\n{link}");
+    let prefix = format!("{emoji} **Message spotlight** · **{count} {noun}**\nBy <@{author_id}>");
+    let source_link = format!("\n\n[View original message](<{link}>)");
     let mut attachment_text = String::new();
     let mut reserved = prefix.encode_utf16().count() + source_link.encode_utf16().count();
     for attachment in attachments.iter().take(4) {
@@ -12469,7 +12473,13 @@ fn render_starboard_content(
         }
     }
     let available = MESSAGE_LIMIT.saturating_sub(reserved);
-    let original_length = original_content.encode_utf16().count();
+    // Quote every line so the original text remains distinct from bot metadata.
+    let quoted = if original_content.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\n> {}", original_content.replace('\n', "\n> "))
+    };
+    let original_length = quoted.encode_utf16().count();
     let budget = if original_length > available {
         available.saturating_sub(1)
     } else {
@@ -12477,7 +12487,7 @@ fn render_starboard_content(
     };
     let mut excerpt = String::new();
     let mut used = 0;
-    for character in original_content.chars() {
+    for character in quoted.chars() {
         let length = character.len_utf16();
         if used + length > budget {
             break;
@@ -13162,6 +13172,53 @@ mod tests {
             super::render_suggestion_message(1, "Anonymous", &"🌟".repeat(1_000), "pending", 0, 0);
         assert!(super::suggestion_message_fits(&short));
         assert!(!super::suggestion_message_fits(&long));
+    }
+
+    #[test]
+    fn starboard_spotlight_has_natural_singular_plural_and_quoted_original() {
+        let link = "https://discord.com/channels/1/2/3";
+        for (count, noun) in [(1, "star"), (2, "stars"), (0, "stars")] {
+            let mirror =
+                super::render_starboard_content("⭐", count, "42", "Hello\nWorld", &[], link);
+            assert!(mirror.starts_with(&format!(
+                "⭐ **Message spotlight** · **{count} {noun}**\nBy <@42>"
+            )));
+            assert!(mirror.contains("\n\n> Hello\n> World"));
+            assert!(mirror.ends_with(&format!("[View original message](<{link}>)")));
+        }
+    }
+
+    #[test]
+    fn starboard_compact_caption_keeps_attribution_source_and_attachment() {
+        let link = "https://discord.com/channels/1/2/3";
+        let caption = super::render_starboard_content(
+            "⭐",
+            1,
+            "42",
+            "",
+            &["https://cdn.discord.test/image.png"],
+            link,
+        );
+        assert!(caption.contains("By <@42>"));
+        assert!(caption.contains(link));
+        assert!(caption.contains("https://cdn.discord.test/image.png"));
+        assert!(!caption.contains("> "));
+        assert!(caption.encode_utf16().count() <= 2_000);
+    }
+
+    #[test]
+    fn starboard_multiline_quotes_remain_within_discord_limit() {
+        let mirror = super::render_starboard_content(
+            "⭐",
+            100,
+            "42",
+            &"🌟\n".repeat(1_500),
+            &[],
+            "https://discord.com/channels/1/2/3",
+        );
+        assert!(mirror.encode_utf16().count() <= 2_000);
+        assert!(mirror.contains('…'));
+        assert!(mirror.contains("[View original message]"));
     }
 
     #[test]
