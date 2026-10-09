@@ -1,7 +1,7 @@
 //! Native Discord attachment delivery. No messages are sent by renderer tests.
 use serenity::all::{
-    ChannelId, Context, CreateActionRow, CreateAttachment, CreateButton, CreateEmbed,
-    CreateMessage, EditAttachments, EditMessage, Message, MessageId, User,
+    ChannelId, Context, CreateActionRow, CreateAttachment, CreateButton, CreateMessage,
+    EditAttachments, EditMessage, Message, MessageId, User,
 };
 use std::{sync::OnceLock, time::Duration};
 
@@ -64,13 +64,6 @@ async fn avatar(user: &User) -> Option<(String, Vec<u8>)> {
     Some((mime, bytes))
 }
 
-fn embed(link: &str) -> CreateEmbed {
-    CreateEmbed::new()
-        .colour(0xFFC56B)
-        .url(link)
-        .image("attachment://starboard.png")
-}
-
 fn components(link: &str) -> Vec<CreateActionRow> {
     vec![CreateActionRow::Buttons(vec![
         CreateButton::new_link(link).label("View original message"),
@@ -89,10 +82,10 @@ fn create(
 ) -> CreateMessage {
     let message = CreateMessage::new()
         .content(content)
+        .embeds(vec![])
         .allowed_mentions(super::starboard_allowed_mentions(author));
     if let Some(visual) = visual {
         message
-            .embed(embed(link))
             .add_file(attachment(visual))
             .components(components(link))
     } else {
@@ -108,11 +101,11 @@ fn edit(
 ) -> EditMessage {
     let message = EditMessage::new()
         .content(content)
+        .embeds(vec![])
         .allowed_mentions(super::starboard_allowed_mentions(author))
         .attachments(EditAttachments::new());
     if let Some(visual) = visual {
         message
-            .embeds(vec![embed(link)])
             .new_attachment(attachment(visual))
             .components(components(link))
     } else {
@@ -246,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn create_and_edit_use_one_card_and_original_link() {
+    fn create_and_edit_use_one_direct_image_without_embed_frame() {
         let visual = Visual {
             png: vec![1, 2],
             alt: "Rexy: batata".into(),
@@ -256,10 +249,7 @@ mod tests {
         let edit =
             serde_json::to_value(edit("safe text", UserId::new(1), LINK, Some(&visual))).unwrap();
         for packet in [create, edit] {
-            assert_eq!(
-                packet["embeds"][0]["image"]["url"],
-                "attachment://starboard.png"
-            );
+            assert!(packet["embeds"].as_array().unwrap().is_empty());
             assert_eq!(packet["components"][0]["components"][0]["url"], LINK);
             assert_eq!(packet["attachments"].as_array().unwrap().len(), 1);
             assert_eq!(packet["allowed_mentions"]["users"][0], "1");

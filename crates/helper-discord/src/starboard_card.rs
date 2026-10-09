@@ -1,8 +1,8 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use std::sync::{Arc, OnceLock};
 
-pub const WIDTH: u32 = 960;
-pub const HEIGHT: u32 = 300;
+pub const WIDTH: u32 = 800;
+pub const HEIGHT: u32 = 320;
 
 pub struct Card<'a> {
     pub author: &'a str,
@@ -52,7 +52,7 @@ fn lines(value: &str) -> Vec<String> {
     let mut width = 0;
     let mut truncated = false;
     for character in value.chars().filter(|c| !c.is_control() || *c == '\n') {
-        if character == '\n' || length >= 43 || width + glyph_weight(character) > 2600 {
+        if character == '\n' || length >= 30 || width + glyph_weight(character) > 1600 {
             lines.push(line);
             line = String::new();
             length = 0;
@@ -75,7 +75,7 @@ fn lines(value: &str) -> Vec<String> {
         lines.push("Message with an attachment".into());
     }
     if truncated && let Some(last) = lines.last_mut() {
-        *last = short(&format!("{last}…"), 43);
+        *last = short(&format!("{last}…"), 30);
     }
     lines
 }
@@ -86,8 +86,8 @@ fn svg(card: &Card<'_>) -> String {
         .chars()
         .map(glyph_weight)
         .sum::<usize>();
-    let author_size = (68000 / author_weight.max(1)).min(25);
-    let channel = escape(&short(card.channel, 30));
+    let author_size = (58000 / author_weight.max(1)).min(36);
+    let channel = escape(&short(card.channel, 18));
     let stars = card.stars.max(0);
     let count_label = if stars == 1 {
         "1 star".into()
@@ -96,37 +96,36 @@ fn svg(card: &Card<'_>) -> String {
     } else {
         format!("{stars} stars")
     };
+    let count_size = (13200 / count_label.chars().map(glyph_weight).sum::<usize>().max(1)).min(24);
     let message = lines(card.message)
         .iter()
         .enumerate()
         .map(|(index, line)| {
             format!(
-                r##"<text x="222" y="{}" fill="#F4F7FB" font-size="25">{}</text>"##,
-                116 + index * 36,
+                r##"<text x="176" y="{}" fill="#F4F7FB" font-size="34">{}</text>"##,
+                116 + index * 44,
                 escape(line)
             )
         })
         .collect::<String>();
     let avatar = card.avatar.filter(|(mime, bytes)| matches!(*mime, "image/png" | "image/jpeg" | "image/webp") && bytes.len() <= 256 * 1024)
-        .map(|(mime, bytes)| format!(r#"<image href="data:{mime};base64,{}" x="78" y="182" width="60" height="60" clip-path="url(#avatar)" preserveAspectRatio="xMidYMid slice"/>"#, STANDARD.encode(bytes)))
-        .unwrap_or_else(|| r##"<circle cx="108" cy="201" r="10" fill="#8EE5D2"/><path d="M88 234 C88 209 128 209 128 234" fill="#8EE5D2"/>"##.into());
+        .map(|(mime, bytes)| format!(r#"<image href="data:{mime};base64,{}" x="32" y="64" width="104" height="104" clip-path="url(#avatar)" preserveAspectRatio="xMidYMid slice"/>"#, STANDARD.encode(bytes)))
+        .unwrap_or_else(|| r##"<circle cx="84" cy="101" r="16" fill="#8EE5D2"/><path d="M52 154 C52 114 116 114 116 154" fill="#8EE5D2"/>"##.into());
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="960" height="300" viewBox="0 0 960 300">
-      <defs><clipPath id="avatar"><circle cx="108" cy="212" r="30"/></clipPath><clipPath id="message"><rect x="222" y="78" width="702" height="124"/></clipPath><clipPath id="author"><rect x="222" y="30" width="702" height="40"/></clipPath></defs>
-      <rect width="960" height="300" rx="24" fill="#101A29"/>
-      <rect x="1" y="1" width="958" height="298" rx="23" fill="none" stroke="#365269" stroke-width="2"/>
-      <path d="M190 30 V270" stroke="#365269" stroke-width="2"/>
-      <path d="M108 33 L163 65 V129 L108 161 L53 129 V65 Z" fill="#273448" stroke="#FFC56B" stroke-width="3"/>
-      <path d="M108 62 L118 84 L142 87 L124 104 L128 128 L108 116 L87 128 L92 104 L74 87 L98 84 Z" fill="#FFC56B"/>
-      <circle cx="108" cy="212" r="34" fill="#223548" stroke="#8EE5D2" stroke-width="2"/>
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="800" height="320" viewBox="0 0 800 320">
+      <defs><clipPath id="avatar"><circle cx="84" cy="116" r="52"/></clipPath><clipPath id="message"><rect x="176" y="80" width="594" height="140"/></clipPath><clipPath id="author"><rect x="176" y="24" width="594" height="48"/></clipPath></defs>
+      <rect width="800" height="320" rx="20" fill="#101A29"/>
+      <path d="M152 32 V288" stroke="#365269" stroke-width="2"/>
+      <path d="M84 197 L92 213 L109 215 L97 228 L100 245 L84 236 L68 245 L71 228 L59 215 L76 213 Z" fill="#FFC56B"/>
+      <circle cx="84" cy="116" r="55" fill="#223548" stroke="#8EE5D2" stroke-width="3"/>
       {avatar}
       <g font-family="sans-serif">
-        <text x="108" y="274" text-anchor="middle" fill="#FFC56B" font-size="19" font-weight="700">{count_label}</text>
-        <text x="222" y="61" fill="#8EE5D2" font-size="{author_size}" font-weight="700" clip-path="url(#author)">{author}</text>
+        <text x="84" y="284" text-anchor="middle" fill="#FFC56B" font-size="{count_size}" font-weight="700">{count_label}</text>
+        <text x="176" y="58" fill="#8EE5D2" font-size="{author_size}" font-weight="700" clip-path="url(#author)">{author}</text>
         <g clip-path="url(#message)">{message}</g>
-        <path d="M222 220 H924" stroke="#365269"/>
-        <text x="222" y="260" fill="#BACBDD" font-size="18">#{channel}</text>
-        <text x="924" y="260" text-anchor="end" fill="#8EE5D2" font-size="18" font-weight="700">Vozen Starboard</text>
+        <path d="M176 240 H770" stroke="#365269"/>
+        <text x="176" y="284" fill="#BACBDD" font-size="20">#{channel}</text>
+        <text x="770" y="284" text-anchor="end" fill="#8EE5D2" font-size="18" font-weight="700">Vozen Starboard</text>
       </g>
     </svg>"##
     )
@@ -178,22 +177,32 @@ mod tests {
     }
 
     #[test]
+    fn larger_card_uses_readable_type_and_avatar_without_an_outer_outline() {
+        let xml = svg(&sample());
+        assert_eq!((WIDTH, HEIGHT), (800, 320));
+        assert!(xml.contains("font-size=\"34\""));
+        assert!(xml.contains("font-size=\"36\""));
+        assert!(xml.contains("cx=\"84\" cy=\"116\" r=\"55\""));
+        assert!(!xml.contains("fill=\"none\" stroke=\"#365269\""));
+    }
+
+    #[test]
     fn raster_contains_visible_text_and_badge() {
         let png = render(&sample()).expect("render PNG");
         assert!(png.len() < 500_000);
         let pixels = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
         assert_eq!((pixels.width(), pixels.height()), (WIDTH, HEIGHT));
         let white_text = (90..120)
-            .flat_map(|y| (220..500).map(move |x| (x, y)))
+            .flat_map(|y| (175..450).map(move |x| (x, y)))
             .filter(|(x, y)| {
                 let p = pixels.pixel(*x, *y).unwrap();
                 p.red() > 200 && p.green() > 200 && p.blue() > 200
             })
             .count();
         assert!(white_text > 60, "SVG text must rasterize, not just parse");
-        let gold = pixels.pixel(108, 95).unwrap();
+        let gold = pixels.pixel(84, 220).unwrap();
         assert!(gold.red() > 230 && gold.green() > 140 && gold.blue() < 150);
-        let ring = pixels.pixel(108, 178).unwrap();
+        let ring = pixels.pixel(84, 61).unwrap();
         assert!(ring.green() > 150);
     }
 
@@ -211,12 +220,12 @@ mod tests {
         assert!(
             lines(&"W".repeat(100))
                 .iter()
-                .all(|line| line.chars().count() <= 27)
+                .all(|line| line.chars().count() <= 17)
         );
         assert!(
             lines(&"x".repeat(500))
                 .iter()
-                .all(|line| line.chars().count() <= 43)
+                .all(|line| line.chars().count() <= 30)
         );
         card.stars = -3;
         assert!(svg(&card).contains("0 stars"));
@@ -232,7 +241,7 @@ mod tests {
         let mut card = sample();
         card.avatar = Some(("image/png", &avatar));
         let pixels = resvg::tiny_skia::Pixmap::decode_png(&render(&card).unwrap()).unwrap();
-        let center = pixels.pixel(108, 212).unwrap();
+        let center = pixels.pixel(84, 116).unwrap();
         assert_eq!((center.red(), center.green(), center.blue()), (220, 40, 80));
         card.avatar = Some(("image/svg+xml", &avatar));
         assert!(!svg(&card).contains("data:image/svg+xml"));
