@@ -34,16 +34,29 @@ fn short(value: &str, limit: usize) -> String {
     }
 }
 
+fn glyph_weight(character: char) -> usize {
+    match character {
+        'i' | 'l' | 'I' | 'j' | '.' | ',' | ':' | ';' | '!' | '\'' | '|' => 35,
+        'm' | 'w' | 'M' | 'W' | '@' => 100,
+        ' ' => 40,
+        c if c.is_ascii_uppercase() => 80,
+        c if c.is_ascii() => 65,
+        _ => 120,
+    }
+}
+
 fn lines(value: &str) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     let mut length = 0;
+    let mut width = 0;
     let mut truncated = false;
     for character in value.chars().filter(|c| !c.is_control() || *c == '\n') {
-        if character == '\n' || length >= 43 {
+        if character == '\n' || length >= 43 || width + glyph_weight(character) > 2600 {
             lines.push(line);
             line = String::new();
             length = 0;
+            width = 0;
             if lines.len() == 3 {
                 truncated = true;
                 break;
@@ -52,6 +65,7 @@ fn lines(value: &str) -> Vec<String> {
         if !character.is_control() {
             line.push(character);
             length += 1;
+            width += glyph_weight(character);
         }
     }
     if lines.len() < 3 && !line.is_empty() {
@@ -70,6 +84,11 @@ fn lines(value: &str) -> Vec<String> {
 
 fn svg(card: &Card<'_>) -> String {
     let author = escape(&short(card.author, 32));
+    let author_weight = short(card.author, 32)
+        .chars()
+        .map(glyph_weight)
+        .sum::<usize>();
+    let author_size = (68000 / author_weight.max(1)).min(25);
     let channel = escape(&short(card.channel, 30));
     let stars = card.stars.max(0);
     let count_label = if stars == 1 {
@@ -105,7 +124,7 @@ fn svg(card: &Card<'_>) -> String {
       {avatar}
       <g font-family="sans-serif">
         <text x="108" y="274" text-anchor="middle" fill="#FFC56B" font-size="19" font-weight="700">{count_label}</text>
-        <text x="222" y="61" fill="#8EE5D2" font-size="25" font-weight="700" clip-path="url(#author)">{author}</text>
+        <text x="222" y="61" fill="#8EE5D2" font-size="{author_size}" font-weight="700" clip-path="url(#author)">{author}</text>
         <g clip-path="url(#message)">{message}</g>
         <path d="M222 220 H924" stroke="#365269"/>
         <text x="222" y="260" fill="#BACBDD" font-size="18">#{channel}</text>
@@ -191,6 +210,11 @@ mod tests {
         assert!(xml.contains("&amp;hello"));
         assert_eq!(lines(&"😀".repeat(500)).len(), 3);
         assert_eq!(lines("ola\nadeus"), vec!["ola", "adeus"]);
+        assert!(
+            lines(&"W".repeat(100))
+                .iter()
+                .all(|line| line.chars().count() <= 27)
+        );
         assert!(
             lines(&"x".repeat(500))
                 .iter()
