@@ -6,8 +6,11 @@ static CREATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const RECORD: &str = "community.starboard.created_channel";
 const READ: u64 = (1 << 6) | (1 << 10) | (1 << 16);
 const SEND: u64 = 1 << 11;
-const NO_CHAT: u64 = SEND | (1 << 12) | (1 << 35) | (1 << 36) | (1 << 38);
+// Denying SEND already implicitly denies SEND_TTS_MESSAGES. Including TTS
+// explicitly makes Discord reject creation for bots without the TTS privilege.
+const NO_CHAT: u64 = SEND | (1 << 35) | (1 << 36) | (1 << 38);
 const BOT_ALLOW: u64 = READ | SEND | (1 << 14) | (1 << 15);
+const CREATE_REQUIRED: u64 = BOT_ALLOW | NO_CHAT | 16 | (1 << 28);
 const MODERATOR: u64 = 8 | 32 | (1 << 1) | (1 << 2) | (1 << 13) | (1 << 40);
 
 #[derive(Deserialize)]
@@ -58,7 +61,12 @@ fn matching_permissions(channel: &Value, payload: &Value) -> bool {
                 item["id"] == wanted["id"]
                     && item["type"] == wanted["type"]
                     && item["allow"] == wanted["allow"]
-                    && item["deny"] == wanted["deny"]
+                    && (item["deny"] == wanted["deny"]
+                        // Older protected channels also denied TTS explicitly.
+                        // Preserve them without rewriting their permissions.
+                        || (wanted["type"] == 0
+                            && wanted["deny"].as_str() == Some(&NO_CHAT.to_string())
+                            && item["deny"].as_str() == Some(&(NO_CHAT | (1 << 12)).to_string())))
             })
         })
 }
@@ -128,8 +136,7 @@ pub(super) async fn create(
     }
     let bits = effective_bot_permissions(&claims.guild_id, &snapshot.roles, &snapshot.bot_role_ids)
         .unwrap_or(0);
-    let required = BOT_ALLOW | 16 | (1 << 28);
-    if bits & 8 == 0 && bits & required != required {
+    if bits & 8 == 0 && bits & CREATE_REQUIRED != CREATE_REQUIRED {
         return Err(client_error(
             StatusCode::FORBIDDEN,
             "starboard_bot_permissions_required",
@@ -226,13 +233,28 @@ pub(super) async fn create(
         .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "starboard_creation_uncertain"))?;
     if !response.status().is_success() {
         let status = response.status();
+        let discord_code = response
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|body| body["code"].as_u64());
+        tracing::warn!(
+            status = status.as_u16(),
+            ?discord_code,
+            "starboard channel creation rejected by Discord"
+        );
         return Err(client_error(
             if status.as_u16() == 429 {
                 StatusCode::TOO_MANY_REQUESTS
             } else {
                 StatusCode::BAD_GATEWAY
             },
-            "discord_channel_create_failed",
+            match status.as_u16() {
+                403 => "starboard_bot_permissions_required",
+                429 => "starboard_creation_rate_limited",
+                _ if discord_code == Some(30013) => "starboard_channel_limit_reached",
+                _ => "discord_channel_create_failed",
+            },
         ));
     }
     let channel = response
@@ -319,5 +341,21 @@ mod tests {
         let mut altered = payload.clone();
         altered["permission_overwrites"][0]["deny"] = json!("0");
         assert!(!matching_permissions(&altered, &payload));
+        let mut legacy = payload.clone();
+        legacy["permission_overwrites"][0]["deny"] = json!((NO_CHAT | (1 << 12)).to_string());
+        assert!(matching_permissions(&legacy, &payload));
+    }
+    #[test]
+    fn starboard_creation_needs_every_overwrite_bit_but_not_tts() {
+        let payload = channel_payload("guild", "bot", "starboard", &["mod".into()]);
+        for overwrite in payload["permission_overwrites"].as_array().unwrap() {
+            let allow = overwrite["allow"].as_str().unwrap().parse::<u64>().unwrap();
+            let deny = overwrite["deny"].as_str().unwrap().parse::<u64>().unwrap();
+            assert_eq!((allow | deny) & !CREATE_REQUIRED, 0);
+        }
+        assert_eq!(CREATE_REQUIRED & (1 << 12), 0);
+        for bit in [1 << 35, 1 << 36, 1 << 38] {
+            assert_ne!(CREATE_REQUIRED & bit, 0);
+        }
     }
 }
