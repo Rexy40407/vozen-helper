@@ -12437,8 +12437,11 @@ fn starboard_message_content(
         Vec::new()
     };
     let author_id = original.author.id.to_string();
+    let compact = render_starboard_content(emoji, count, &author_id, "", &attachments, link);
+    let (caption, footer) = compact.split_once("\n\n").unwrap_or((&compact, link));
     starboard_display::Content {
-        caption: render_starboard_content(emoji, count, &author_id, "", &attachments, link),
+        caption: caption.into(),
+        footer: footer.into(),
         fallback: render_starboard_content(
             emoji,
             count,
@@ -12461,7 +12464,7 @@ fn render_starboard_content(
     const MESSAGE_LIMIT: usize = 2_000;
     let noun = if count == 1 { "star" } else { "stars" };
     let prefix = format!("{emoji} **Message spotlight** · **{count} {noun}**\nBy <@{author_id}>");
-    let source_link = format!("\n\n[View original message](<{link}>)");
+    let source_link = format!("\n\n{link}");
     let mut attachment_text = String::new();
     let mut reserved = prefix.encode_utf16().count() + source_link.encode_utf16().count();
     for attachment in attachments.iter().take(4) {
@@ -13184,7 +13187,7 @@ mod tests {
                 "⭐ **Message spotlight** · **{count} {noun}**\nBy <@42>"
             )));
             assert!(mirror.contains("\n\n> Hello\n> World"));
-            assert!(mirror.ends_with(&format!("[View original message](<{link}>)")));
+            assert!(mirror.ends_with(link));
         }
     }
 
@@ -13218,7 +13221,7 @@ mod tests {
         );
         assert!(mirror.encode_utf16().count() <= 2_000);
         assert!(mirror.contains('…'));
-        assert!(mirror.contains("[View original message]"));
+        assert!(mirror.contains("https://discord.com/channels/1/2/3"));
     }
 
     #[test]

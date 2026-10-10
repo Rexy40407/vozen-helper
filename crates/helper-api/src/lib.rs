@@ -2,6 +2,7 @@
 
 #![recursion_limit = "256"]
 
+mod starboard_channel;
 mod ticket_panel;
 
 use anyhow::Result;
@@ -118,6 +119,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/oauth/callback", get(oauth_callback))
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
+        .route("/api/starboard/channel", post(starboard_channel::create))
         .route("/api/providers/youtube/health", get(youtube_health))
         .route(
             "/api/providers/youtube/channels/{channel_id}",
@@ -5302,6 +5304,7 @@ async fn guild_context(
                 "id": id,
                 "name": value.get("name").and_then(serde_json::Value::as_str).unwrap_or("role"),
                 "position": position,
+                "permissions": value.get("permissions").and_then(serde_json::Value::as_str),
                 "managed": managed,
                 "manageable": id != guild.guild_id && !managed && bot_top_role_position.is_some_and(|top| position < top)
             }))
@@ -11985,6 +11988,71 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn starboard_creation_checks_session_origin_and_input_before_discord() {
+        let store = Store::open(":memory:").unwrap();
+        let session = claims("guild-a");
+        let token = sign_session(&session, "test-session-secret-with-at-least-32-bytes");
+        store.save_session(&session).unwrap();
+        for (cookie, origin, body, expected) in [
+            (
+                false,
+                None,
+                r#"{"name":"starboard"}"#,
+                StatusCode::UNAUTHORIZED,
+            ),
+            (true, None, r#"{"name":"starboard"}"#, StatusCode::FORBIDDEN),
+            (
+                true,
+                Some("https://evil.test"),
+                r#"{"name":"starboard"}"#,
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                true,
+                Some("https://vozen.org"),
+                r#"{"name":"../bad"}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                true,
+                Some("https://vozen.org"),
+                r#"{"name":"starboard","guildId":"other"}"#,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                true,
+                Some("https://vozen.org"),
+                r#"{"name":"starboard"}"#,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ] {
+            let mut api_state = state(store.clone());
+            api_state.allowed_origin = Some("https://vozen.org".into());
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/api/starboard/channel")
+                .header(header::CONTENT_TYPE, "application/json");
+            if cookie {
+                request = request.header(header::COOKIE, format!("vh_session={token}"));
+            }
+            if let Some(origin) = origin {
+                request = request.header(header::ORIGIN, origin);
+            }
+            let response = router(api_state)
+                .oneshot(request.body(Body::from(body)).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{cookie} {origin:?} {body}");
+        }
+        assert!(
+            store
+                .get_setting("guild-a", "community.starboard.created_channel")
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn state(store: Store) -> ApiState {

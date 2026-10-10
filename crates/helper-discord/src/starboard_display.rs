@@ -1,8 +1,5 @@
 //! Native Discord attachment delivery. No messages are sent by renderer tests.
-use serenity::all::{
-    ChannelId, Context, CreateActionRow, CreateAttachment, CreateButton, CreateMessage,
-    EditAttachments, EditMessage, Message, MessageId, User,
-};
+use serenity::all::{ChannelId, Context, CreateAttachment, Message, MessageId, User};
 use std::{sync::OnceLock, time::Duration};
 
 struct Visual {
@@ -13,16 +10,7 @@ struct Visual {
 pub(super) struct Content {
     pub caption: String,
     pub fallback: String,
-}
-
-impl Content {
-    fn for_visual(&self, visual: Option<&Visual>) -> &str {
-        if visual.is_some() {
-            &self.caption
-        } else {
-            &self.fallback
-        }
-    }
+    pub footer: String,
 }
 
 fn safe_avatar_url(raw: &str) -> Option<reqwest::Url> {
@@ -79,52 +67,52 @@ async fn avatar(user: &User) -> Option<(String, Vec<u8>)> {
     Some((mime, bytes))
 }
 
-fn components(link: &str) -> Vec<CreateActionRow> {
-    vec![CreateActionRow::Buttons(vec![
-        CreateButton::new_link(link).label("View original message"),
-    ])]
-}
-
 fn attachment(visual: &Visual) -> CreateAttachment {
     CreateAttachment::bytes(visual.png.clone(), "starboard.png").description(&visual.alt)
 }
 
-fn create(
+fn payload(
     content: &Content,
     author: serenity::all::UserId,
-    link: &str,
     visual: Option<&Visual>,
-) -> CreateMessage {
-    let message = CreateMessage::new()
-        .content(content.for_visual(visual))
-        .embeds(vec![])
-        .allowed_mentions(super::starboard_allowed_mentions(author));
+    editing: bool,
+) -> serde_json::Value {
+    use serde_json::json;
+    // Serenity 0.12 builders predate V2. Keep its HTTP rate limiter/multipart
+    // transport, but supply the documented Discord component payload directly.
+    let mut components = vec![
+        json!({"type":10,"content":if visual.is_some() {&content.caption} else {&content.fallback}}),
+    ];
+    let mut attachments = vec![];
     if let Some(visual) = visual {
-        message
-            .add_file(attachment(visual))
-            .components(components(link))
-    } else {
-        message
+        components.push(json!({"type":12,"items":[{"media":{"url":"attachment://starboard.png"},"description":visual.alt}]}));
+        components.push(json!({"type":10,"content":content.footer}));
+        attachments.push(json!({"id":0,"filename":"starboard.png","description":visual.alt}));
     }
+    let mut message = json!({"flags":32768,"components":components,"attachments":attachments,
+        "allowed_mentions":super::starboard_allowed_mentions(author)});
+    if editing {
+        // Required when promoting an existing legacy message to Components V2.
+        message["content"] = serde_json::Value::Null;
+        message["embeds"] = json!([]);
+    }
+    message
 }
 
-fn edit(
+async fn deliver(
+    ctx: &Context,
+    board: ChannelId,
+    existing: Option<MessageId>,
     content: &Content,
     author: serenity::all::UserId,
-    link: &str,
     visual: Option<&Visual>,
-) -> EditMessage {
-    let message = EditMessage::new()
-        .content(content.for_visual(visual))
-        .embeds(vec![])
-        .allowed_mentions(super::starboard_allowed_mentions(author))
-        .attachments(EditAttachments::new());
-    if let Some(visual) = visual {
-        message
-            .new_attachment(attachment(visual))
-            .components(components(link))
+) -> serenity::Result<Message> {
+    let files = visual.map(attachment).into_iter().collect();
+    let packet = payload(content, author, visual, existing.is_some());
+    if let Some(id) = existing {
+        ctx.http.edit_message(board, id, &packet, files).await
     } else {
-        message.embeds(vec![]).components(vec![])
+        ctx.http.send_message(board, files, &packet).await
     }
 }
 
@@ -151,7 +139,7 @@ pub(super) async fn publish(
     existing: Option<MessageId>,
     original: &Message,
     count: i64,
-    link: &str,
+    _link: &str,
     content: &Content,
 ) -> serenity::Result<Message> {
     let author = original
@@ -188,34 +176,20 @@ pub(super) async fn publish(
     .ok()
     .flatten();
     // The card carries the excerpt and alt text; retain the full textual fallback.
-    let result = if let Some(id) = existing {
-        board
-            .edit_message(
-                &ctx.http,
-                id,
-                edit(content, original.author.id, link, visual.as_ref()),
-            )
-            .await
-    } else {
-        board
-            .send_message(
-                &ctx.http,
-                create(content, original.author.id, link, visual.as_ref()),
-            )
-            .await
-    };
+    let result = deliver(
+        ctx,
+        board,
+        existing,
+        content,
+        original.author.id,
+        visual.as_ref(),
+    )
+    .await;
     match result {
         Err(error) if visual.is_some() && definite_rejection(&error) => {
             tracing::warn!("Starboard card rejected; attempting text-only fallback");
-            if let Some(id) = existing {
-                board
-                    .edit_message(&ctx.http, id, edit(content, original.author.id, link, None))
-                    .await
-            } else {
-                board
-                    .send_message(&ctx.http, create(content, original.author.id, link, None))
-                    .await
-            }
+            // V2 flags cannot be removed on edit; fallback must also use V2.
+            deliver(ctx, board, existing, content, original.author.id, None).await
         }
         result => result,
     }
@@ -262,18 +236,29 @@ mod tests {
         let content = Content {
             caption: "compact caption".into(),
             fallback: "full original text".into(),
+            footer: LINK.into(),
         };
-        let create =
-            serde_json::to_value(create(&content, UserId::new(1), LINK, Some(&visual))).unwrap();
-        let edit =
-            serde_json::to_value(edit(&content, UserId::new(1), LINK, Some(&visual))).unwrap();
+        let create = payload(&content, UserId::new(1), Some(&visual), false);
+        let edit = payload(&content, UserId::new(1), Some(&visual), true);
         for packet in [create, edit] {
-            assert_eq!(packet["content"], "compact caption");
-            assert!(packet["embeds"].as_array().unwrap().is_empty());
-            assert_eq!(packet["components"][0]["components"][0]["url"], LINK);
+            assert_eq!(packet["flags"], 32768);
+            assert!(packet["content"].is_null());
+            assert_eq!(packet["components"][0]["content"], "compact caption");
+            assert_eq!(packet["components"][1]["type"], 12);
+            assert_eq!(
+                packet["components"][1]["items"][0]["media"]["url"],
+                "attachment://starboard.png"
+            );
+            assert_eq!(packet["components"][2]["content"], LINK);
+            assert_eq!(packet["components"].as_array().unwrap().len(), 3);
             assert_eq!(packet["attachments"].as_array().unwrap().len(), 1);
             assert_eq!(packet["allowed_mentions"]["users"][0], "1");
             assert_eq!(packet["attachments"][0]["description"], "Rexy: batata");
+            // The pinned Serenity decoder must accept the new top-level types.
+            for component in packet["components"].as_array().unwrap() {
+                serde_json::from_value::<serenity::all::ActionRow>(component.clone())
+                    .expect("V2 component response remains decodable");
+            }
         }
     }
 
@@ -282,10 +267,12 @@ mod tests {
         let content = Content {
             caption: "compact caption".into(),
             fallback: "@everyone safe text".into(),
+            footer: LINK.into(),
         };
-        let packet = serde_json::to_value(edit(&content, UserId::new(1), LINK, None)).unwrap();
-        assert_eq!(packet["content"], "@everyone safe text");
-        for key in ["attachments", "embeds", "components"] {
+        let packet = payload(&content, UserId::new(1), None, true);
+        assert_eq!(packet["components"][0]["content"], "@everyone safe text");
+        assert_eq!(packet["flags"], 32768);
+        for key in ["attachments", "embeds"] {
             assert!(packet[key].as_array().unwrap().is_empty());
         }
         assert!(
@@ -301,10 +288,11 @@ mod tests {
         let content = Content {
             caption: "compact caption".into(),
             fallback: "Full original text and source link".into(),
+            footer: LINK.into(),
         };
-        let packet = serde_json::to_value(create(&content, UserId::new(1), LINK, None)).unwrap();
-        assert_eq!(packet["content"], content.fallback);
-        assert!(packet["embeds"].as_array().unwrap().is_empty());
+        let packet = payload(&content, UserId::new(1), None, false);
+        assert_eq!(packet["components"][0]["content"], content.fallback);
+        assert!(packet.get("embeds").is_none());
         assert!(
             packet["allowed_mentions"]["parse"]
                 .as_array()

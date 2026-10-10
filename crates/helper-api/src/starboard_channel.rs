@@ -1,0 +1,323 @@
+//! Explicit creation only: never changes permissions on an existing user channel.
+use super::*;
+use serde_json::{Value, json};
+
+static CREATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+const RECORD: &str = "community.starboard.created_channel";
+const READ: u64 = (1 << 6) | (1 << 10) | (1 << 16);
+const SEND: u64 = 1 << 11;
+const NO_CHAT: u64 = SEND | (1 << 12) | (1 << 35) | (1 << 36) | (1 << 38);
+const BOT_ALLOW: u64 = READ | SEND | (1 << 14) | (1 << 15);
+const MODERATOR: u64 = 8 | 32 | (1 << 1) | (1 << 2) | (1 << 13) | (1 << 40);
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct CreateRequest {
+    name: String,
+    #[serde(default)]
+    moderator_role_ids: Vec<String>,
+}
+
+fn channel_name(name: &str) -> Option<String> {
+    let name = name.trim().to_ascii_lowercase();
+    (name.len() >= 2
+        && name.len() <= 80
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'))
+    .then_some(name)
+}
+
+fn staff_role(role: &Value, guild: &str) -> bool {
+    role["id"].as_str().is_some_and(|id| id != guild)
+        && !role["managed"].as_bool().unwrap_or(false)
+        && parse_permission_bits(role).is_some_and(|bits| bits & MODERATOR != 0)
+}
+
+fn channel_payload(guild: &str, bot: &str, name: &str, staff: &[String]) -> Value {
+    let mut overwrites = vec![
+        json!({"id":guild,"type":0,"allow":READ.to_string(),"deny":NO_CHAT.to_string()}),
+        json!({"id":bot,"type":1,"allow":BOT_ALLOW.to_string(),"deny":"0"}),
+    ];
+    for role in staff {
+        overwrites.push(json!({"id":role,"type":0,"allow":SEND.to_string(),"deny":"0"}));
+    }
+    json!({"name":name,"type":0,"topic":"Community highlights • Vozen Starboard. Read-only for members; moderators can post.","permission_overwrites":overwrites})
+}
+
+fn matching_permissions(channel: &Value, payload: &Value) -> bool {
+    let Some(actual) = channel["permission_overwrites"].as_array() else {
+        return false;
+    };
+    let Some(expected) = payload["permission_overwrites"].as_array() else {
+        return false;
+    };
+    actual.len() == expected.len()
+        && expected.iter().all(|wanted| {
+            actual.iter().any(|item| {
+                item["id"] == wanted["id"]
+                    && item["type"] == wanted["type"]
+                    && item["allow"] == wanted["allow"]
+                    && item["deny"] == wanted["deny"]
+            })
+        })
+}
+
+pub(super) async fn create(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Json(request): Json<CreateRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    let claims = require_mutation_auth(&state, &headers)?;
+    let name = channel_name(&request.name)
+        .ok_or_else(|| client_error(StatusCode::BAD_REQUEST, "starboard_invalid_channel_name"))?;
+    if request.moderator_role_ids.len() > 20 {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "starboard_too_many_staff_roles",
+        ));
+    }
+    let _guard = CREATE_LOCK
+        .try_lock()
+        .map_err(|_| client_error(StatusCode::CONFLICT, "starboard_creation_busy"))?;
+    if state.discord_token.len() < 20 {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "discord_adapter_unavailable",
+        ));
+    }
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|_| client_error(StatusCode::SERVICE_UNAVAILABLE, "discord_unavailable"))?;
+    let auth = format!("Bot {}", state.discord_token);
+    let snapshot = fetch_discord_guild_snapshot(&claims.guild_id, &state.discord_token).await;
+    if !snapshot.channels_ready || !snapshot.roles_ready || !snapshot.bot_ready {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "discord_context_unavailable",
+        ));
+    }
+    // Revalidate the actor's membership and permissions, not just the OAuth snapshot.
+    let guild = discord_json(&client, &auth, &format!("/guilds/{}", claims.guild_id))
+        .await
+        .map_err(|_| client_error(StatusCode::SERVICE_UNAVAILABLE, "discord_unavailable"))?;
+    if guild["owner_id"].as_str() != Some(&claims.user_id) {
+        let member = discord_json(
+            &client,
+            &auth,
+            &format!("/guilds/{}/members/{}", claims.guild_id, claims.user_id),
+        )
+        .await
+        .map_err(|_| client_error(StatusCode::FORBIDDEN, "guild_not_managed"))?;
+        let roles: Vec<String> = member["roles"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        let bits =
+            effective_bot_permissions(&claims.guild_id, &snapshot.roles, &roles).unwrap_or(0);
+        if bits & 8 == 0 && bits & (32 | 16) != (32 | 16) {
+            return Err(client_error(
+                StatusCode::FORBIDDEN,
+                "starboard_user_manage_channels_required",
+            ));
+        }
+    }
+    let bits = effective_bot_permissions(&claims.guild_id, &snapshot.roles, &snapshot.bot_role_ids)
+        .unwrap_or(0);
+    let required = BOT_ALLOW | 16 | (1 << 28);
+    if bits & 8 == 0 && bits & required != required {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            "starboard_bot_permissions_required",
+        ));
+    }
+    if snapshot.roles.iter().any(|role| {
+        role["id"].as_str() == Some(&claims.guild_id)
+            && parse_permission_bits(role).is_none_or(|bits| bits & 8 != 0)
+    }) {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "starboard_everyone_administrator",
+        ));
+    }
+    let staff: Vec<String> = if request.moderator_role_ids.is_empty() {
+        snapshot
+            .roles
+            .iter()
+            .filter(|role| staff_role(role, &claims.guild_id))
+            .filter_map(|role| role["id"].as_str().map(str::to_owned))
+            .collect()
+    } else {
+        request
+            .moderator_role_ids
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    };
+    if staff.len() > 20
+        || staff.iter().any(|id| {
+            !snapshot
+                .roles
+                .iter()
+                .any(|role| role["id"].as_str() == Some(id) && staff_role(role, &claims.guild_id))
+        })
+    {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "starboard_invalid_staff_role",
+        ));
+    }
+    let bot = snapshot.bot_user_id.as_deref().ok_or_else(|| {
+        client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "discord_context_unavailable",
+        )
+    })?;
+    let payload = channel_payload(&claims.guild_id, bot, &name, &staff);
+    let saved = state
+        .store
+        .get_setting(&claims.guild_id, RECORD)
+        .map_err(|_| client_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error"))?
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    if let Some(saved) = saved
+        && let Some(channel) = snapshot
+            .channels
+            .iter()
+            .find(|channel| channel["id"] == saved["id"])
+    {
+        if channel["name"].as_str() != Some(&name) || !matching_permissions(channel, &payload) {
+            return Err(client_error(
+                StatusCode::CONFLICT,
+                "starboard_existing_channel_changed",
+            ));
+        }
+        return Ok(Json(
+            json!({"guildId":claims.guild_id,"channel":channel,"reused":true}),
+        ));
+    }
+    if snapshot
+        .channels
+        .iter()
+        .any(|channel| channel["name"].as_str() == Some(&name))
+    {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "starboard_channel_name_exists",
+        ));
+    }
+    let response = client
+        .post(format!(
+            "{DISCORD_API_BASE}/guilds/{}/channels",
+            claims.guild_id
+        ))
+        .header(header::AUTHORIZATION, &auth)
+        .header(
+            "X-Audit-Log-Reason",
+            "Vozen%20Starboard%20read-only%20channel",
+        )
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "starboard_creation_uncertain"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        return Err(client_error(
+            if status.as_u16() == 429 {
+                StatusCode::TOO_MANY_REQUESTS
+            } else {
+                StatusCode::BAD_GATEWAY
+            },
+            "discord_channel_create_failed",
+        ));
+    }
+    let channel = response
+        .json::<Value>()
+        .await
+        .map_err(|_| client_error(StatusCode::BAD_GATEWAY, "starboard_creation_uncertain"))?;
+    let id = channel["id"]
+        .as_str()
+        .ok_or_else(|| client_error(StatusCode::BAD_GATEWAY, "starboard_creation_uncertain"))?;
+    if !matching_permissions(&channel, &payload) {
+        return Err(client_error(
+            StatusCode::BAD_GATEWAY,
+            "starboard_channel_permissions_unconfirmed",
+        ));
+    }
+    state
+        .store
+        .set_setting(&claims.guild_id, RECORD, &json!({"id":id}).to_string())
+        .map_err(|_| {
+            client_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "starboard_channel_created_not_recorded",
+            )
+        })?;
+    let _ = state.store.record_activity(
+        &claims.guild_id,
+        "starboard_channel_created",
+        &claims.user_id,
+        Some(id),
+        Some(&claims.user_id),
+        &json!({"channelId":id,"moderatorRoleIds":staff}).to_string(),
+    );
+    Ok(Json(
+        json!({"guildId":claims.guild_id,"channel":channel,"reused":false}),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn starboard_channel_policy_blocks_member_chat_threads_and_allows_bot_and_mod() {
+        let payload = channel_payload("guild", "bot", "starboard", &["mod".into()]);
+        let overwrites = &payload["permission_overwrites"];
+        let members =
+            channel_bot_permissions(READ | SEND | NO_CHAT, "guild", "member", &[], overwrites)
+                .unwrap();
+        assert_eq!(members & NO_CHAT, 0);
+        assert_eq!(members & READ, READ);
+        let moderator =
+            channel_bot_permissions(READ | SEND, "guild", "member", &["mod".into()], overwrites)
+                .unwrap();
+        assert_ne!(moderator & SEND, 0);
+        let bot = channel_bot_permissions(0, "guild", "bot", &[], overwrites).unwrap();
+        assert_eq!(bot & BOT_ALLOW, BOT_ALLOW);
+        assert_eq!(payload["type"], 0);
+    }
+    #[test]
+    fn starboard_staff_rejects_everyone_regular_and_managed_roles() {
+        for role in [
+            json!({"id":"guild","permissions":"8"}),
+            json!({"id":"member","permissions":"2048"}),
+            json!({"id":"bot","managed":true,"permissions":"8"}),
+        ] {
+            assert!(!staff_role(&role, "guild"));
+        }
+        assert!(staff_role(
+            &json!({"id":"mod","permissions":(1_u64 << 13).to_string()}),
+            "guild"
+        ));
+    }
+    #[test]
+    fn starboard_name_and_reuse_do_not_adopt_unprotected_channels() {
+        assert_eq!(channel_name(" Starboard ").as_deref(), Some("starboard"));
+        for name in ["", "a", "star board", "../starboard", "@everyone"] {
+            assert!(channel_name(name).is_none());
+        }
+        let payload = channel_payload("guild", "bot", "starboard", &[]);
+        assert!(matching_permissions(&payload, &payload));
+        assert!(!matching_permissions(
+            &json!({"permission_overwrites":[]}),
+            &payload
+        ));
+        let mut altered = payload.clone();
+        altered["permission_overwrites"][0]["deny"] = json!("0");
+        assert!(!matching_permissions(&altered, &payload));
+    }
+}
